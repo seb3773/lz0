@@ -21,6 +21,14 @@ int lz0dec_arm64(const unsigned char *in, int in_size,
                  unsigned char *out, int out_max);
 #endif
 
+#if defined(__x86_64__) || defined(_M_X64)
+#define lz0dec_fast lz0dec_x86_64
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#define lz0dec_fast lz0dec_arm64
+#else
+#define lz0dec_fast lz0dec_min
+#endif
+
 #ifdef __cplusplus
 }
 #endif

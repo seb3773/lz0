@@ -82,7 +82,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    int decomp_len = lz0dec_min(payload, (int)payload_sz, out, (int)uncomp_sz);
+    int decomp_len = lz0dec_fast(payload, (int)payload_sz, out, (int)uncomp_sz);
     if (decomp_len < 0 || (uint32_t)decomp_len != uncomp_sz) {
         fprintf(stderr, "lz0dec: error: decompression failed (corrupt or truncated stream)\n");
         free(out);
@@ -101,3 +101,4 @@ int main(int argc, char **argv) {
     free(cont);
     return 0;
 }
+
