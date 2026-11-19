@@ -1,0 +1,183 @@
+#define _POSIX_C_SOURCE 200809L
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "lz0.h"
+#include "lz0dec.h"
+
+static double now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1e9 + (double)ts.tv_nsec;
+}
+
+static unsigned char *read_file(const char *path, size_t *sz_out) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    rewind(f);
+    if (sz < 0) { fclose(f); return NULL; }
+    unsigned char *p = (unsigned char *)malloc(sz > 0 ? (size_t)sz : 1);
+    if (!p) { fclose(f); return NULL; }
+    if (sz > 0 && fread(p, 1, (size_t)sz, f) != (size_t)sz) {
+        free(p); fclose(f); return NULL;
+    }
+    fclose(f);
+    *sz_out = (size_t)sz;
+    return p;
+}
+
+static void bench_one(const char *path) {
+    size_t in_sz = 0;
+    unsigned char *in = read_file(path, &in_sz);
+    if (!in || in_sz == 0) return;
+
+    const char *basename = strrchr(path, '/');
+    basename = basename ? basename + 1 : path;
+
+    // Compress with LZ0 standard (-6)
+    lz0_config cfg;
+    lz0_stats stats;
+    lz0_config_level(&cfg, 6);
+    unsigned char *comp = NULL;
+    size_t csz = 0;
+    if (lz0_compress(in, in_sz, &comp, &csz, &cfg, &stats) != 0) {
+        fprintf(stderr, "Compress error on %s\n", path);
+        free(in);
+        return;
+    }
+
+    // Number of iterations based on size
+    int iters;
+#if defined(__aarch64__) || defined(_M_ARM64)
+    // Adjusted iteration counts for QEMU user-mode emulation
+    if (in_sz < 32 * 1024) iters = 200;
+    else if (in_sz < 256 * 1024) iters = 50;
+    else if (in_sz < 1024 * 1024) iters = 15;
+    else iters = 8;
+#else
+    if (in_sz < 32 * 1024) iters = 2000;
+    else if (in_sz < 256 * 1024) iters = 500;
+    else if (in_sz < 1024 * 1024) iters = 150;
+    else iters = 50;
+#endif
+
+    unsigned char *out = (unsigned char *)malloc(in_sz + 32);
+
+    // Warm-up cache
+    for (int i = 0; i < 5; i++) {
+        lz0_decompress_to(comp, (int)csz, out, (int)in_sz);
+#if defined(__x86_64__) || defined(_M_X64)
+        lz0dec_x86_64(comp, (int)csz, out, (int)in_sz);
+#elif defined(__aarch64__) || defined(_M_ARM64)
+        lz0dec_arm64(comp, (int)csz, out, (int)in_sz);
+#endif
+    }
+
+    // Benchmark C: lz0_decompress_to
+    double best_c_ns = 1e18;
+    for (int r = 0; r < 5; r++) {
+        double t0 = now_ns();
+        for (int i = 0; i < iters; i++) {
+            lz0_decompress_to(comp, (int)csz, out, (int)in_sz);
+        }
+        double elapsed = (now_ns() - t0) / iters;
+        if (elapsed < best_c_ns) best_c_ns = elapsed;
+    }
+
+    // Benchmark C min: lz0dec_min
+    double best_min_ns = 1e18;
+    for (int r = 0; r < 5; r++) {
+        double t0 = now_ns();
+        for (int i = 0; i < iters; i++) {
+            lz0dec_min(comp, (int)csz, out, (int)in_sz);
+        }
+        double elapsed = (now_ns() - t0) / iters;
+        if (elapsed < best_min_ns) best_min_ns = elapsed;
+    }
+
+#if defined(__x86_64__) || defined(_M_X64)
+    // Benchmark ASM: lz0dec_x86_64
+    double best_asm_ns = 1e18;
+    for (int r = 0; r < 5; r++) {
+        double t0 = now_ns();
+        for (int i = 0; i < iters; i++) {
+            lz0dec_x86_64(comp, (int)csz, out, (int)in_sz);
+        }
+        double elapsed = (now_ns() - t0) / iters;
+        if (elapsed < best_asm_ns) best_asm_ns = elapsed;
+    }
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    // Benchmark ASM: lz0dec_arm64
+    double best_asm_ns = 1e18;
+    for (int r = 0; r < 5; r++) {
+        double t0 = now_ns();
+        for (int i = 0; i < iters; i++) {
+            lz0dec_arm64(comp, (int)csz, out, (int)in_sz);
+        }
+        double elapsed = (now_ns() - t0) / iters;
+        if (elapsed < best_asm_ns) best_asm_ns = elapsed;
+    }
+#else
+    double best_asm_ns = 0;
+#endif
+
+    double mib = (double)in_sz / (1024.0 * 1024.0);
+    double speed_c = mib / (best_c_ns / 1e9);
+    double speed_min = mib / (best_min_ns / 1e9);
+    double speed_asm = (best_asm_ns > 0) ? mib / (best_asm_ns / 1e9) : 0;
+    double speedup_vs_c = (best_c_ns > 0 && best_asm_ns > 0) ? ((speed_asm / speed_c) - 1.0) * 100.0 : 0;
+    double speedup_vs_min = (best_min_ns > 0 && best_asm_ns > 0) ? ((speed_asm / speed_min) - 1.0) * 100.0 : 0;
+
+    printf("| `%s` (%.1f K) | %.1f Mo/s (%.1f µs) | %.1f Mo/s (%.1f µs) | **%.1f Mo/s** (%.1f µs) | **%+5.1f%%** | **%+5.1f%%** |\n",
+           basename, (double)in_sz / 1024.0,
+           speed_c, best_c_ns / 1e3,
+           speed_min, best_min_ns / 1e3,
+           speed_asm, best_asm_ns / 1e3,
+           speedup_vs_c, speedup_vs_min);
+    fflush(stdout);
+
+    free(out);
+    free(comp);
+    free(in);
+}
+
+int main(int argc, char **argv) {
+#if defined(__aarch64__) || defined(_M_ARM64)
+    printf("# Comparatif Décompression ARM64 (AArch64 sous QEMU) : C vs C min vs ASM fait main\n\n");
+    printf("| Fichier (Taille) | C standard (`lz0_decompress_to`) | C minimal (`lz0dec_min`) | ASM pur (`lz0dec_arm64`) | Diff vs C | Diff vs C min |\n");
+#else
+    printf("# Comparatif Décompression : C vs C min vs ASM x86-64\n\n");
+    printf("| Fichier (Taille) | C standard (`lz0_decompress_to`) | C minimal (`lz0dec_min`) | ASM pur (`lz0dec_x86_64`) | Diff vs C | Diff vs C min |\n");
+#endif
+    printf("|---|---:|---:|---:|---:|---:|\n");
+
+    if (argc > 1) {
+        for (int i = 1; i < argc; i++) bench_one(argv[i]);
+        return 0;
+    }
+
+    const char *files[] = {
+        "bench/corpus/fields.c",
+        "bench/corpus/cp.html",
+        "bench/corpus/alice29.txt",
+        "bench/corpus/plrabn12.txt",
+        "bench/corpus/kennedy.xls",
+        "bench/corpus/dickens_1m.txt",
+        "bench/corpus/bash_x86_64.bin",
+        NULL
+    };
+
+    for (int i = 0; files[i]; i++) {
+        if (access(files[i], R_OK) == 0) {
+            bench_one(files[i]);
+        }
+    }
+    return 0;
+}
+

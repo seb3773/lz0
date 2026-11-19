@@ -1,0 +1,46 @@
+# Private workspace directory
+_work/
+
+# Build artifacts
+bin/
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+
+# Test binaries
+tests/test_vectors
+tests/test_boundary
+tests/test_malformed
+tests/test_fuzz
+tests/*_arm64
+
+# Benchmark binaries
+bench/lz0_*
+bench/count_bench
+bench/scatter_bench
+bench/dump_rep
+bench/debug_a3
+
+# External benchmark dependencies (e.g. upkr)
+bench/external/
+
+# Large downloaded corpus slices (regenerated via bench/fetch_corpus.sh)
+bench/corpus/dickens_*.txt
+bench/corpus/bash_x86_64.bin
+
+# Dynamic analysis, profiling and core dumps
+vgcore.*
+core
+*.dSYM/
+*.gcov
+*.gcda
+*.gcno
+
+# Editor & OS files
+.DS_Store
+*~
+*.swp
+*.swo
+

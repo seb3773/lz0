@@ -1,0 +1,1275 @@
+#include "lz0_internal.h"
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <limits.h>
+
+static inline uint32_t hash3(const unsigned char *p) {
+    return ((uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16)) * 2654435761u >> (32 - LZ0_HASH_BITS);
+}
+
+static inline uint32_t hash2(const unsigned char *p) {
+    return ((uint32_t)p[0] | ((uint32_t)p[1] << 8)) * 2654435761u >> (32 - LZ0_HASH_BITS);
+}
+
+static inline uint32_t hash4(const unsigned char *p) {
+    return ((uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+            ((uint32_t)p[3] << 24)) * 2654435761u >> (32 - LZ0_HASH_BITS);
+}
+
+int lz0_matchlen(const unsigned char *a, const unsigned char *b, int max) {
+    int n = 0;
+#if defined(__GNUC__)
+    while (n + 8 <= max) {
+        uint64_t xa, xb;
+        memcpy(&xa, a + n, 8);
+        memcpy(&xb, b + n, 8);
+        if (xa != xb) {
+            n += (int)(__builtin_ctzll(xa ^ xb) >> 3);
+            return n;
+        }
+        n += 8;
+    }
+#endif
+    while (n < max && a[n] == b[n])
+        n++;
+    return n;
+}
+
+int lz0_force_chain_walk = 0;
+int lz0_chain_prune = 0;
+int lz0_chain_noskip = 0;
+int lz0_skip_thresh = 0;
+int lz0_skip_stride = 0;
+int lz0_hash4_probe = 0;
+int lz0_deep_probe = 0;
+int lz0_sa_win = 0;
+int lz0_sa_lcp = 0;
+int lz0_sa_sample = 1;
+int lz0_sa_hybrid = 0;
+int lz0_sa_thresh = 0;
+int lz0_sa_adapt = 0;
+int lz0_sa_csort_v2 = 1;
+int lz0_sa_csort_smode = 1;
+int lz0_sa_pf_look = 16;
+int lz0_sa_count_mode = 1;
+int lz0_sa_algo = 1;
+double lz0_sa_build_ms = 0;
+
+static double sa_now_ms(void) {
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
+    return (double)__builtin_ia32_rdtsc() / 2.5e6;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+#endif
+}
+
+static void census_ml(lz0_sdp_census *cen, int ml) {
+    if (!cen)
+        return;
+    cen->n_matchlen++;
+    cen->sum_ml += (uint64_t)ml;
+    if ((uint64_t)ml > cen->max_ml)
+        cen->max_ml = (uint64_t)ml;
+    unsigned u = ml > 0 ? (unsigned)ml : 0u;
+    int b = 0;
+    if (u) {
+#ifdef __GNUC__
+        b = 31 - __builtin_clz(u);
+#else
+        while (u > 1u) {
+            u >>= 1;
+            b++;
+        }
+#endif
+        if (b > 31)
+            b = 31;
+    }
+    cen->hist_ml[b]++;
+}
+
+static void sa_counting_sort(uint32_t *sa, uint32_t *out, const int *key, int n, int maxk,
+                             lz0_sdp_census *cen, int smode) {
+    double t0 = cen ? sa_now_ms() : 0;
+    int *cnt = (int *)calloc((size_t)maxk + 1, sizeof(int));
+    double t1 = cen ? sa_now_ms() : 0;
+    if (!cnt)
+        return;
+    if (lz0_sa_count_mode == 1) {
+        const int look = lz0_sa_pf_look;
+        for (int i = 0; i < n; i++) {
+            if (i + look < n)
+                __builtin_prefetch(&key[sa[i + look]], 0, 1);
+            cnt[key[sa[i]]]++;
+        }
+    } else if (lz0_sa_count_mode == 2) {
+        const int look = lz0_sa_pf_look;
+        for (int i = 0; i < n; i++) {
+            if (i + look < n) {
+                __builtin_prefetch(&sa[i + look], 0, 3);
+                __builtin_prefetch(&key[sa[i + look]], 0, 1);
+            }
+            cnt[key[sa[i]]]++;
+        }
+    } else if (lz0_sa_count_mode == 3) {
+        const int look = lz0_sa_pf_look;
+        for (int i = 0; i < n; i++) {
+            if (i + look < n) {
+                uint32_t s = sa[i + look];
+                __builtin_prefetch(&key[s], 0, 1);
+                __builtin_prefetch(&cnt[key[s]], 1, 1);
+            }
+            cnt[key[sa[i]]]++;
+        }
+    } else {
+        for (int i = 0; i < n; i++)
+            cnt[key[sa[i]]]++;
+    }
+    double t2 = cen ? sa_now_ms() : 0;
+    for (int i = 1; i <= maxk; i++)
+        cnt[i] += cnt[i - 1];
+    double t3 = cen ? sa_now_ms() : 0;
+    if (smode == 1) {
+        const int look = lz0_sa_pf_look;
+        for (int i = n - 1; i >= 0; i--) {
+            if (i - look >= 0)
+                __builtin_prefetch(&out[cnt[key[sa[i - look]]] - 1], 1, 1);
+            int k = key[sa[i]];
+            out[--cnt[k]] = sa[i];
+        }
+    } else {
+        for (int i = n - 1; i >= 0; i--) {
+            int k = key[sa[i]];
+            out[--cnt[k]] = sa[i];
+        }
+    }
+    if (cen) {
+        double t4 = sa_now_ms();
+        cen->ms_cs_clear += t1 - t0;
+        cen->ms_cs_count += t2 - t1;
+        cen->ms_cs_prefix += t3 - t2;
+        cen->ms_cs_scatter += t4 - t3;
+    }
+    free(cnt);
+}
+
+static int sa_build_full_impl(lz0_finder *f, int v2) {
+    lz0_sdp_census *cen = lz0_sdp_census_out;
+    int n = (int)f->n;
+    double t0 = sa_now_ms();
+    uint32_t *sa = (uint32_t *)malloc((size_t)n * sizeof(uint32_t));
+    int *rank = (int *)malloc((size_t)n * sizeof(int));
+    uint32_t *tmp = (uint32_t *)malloc((size_t)n * sizeof(uint32_t));
+    int *nr = (int *)malloc((size_t)n * sizeof(int));
+    int *k2 = (int *)malloc((size_t)n * sizeof(int));
+    if (!sa || !rank || !tmp || !nr || !k2) {
+        free(sa);
+        free(rank);
+        free(tmp);
+        free(nr);
+        free(k2);
+        return -1;
+    }
+    for (int i = 0; i < n; i++) {
+        sa[i] = (uint32_t)i;
+        rank[i] = (int)f->in[i] + 1;
+    }
+    int maxk = 256;
+    if (cen)
+        cen->ms_sa_init += sa_now_ms() - t0;
+    uint32_t npass = 0;
+    for (int k = 1; k < n; k <<= 1) {
+        npass++;
+        double ta = sa_now_ms();
+        int use_shift = (v2 && npass > 1);
+        if (!use_shift) {
+            for (int i = 0; i < n; i++)
+                k2[i] = (i + k < n) ? rank[i + k] + 1 : 0;
+            double tb = sa_now_ms();
+            sa_counting_sort(sa, tmp, k2, n, maxk + 1, cen, 0);
+            double tc = sa_now_ms();
+            memcpy(sa, tmp, (size_t)n * sizeof(uint32_t));
+            double td = sa_now_ms();
+            sa_counting_sort(sa, tmp, rank, n, maxk, cen, 0);
+            double te = sa_now_ms();
+            memcpy(sa, tmp, (size_t)n * sizeof(uint32_t));
+            double tf = sa_now_ms();
+            if (cen) {
+                cen->ms_sa_k2 += tb - ta;
+                cen->ms_sa_csort += (tc - tb) + (te - td);
+                cen->ms_sa_copy += (td - tc) + (tf - te);
+                cen->n_sa_csort_n += (uint64_t)n * 2u;
+            }
+        } else {
+            int m = 0;
+            for (int j = 0; j < n; j++) {
+                uint32_t p = sa[j];
+                if (p >= (uint32_t)(n - k))
+                    tmp[m++] = p;
+            }
+            for (int j = 0; j < n; j++) {
+                uint32_t p = sa[j];
+                if (p >= (uint32_t)k)
+                    tmp[m++] = p - (uint32_t)k;
+            }
+            double tb = sa_now_ms();
+            sa_counting_sort(tmp, sa, rank, n, maxk, cen, lz0_sa_csort_smode);
+            double tc = sa_now_ms();
+            if (cen) {
+                cen->ms_sa_k2 += tb - ta;
+                cen->ms_sa_csort += tc - tb;
+                cen->n_sa_csort_n += (uint64_t)n;
+            }
+        }
+        double tf = sa_now_ms();
+        nr[sa[0]] = 1;
+        maxk = 1;
+        for (int i = 1; i < n; i++) {
+            int a = (int)sa[i - 1], b = (int)sa[i];
+            int a2 = (a + k < n) ? rank[a + k] : -1;
+            int b2 = (b + k < n) ? rank[b + k] : -1;
+            if (rank[a] != rank[b] || a2 != b2)
+                maxk++;
+            nr[b] = maxk;
+        }
+        memcpy(rank, nr, (size_t)n * sizeof(int));
+        double tg = sa_now_ms();
+        if (cen)
+            cen->ms_sa_rerank += tg - tf;
+        if (maxk == n)
+            break;
+    }
+    double th = sa_now_ms();
+    uint32_t *rnk = (uint32_t *)malloc((size_t)n * sizeof(uint32_t));
+    if (!rnk) {
+        free(sa);
+        free(rank);
+        free(tmp);
+        free(nr);
+        free(k2);
+        return -1;
+    }
+    for (int i = 0; i < n; i++)
+        rnk[i] = (uint32_t)(rank[i] - 1);
+    f->sa = sa;
+    f->rank = rnk;
+    f->sa_n = (uint32_t)n;
+    free(rank);
+    free(tmp);
+    free(nr);
+    free(k2);
+    if (cen) {
+        cen->ms_sa_final += sa_now_ms() - th;
+        cen->n_sa_passes = npass;
+    }
+    return 0;
+}
+
+static void sais_get_counts(const int *s, int *C, int n, int k) {
+    memset(C, 0, (size_t)k * sizeof(int));
+    for (int i = 0; i < n; i++)
+        C[s[i]]++;
+}
+
+static void sais_get_buckets(const int *C, int *B, int k, int end) {
+    int sum = 0;
+    if (end) {
+        for (int i = 0; i < k; i++) {
+            sum += C[i];
+            B[i] = sum;
+        }
+    } else {
+        for (int i = 0; i < k; i++) {
+            sum += C[i];
+            B[i] = sum - C[i];
+        }
+    }
+}
+
+static void sais_induce(const int *s, int *sa, const unsigned char *t, const int *C, int *B,
+                        int n, int k) {
+    sais_get_buckets(C, B, k, 0);
+    for (int i = 0; i < n; i++) {
+        int j = sa[i] - 1;
+        if (j >= 0 && !t[j])
+            sa[B[s[j]]++] = j;
+    }
+    sais_get_buckets(C, B, k, 1);
+    for (int i = n - 1; i >= 0; i--) {
+        int j = sa[i] - 1;
+        if (j >= 0 && t[j])
+            sa[--B[s[j]]] = j;
+    }
+}
+
+static int sais_lms_diff(const int *s, const unsigned char *t, int a, int b) {
+    for (int d = 0;; d++) {
+        if (s[a + d] != s[b + d] || t[a + d] != t[b + d])
+            return 1;
+        if (d > 0 && t[a + d] && !t[a + d - 1])
+            return 0;
+    }
+}
+
+static void sais_core(const int *s, int *sa, int n, int k) {
+    if (n == 1) {
+        sa[0] = 0;
+        return;
+    }
+    unsigned char *t = (unsigned char *)malloc((size_t)n);
+    int *C = (int *)malloc((size_t)k * sizeof(int));
+    int *B = (int *)malloc((size_t)k * sizeof(int));
+    if (!t || !C || !B) {
+        free(t);
+        free(C);
+        free(B);
+        return;
+    }
+    t[n - 1] = 1;
+    for (int i = n - 2; i >= 0; i--) {
+        if (s[i] < s[i + 1])
+            t[i] = 1;
+        else if (s[i] > s[i + 1])
+            t[i] = 0;
+        else
+            t[i] = t[i + 1];
+    }
+    sais_get_counts(s, C, n, k);
+    memset(sa, 0xff, (size_t)n * sizeof(int));
+    sais_get_buckets(C, B, k, 1);
+    for (int i = n - 1; i >= 1; i--)
+        if (t[i] && !t[i - 1])
+            sa[--B[s[i]]] = i;
+    sais_induce(s, sa, t, C, B, n, k);
+
+    int n1 = 0;
+    for (int i = 0; i < n; i++) {
+        int p = sa[i];
+        if (p > 0 && t[p] && !t[p - 1])
+            sa[n1++] = p;
+    }
+    if (n1 > 0) {
+        for (int i = n1; i < n; i++)
+            sa[i] = -1;
+        int name = 0, prev = -1;
+        for (int i = 0; i < n1; i++) {
+            int pos = sa[i];
+            if (prev < 0 || sais_lms_diff(s, t, pos, prev))
+                name++;
+            sa[n1 + pos / 2] = name - 1;
+            prev = pos;
+        }
+        int *s1 = sa + n - n1;
+        for (int i = n - 1, j = n1 - 1; i >= n1; i--) {
+            if (sa[i] >= 0)
+                s1[j--] = sa[i];
+        }
+        int *sa1 = sa;
+        if (name < n1)
+            sais_core(s1, sa1, n1, name);
+        else {
+            for (int i = 0; i < n1; i++)
+                sa1[s1[i]] = i;
+        }
+        {
+            int j = 0;
+            for (int i = 1; i < n; i++)
+                if (t[i] && !t[i - 1])
+                    s1[j++] = i;
+        }
+        for (int i = 0; i < n1; i++)
+            sa1[i] = s1[sa1[i]];
+        for (int i = n1; i < n; i++)
+            sa[i] = -1;
+        sais_get_buckets(C, B, k, 1);
+        for (int i = n1 - 1; i >= 0; i--) {
+            int p = sa[i];
+            sa[i] = -1;
+            sa[--B[s[p]]] = p;
+        }
+    } else {
+        memset(sa, 0xff, (size_t)n * sizeof(int));
+    }
+    sais_induce(s, sa, t, C, B, n, k);
+    free(t);
+    free(C);
+    free(B);
+}
+
+static int sa_build_sais(lz0_finder *f) {
+    int n = (int)f->n;
+    if (n <= 0)
+        return -1;
+    uint32_t *sa = (uint32_t *)malloc((size_t)n * sizeof(uint32_t));
+    uint32_t *rnk = (uint32_t *)malloc((size_t)n * sizeof(uint32_t));
+    int *s = (int *)malloc(((size_t)n + 1) * sizeof(int));
+    int *isa = (int *)malloc(((size_t)n + 1) * sizeof(int));
+    if (!sa || !rnk || !s || !isa) {
+        free(sa);
+        free(rnk);
+        free(s);
+        free(isa);
+        return -1;
+    }
+    for (int i = 0; i < n; i++)
+        s[i] = (int)f->in[i] + 1;
+    s[n] = 0;
+    sais_core(s, isa, n + 1, 257);
+    int out = 0;
+    for (int i = 0; i < n + 1; i++) {
+        int p = isa[i];
+        if (p < 0 || p > n) {
+            free(sa);
+            free(rnk);
+            free(s);
+            free(isa);
+            return -1;
+        }
+        if (p == n)
+            continue;
+        sa[out] = (uint32_t)p;
+        rnk[p] = (uint32_t)out;
+        out++;
+    }
+    if (out != n) {
+        free(sa);
+        free(rnk);
+        free(s);
+        free(isa);
+        return -1;
+    }
+    f->sa = sa;
+    f->rank = rnk;
+    f->sa_n = (uint32_t)n;
+    free(s);
+    free(isa);
+    return 0;
+}
+
+static int sa_build_full(lz0_finder *f) {
+    if (lz0_sa_algo == 1)
+        return sa_build_sais(f);
+    return sa_build_full_impl(f, lz0_sa_csort_v2);
+}
+
+int lz0_sa_debug_build(const unsigned char *in, size_t n, int v2,
+                       uint32_t **sa_out, uint32_t **rank_out) {
+    lz0_finder f;
+    memset(&f, 0, sizeof(f));
+    f.in = in;
+    f.n = (uint32_t)n;
+    if (sa_build_full_impl(&f, v2) != 0)
+        return -1;
+    *sa_out = f.sa;
+    *rank_out = f.rank;
+    return 0;
+}
+
+int lz0_sa_debug_build_algo(const unsigned char *in, size_t n, int algo,
+                            uint32_t **sa_out, uint32_t **rank_out) {
+    lz0_finder f;
+    memset(&f, 0, sizeof(f));
+    f.in = in;
+    f.n = (uint32_t)n;
+    int rc;
+    if (algo == 1)
+        rc = sa_build_sais(&f);
+    else
+        rc = sa_build_full_impl(&f, lz0_sa_csort_v2);
+    if (rc != 0)
+        return -1;
+    *sa_out = f.sa;
+    *rank_out = f.rank;
+    return 0;
+}
+
+static int sa_build_lcp(lz0_finder *f) {
+    int n = (int)f->n;
+    uint32_t *lcp = (uint32_t *)malloc((size_t)n * sizeof(uint32_t));
+    if (!lcp)
+        return -1;
+    memset(lcp, 0, (size_t)n * sizeof(uint32_t));
+    int k = 0;
+    for (int i = 0; i < n; i++) {
+        uint32_t r = f->rank[i];
+        if (r == 0) {
+            k = 0;
+            continue;
+        }
+        int j = (int)f->sa[r - 1];
+        while (i + k < n && j + k < n && f->in[i + k] == f->in[j + k])
+            k++;
+        lcp[r] = (uint32_t)k;
+        if (k > 0)
+            k--;
+    }
+    f->lcp = lcp;
+    return 0;
+}
+
+static int sa_build_sample(lz0_finder *f, int sample) {
+    int n = (int)f->n;
+    int ns = 0;
+    for (int i = 0; i < n; i++) {
+        if ((int)f->sa[i] % sample == 0)
+            ns++;
+    }
+    uint32_t *ssa = (uint32_t *)malloc((size_t)ns * sizeof(uint32_t));
+    uint32_t *srnk = (uint32_t *)malloc((size_t)n * sizeof(uint32_t));
+    if (!ssa || !srnk) {
+        free(ssa);
+        free(srnk);
+        return -1;
+    }
+    memset(srnk, 0xff, (size_t)n * sizeof(uint32_t));
+    int k = 0;
+    for (int i = 0; i < n; i++) {
+        uint32_t p = f->sa[i];
+        if ((int)p % sample == 0) {
+            ssa[k] = p;
+            srnk[p] = (uint32_t)k;
+            k++;
+        }
+    }
+    free(f->sa);
+    free(f->rank);
+    f->sa = ssa;
+    f->rank = srnk;
+    f->sa_n = (uint32_t)ns;
+    return 0;
+}
+
+static int cheap_ml_a(const unsigned char *in, uint32_t cur, uint32_t pos, int maxl) {
+    if (maxl >= 2 && in[cur + 1] != in[pos + 1])
+        return 1;
+    if (maxl >= 3 && in[cur + 2] != in[pos + 2])
+        return 2;
+    if (maxl <= 3)
+        return maxl;
+    if (in[cur + 3] != in[pos + 3])
+        return 3;
+    return -1;
+}
+
+int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
+                    const lz0_config *cfg) {
+    memset(f, 0, sizeof(*f));
+    f->in = in;
+    f->n = n;
+    f->min_match = cfg->min_match < 2 ? 2 : cfg->min_match;
+    f->max_chain = cfg->max_chain < 1 ? 1 : cfg->max_chain;
+    f->max_candidates = cfg->max_candidates < 1 ? 1 : cfg->max_candidates;
+    f->score_k = cfg->score_k > 0 ? cfg->score_k : 8;
+    f->max_states = cfg->max_states > 0 ? cfg->max_states : 2;
+    f->jump_levels = cfg->jump_levels;
+    if (f->jump_levels < 0)
+        f->jump_levels = 0;
+    if (f->jump_levels > LZ0_JUMP_LEVELS)
+        f->jump_levels = LZ0_JUMP_LEVELS;
+    f->last_insert = 0;
+    f->prev = NULL;
+    f->head = NULL;
+    f->jmp = NULL;
+    f->head3 = NULL;
+    f->head4 = NULL;
+    f->sa = NULL;
+    f->rank = NULL;
+    f->lcp = NULL;
+    f->sa_n = 0;
+    f->sa_win = lz0_sa_win;
+    f->sa_sample = lz0_sa_sample > 0 ? lz0_sa_sample : 1;
+    lz0_sa_build_ms = 0;
+    int need_hash = (lz0_sa_hybrid != 0) || (lz0_sa_win <= 0);
+    int need_sa = (lz0_sa_win > 0);
+    if (need_hash) {
+        f->prev = (uint32_t *)malloc((size_t)n * sizeof(uint32_t));
+        f->head = (uint32_t *)malloc((size_t)LZ0_HASH_SIZE * sizeof(uint32_t));
+        if (lz0_hash4_probe != 0) {
+            f->head4 = (uint32_t *)malloc((size_t)LZ0_HASH_SIZE * sizeof(uint32_t));
+            if (!f->head4) {
+                lz0_finder_free(f);
+                return -1;
+            }
+            memset(f->head4, 0xff, (size_t)LZ0_HASH_SIZE * sizeof(uint32_t));
+        }
+        if (lz0_chain_prune == 4) {
+            f->head3 = (uint32_t *)malloc((size_t)LZ0_HASH_SIZE * sizeof(uint32_t));
+            if (!f->head3) {
+                lz0_finder_free(f);
+                return -1;
+            }
+            memset(f->head3, 0xff, (size_t)LZ0_HASH_SIZE * sizeof(uint32_t));
+        }
+        if (f->jump_levels > 0) {
+            f->jmp = (uint32_t *)malloc((size_t)n * (size_t)f->jump_levels * sizeof(uint32_t));
+            if (!f->jmp) {
+                lz0_finder_free(f);
+                return -1;
+            }
+        }
+        if (!f->prev || !f->head) {
+            lz0_finder_free(f);
+            return -1;
+        }
+        memset(f->head, 0xff, (size_t)LZ0_HASH_SIZE * sizeof(uint32_t));
+    }
+    if (need_sa) {
+        double t0 = sa_now_ms();
+        if (sa_build_full(f) != 0) {
+            lz0_finder_free(f);
+            return -1;
+        }
+        if (lz0_sa_lcp && f->sa_sample <= 1) {
+            if (sa_build_lcp(f) != 0) {
+                lz0_finder_free(f);
+                return -1;
+            }
+        }
+        if (f->sa_sample > 1) {
+            if (sa_build_sample(f, f->sa_sample) != 0) {
+                lz0_finder_free(f);
+                return -1;
+            }
+        }
+        lz0_sa_build_ms = sa_now_ms() - t0;
+        if (lz0_sdp_census_out)
+            lz0_sdp_census_out->ms_sa_build = lz0_sa_build_ms;
+    }
+    return 0;
+}
+
+void lz0_finder_free(lz0_finder *f) {
+    free(f->prev);
+    free(f->head);
+    free(f->head3);
+    free(f->head4);
+    free(f->jmp);
+    free(f->sa);
+    free(f->rank);
+    free(f->lcp);
+    f->prev = NULL;
+    f->head = NULL;
+    f->head3 = NULL;
+    f->head4 = NULL;
+    f->jmp = NULL;
+    f->sa = NULL;
+    f->rank = NULL;
+    f->lcp = NULL;
+}
+
+static inline uint32_t hash_at(lz0_finder *f, uint32_t i) {
+    if ((lz0_chain_prune == 3 || lz0_chain_prune == 4) && i + 3 < f->n)
+        return hash4(f->in + i);
+    if (i + 2 < f->n)
+        return hash3(f->in + i);
+    if (i + 1 < f->n)
+        return hash2(f->in + i);
+    return 0;
+}
+
+void lz0_finder_insert_upto(lz0_finder *f, uint32_t pos) {
+    if (!f->head || !f->prev)
+        return;
+    uint32_t i = f->last_insert;
+    uint32_t n = f->n;
+    if (pos > n)
+        pos = n;
+    for (; i < pos && i + 1 < n; i++) {
+        uint32_t h = hash_at(f, i);
+        uint32_t p = f->head[h];
+        f->prev[i] = p;
+        f->head[h] = i;
+        if (f->head3 && i + 2 < n)
+            f->head3[hash3(f->in + i)] = i;
+        if (f->head4 && i + 3 < n)
+            f->head4[hash4(f->in + i)] = i;
+        if (f->jmp && f->jump_levels > 0) {
+            f->jmp[i] = p;
+            for (int k = 1; k < f->jump_levels; k++) {
+                uint32_t src = f->jmp[(size_t)(k - 1) * n + i];
+                uint32_t nxt = LZ0_CHAIN_NIL;
+                if (src != LZ0_CHAIN_NIL)
+                    nxt = f->jmp[(size_t)(k - 1) * n + src];
+                f->jmp[(size_t)k * n + i] = nxt;
+            }
+        }
+    }
+    f->last_insert = i;
+}
+
+static uint32_t chain_skip(lz0_finder *f, uint32_t cur, int steps, int *taken) {
+    uint32_t n = f->n;
+    int t = 0;
+    int rem = steps;
+    int k = 0;
+    while (rem > 0 && cur != LZ0_CHAIN_NIL) {
+        if ((rem & 1) == 0) {
+            rem >>= 1;
+            k++;
+            continue;
+        }
+        if (k >= f->jump_levels || !f->jmp) {
+            while (t < steps && cur != LZ0_CHAIN_NIL) {
+                cur = f->prev[cur];
+                t++;
+            }
+            break;
+        }
+        uint32_t next = f->jmp[(size_t)k * n + cur];
+        if (next == LZ0_CHAIN_NIL) {
+            int left = steps - t;
+            for (int j = 0; j < left && cur != LZ0_CHAIN_NIL; j++) {
+                cur = f->prev[cur];
+                t++;
+            }
+            break;
+        }
+        cur = next;
+        t += 1 << k;
+        rem >>= 1;
+        k++;
+    }
+    *taken = t;
+    return cur;
+}
+
+static int already_has_offset(const lz0_match *out, int n, uint32_t off) {
+    for (int i = 0; i < n; i++)
+        if (out[i].offset == off)
+            return 1;
+    return 0;
+}
+
+static uint32_t len_class(uint32_t L) {
+#ifdef __GNUC__
+    return L ? (uint32_t)(32 - __builtin_clz(L)) : 0;
+#else
+    uint32_t c = 0;
+    while (L > 1) {
+        L >>= 1;
+        c++;
+    }
+    return c;
+#endif
+}
+
+static int keep_candidate(lz0_match *out, int *n, int max_c, lz0_match m) {
+    if (already_has_offset(out, *n, m.offset)) {
+        for (int i = 0; i < *n; i++) {
+            if (out[i].offset == m.offset && m.length > out[i].length)
+                out[i].length = m.length;
+        }
+        return 1;
+    }
+    if (*n < max_c) {
+        out[(*n)++] = m;
+        return 1;
+    }
+    int same_class = -1;
+    uint32_t mc = len_class(m.length);
+    for (int i = 0; i < *n; i++) {
+        if (len_class(out[i].length) == mc) {
+            same_class = i;
+            break;
+        }
+    }
+    if (same_class >= 0) {
+        if (m.length > out[same_class].length)
+            out[same_class] = m;
+        return 1;
+    }
+    int worst = 0;
+    for (int i = 1; i < *n; i++) {
+        if (out[i].length < out[worst].length)
+            worst = i;
+    }
+    if (m.length > out[worst].length) {
+        out[worst] = m;
+        return 1;
+    }
+    return 0;
+}
+
+static int sa_probe_side(lz0_finder *f, uint32_t pos, uint32_t src, int known,
+                         int minm, int maxl, int *best_len, lz0_match *out, int *nout,
+                         lz0_sdp_census *cen) {
+    const unsigned char *in = f->in;
+    int ml;
+    if (known >= maxl)
+        ml = maxl;
+    else if (known > 0)
+        ml = known + lz0_matchlen(in + pos + known, in + src + known, maxl - known);
+    else
+        ml = lz0_matchlen(in + pos, in + src, maxl);
+    if (cen) {
+        census_ml(cen, ml);
+        cen->n_chain_check++;
+        cen->n_sa_ml++;
+        cen->sum_sa_ml += (uint64_t)ml;
+        if ((uint64_t)ml > cen->max_sa_ml)
+            cen->max_sa_ml = (uint64_t)ml;
+        cen->n_sa_ml_bytes += (uint64_t)(ml > known ? ml - known : 0);
+        if (ml >= minm)
+            cen->n_sa_ml_ok++;
+    }
+    if (ml >= minm) {
+        lz0_match m;
+        m.offset = pos - src;
+        m.length = (uint32_t)ml;
+        if (ml > *best_len)
+            *best_len = ml;
+        if (cen) {
+            int had = already_has_offset(out, *nout, m.offset);
+            int kept = keep_candidate(out, nout, f->max_candidates, m);
+            if (had)
+                cen->n_sa_dup++;
+            else if (kept)
+                cen->n_sa_new_kept++;
+            else
+                cen->n_sa_new_drop++;
+        } else {
+            keep_candidate(out, nout, f->max_candidates, m);
+        }
+    }
+    return ml;
+}
+
+static void sa_probe_neighbors(lz0_finder *f, uint32_t pos, int minm, int maxl,
+                               int *best_len, lz0_match *out, int *nout,
+                               lz0_sdp_census *cen) {
+    if (lz0_sa_win <= 0 || !f->sa || !f->rank)
+        return;
+    uint32_t n = f->n;
+    int win = f->sa_win;
+    uint32_t qpos = pos;
+    if (f->sa_sample > 1) {
+        uint32_t rem = pos % (uint32_t)f->sa_sample;
+        if (rem)
+            qpos = pos - rem;
+    }
+    uint32_t rr = (qpos < n) ? f->rank[qpos] : 0xffffffffu;
+    if (rr == 0xffffffffu || rr >= f->sa_n)
+        return;
+    int r = (int)rr;
+    int ns = (int)f->sa_n;
+    int accL = INT_MAX;
+    int accR = INT_MAX;
+    int use_lcp = (lz0_sa_lcp && f->lcp && f->sa_sample <= 1);
+    int adapt = lz0_sa_adapt;
+    int stop_at = 0;
+    if (cen)
+        cen->n_sa_invoke++;
+    for (int d = 1; d <= win; d++) {
+        int rkL = r - d;
+        int rkR = r + d;
+        if (rkL >= 0) {
+            uint32_t src = f->sa[rkL];
+            if (cen)
+                cen->n_sa_cmp++;
+            if (use_lcp) {
+                int v = (int)f->lcp[rkL + 1];
+                if (v < accL)
+                    accL = v;
+            }
+            if (src < pos) {
+                int known = 0;
+                if (use_lcp) {
+                    known = accL;
+                    if (known < 0)
+                        known = 0;
+                    if (known > maxl)
+                        known = maxl;
+                }
+                sa_probe_side(f, pos, src, known, minm, maxl, best_len, out, nout, cen);
+            } else if (cen)
+                cen->n_sa_src_skip++;
+        }
+        if (rkR < ns) {
+            uint32_t src = f->sa[rkR];
+            if (cen)
+                cen->n_sa_cmp++;
+            if (use_lcp) {
+                int v = (int)f->lcp[rkR];
+                if (v < accR)
+                    accR = v;
+            }
+            if (src < pos) {
+                int known = 0;
+                if (use_lcp) {
+                    known = accR;
+                    if (known < 0)
+                        known = 0;
+                    if (known > maxl)
+                        known = maxl;
+                }
+                sa_probe_side(f, pos, src, known, minm, maxl, best_len, out, nout, cen);
+            } else if (cen)
+                cen->n_sa_src_skip++;
+        }
+        if (adapt) {
+            if (d == 4 && *best_len >= 16) {
+                stop_at = 4;
+                break;
+            }
+            if (d == 8 && *best_len >= 16) {
+                stop_at = 8;
+                break;
+            }
+        }
+    }
+    if (cen) {
+        if (stop_at == 4)
+            cen->n_sa_stop4++;
+        else if (stop_at == 8)
+            cen->n_sa_stop8++;
+        else
+            cen->n_sa_stop16++;
+    }
+}
+
+static void sa_probe_neighbors_timed(lz0_finder *f, uint32_t pos, int minm, int maxl,
+                                     int *best_len, lz0_match *out, int *nout,
+                                     lz0_sdp_census *cen) {
+    double t0 = 0;
+    if (cen)
+        t0 = sa_now_ms();
+    sa_probe_neighbors(f, pos, minm, maxl, best_len, out, nout, cen);
+    if (cen)
+        cen->ms_sa_probe += sa_now_ms() - t0;
+}
+
+int lz0_find_last_len(lz0_finder *f, uint32_t pos, uint32_t last_offset) {
+    lz0_sdp_census *cen = lz0_sdp_census_out;
+    if (cen)
+        cen->n_last_len++;
+    if (pos >= f->n)
+        return 0;
+    int max_left = (int)(f->n - pos);
+    if (max_left < 1)
+        return 0;
+    if (last_offset >= 1 && last_offset <= pos) {
+        int ml = lz0_matchlen(f->in + pos, f->in + pos - last_offset, max_left);
+        census_ml(cen, ml);
+        return ml;
+    }
+    return 0;
+}
+
+int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
+                     lz0_match *out, int *last_len) {
+    int nout = 0;
+    *last_len = 0;
+    lz0_sdp_census *cen = lz0_sdp_census_out;
+    if (cen)
+        cen->n_find++;
+    if (pos >= f->n)
+        return 0;
+
+    const unsigned char *in = f->in;
+    uint32_t n = f->n;
+    int minm = f->min_match;
+    int max_left = (int)(n - pos);
+    if (max_left < 2)
+        return 0;
+
+    if (last_offset >= 1 && last_offset <= pos) {
+        int ml = lz0_matchlen(in + pos, in + pos - last_offset, max_left);
+        *last_len = ml;
+        census_ml(cen, ml);
+    }
+
+    if (pos + (uint32_t)minm > n)
+        return nout;
+
+    int best_len = minm - 1;
+    int maxl = max_left;
+
+    double t_pow0 = 0, t_ch0 = 0;
+    if (cen)
+        t_pow0 = sa_now_ms();
+    if (lz0_sa_win <= 0 || lz0_sa_hybrid)
+    for (uint32_t off = 1; off <= pos; ) {
+        if (cen)
+            cen->n_pow2++;
+        uint32_t src = pos - off;
+        if (in[src] == in[pos]) {
+            int probe = best_len > 0 ? best_len : (minm - 1);
+            if (!(probe > 0 && probe < maxl && in[src + probe] != in[pos + probe])) {
+                int ml = lz0_matchlen(in + pos, in + src, maxl);
+                census_ml(cen, ml);
+                if (cen) {
+                    cen->n_pow2_ml++;
+                    if (ml >= minm)
+                        cen->n_pow2_ok++;
+                }
+                if (ml >= minm) {
+                    lz0_match m;
+                    m.offset = off;
+                    m.length = (uint32_t)ml;
+                    if (ml > best_len)
+                        best_len = ml;
+                    keep_candidate(out, &nout, f->max_candidates, m);
+                }
+            }
+        }
+        if (off > (pos >> 1))
+            break;
+        off <<= 1;
+    }
+    if (cen)
+        cen->ms_hash_pow2 += sa_now_ms() - t_pow0;
+
+    if (lz0_chain_prune == 4 && f->head3 && pos + 2 < n) {
+        uint32_t c3 = f->head3[hash3(in + pos)];
+        if (c3 != LZ0_CHAIN_NIL && c3 < pos) {
+            if (cen)
+                cen->n_chain_visit++;
+            if (in[c3] == in[pos]) {
+                int probe = best_len > 0 ? best_len : (minm - 1);
+                if (!(probe > 0 && probe < maxl && in[c3 + probe] != in[pos + probe])) {
+                    int ml = lz0_matchlen(in + pos, in + c3, maxl);
+                    census_ml(cen, ml);
+                    if (cen)
+                        cen->n_chain_check++;
+                    if (ml >= minm) {
+                        lz0_match m;
+                        m.offset = pos - c3;
+                        m.length = (uint32_t)ml;
+                        if (ml > best_len)
+                            best_len = ml;
+                        keep_candidate(out, &nout, f->max_candidates, m);
+                    }
+                }
+            }
+        }
+    }
+
+    if (lz0_sa_win <= 0 || lz0_sa_hybrid) {
+    if (f->head) {
+    if (cen)
+        t_ch0 = sa_now_ms();
+    uint32_t h = hash_at(f, pos);
+    uint32_t cur = f->head[h];
+    if (cen) {
+        cen->n_hash_comp++;
+        cen->n_head++;
+    }
+    int checks = 0;
+    int gap = 1;
+    int near = 4;
+    int visited = 0;
+    int visit_lim = 1 << 16;
+
+    while (cur != 0xffffffffu && checks < f->max_chain && visited < visit_lim) {
+        if (cur >= pos) {
+            cur = f->prev[cur];
+            visited++;
+            if (cen) {
+                cen->n_chain_visit++;
+                cen->n_prev++;
+            }
+            continue;
+        }
+        visited++;
+        if (cen)
+            cen->n_chain_visit++;
+        if (lz0_chain_prune == 2) {
+            int hit4 = 0;
+            if (maxl >= 4 &&
+                in[cur] == in[pos] &&
+                in[cur + 1] == in[pos + 1] &&
+                in[cur + 2] == in[pos + 2] &&
+                in[cur + 3] == in[pos + 3])
+                hit4 = 1;
+            if (!hit4) {
+                cur = f->prev[cur];
+                continue;
+            }
+        }
+        if (in[cur] == in[pos]) {
+            int probe = best_len > 0 ? best_len : (minm - 1);
+            if (!(probe > 0 && probe < maxl && in[cur + probe] != in[pos + probe])) {
+                int ml;
+                int used_matchlen = 1;
+                if (lz0_chain_prune == 1) {
+                    int cheap = cheap_ml_a(in, cur, pos, maxl);
+                    if (cheap >= 0) {
+                        ml = cheap;
+                        used_matchlen = 0;
+                    } else {
+                        ml = lz0_matchlen(in + pos, in + cur, maxl);
+                    }
+                } else {
+                    ml = lz0_matchlen(in + pos, in + cur, maxl);
+                }
+                if (used_matchlen)
+                    census_ml(cen, ml);
+                if (cen) {
+                    cen->n_chain_check++;
+                    cen->n_chain_ml++;
+                    if (ml >= minm)
+                        cen->n_chain_ok++;
+                }
+                if (ml >= minm) {
+                    lz0_match m;
+                    m.offset = pos - cur;
+                    m.length = (uint32_t)ml;
+                    if (ml > best_len)
+                        best_len = ml;
+                    keep_candidate(out, &nout, f->max_candidates, m);
+                    if (best_len >= 65536 && nout >= 2)
+                        break;
+                }
+            } else if (cen)
+                cen->n_chain_rej_probe++;
+        } else if (cen)
+            cen->n_chain_rej_b0++;
+        checks++;
+        if (lz0_chain_noskip || (lz0_skip_thresh > 0 && best_len < lz0_skip_thresh)) {
+            cur = f->prev[cur];
+            visited++;
+            if (cen) {
+                cen->n_chain_visit++;
+                cen->n_prev++;
+            }
+        } else if (lz0_skip_stride > 0) {
+            int taken = 0;
+            cur = chain_skip(f, cur, lz0_skip_stride, &taken);
+            visited += taken;
+            if (cen) {
+                cen->n_chain_visit += (uint64_t)taken;
+                cen->n_prev += (uint64_t)taken;
+            }
+        } else {
+            int jmpn = (near > 0) ? 1 : gap;
+            if (near > 0)
+                near--;
+            else if (gap < (1 << 20))
+                gap <<= 1;
+            if (lz0_force_chain_walk) {
+                for (int j = 0; j < jmpn; j++) {
+                    if (cur == LZ0_CHAIN_NIL)
+                        break;
+                    cur = f->prev[cur];
+                    visited++;
+                    if (cen) {
+                        cen->n_chain_visit++;
+                        cen->n_prev++;
+                    }
+                }
+            } else {
+                int taken = 0;
+                cur = chain_skip(f, cur, jmpn, &taken);
+                visited += taken;
+                if (cen) {
+                    cen->n_chain_visit += (uint64_t)taken;
+                    cen->n_prev += (uint64_t)taken;
+                }
+            }
+        }
+    }
+    if (cen)
+        cen->ms_hash_chain += sa_now_ms() - t_ch0;
+    }
+    }
+    if (lz0_deep_probe > 0 && f->head) {
+        static const int d1[] = {64};
+        static const int d2[] = {64, 128};
+        static const int d3[] = {32, 64, 128};
+        static const int d4[] = {32, 64, 128, 256};
+        const int *ds = NULL;
+        int nd = 0;
+        if (lz0_deep_probe == 1) {
+            ds = d1;
+            nd = 1;
+        } else if (lz0_deep_probe == 2) {
+            ds = d2;
+            nd = 2;
+        } else if (lz0_deep_probe == 3) {
+            ds = d3;
+            nd = 3;
+        } else if (lz0_deep_probe == 4) {
+            ds = d4;
+            nd = 4;
+        }
+        if (nd > 0) {
+            uint32_t cur = f->head[hash_at(f, pos)];
+            int depth = 0;
+            int next_i = 0;
+            int maxd = ds[nd - 1];
+            while (cur != LZ0_CHAIN_NIL && depth < maxd && next_i < nd) {
+                depth++;
+                if (cen)
+                    cen->n_deep_visit++;
+                if (depth == ds[next_i]) {
+                    if (cur < pos && in[cur] == in[pos]) {
+                        int probe = best_len > 0 ? best_len : (minm - 1);
+                        if (!(probe > 0 && probe < maxl && in[cur + probe] != in[pos + probe])) {
+                            int ml = lz0_matchlen(in + pos, in + cur, maxl);
+                            census_ml(cen, ml);
+                            if (cen)
+                                cen->n_chain_check++;
+                            if (ml >= minm) {
+                                lz0_match m;
+                                m.offset = pos - cur;
+                                m.length = (uint32_t)ml;
+                                if (ml > best_len)
+                                    best_len = ml;
+                                keep_candidate(out, &nout, f->max_candidates, m);
+                            }
+                        }
+                    }
+                    next_i++;
+                }
+                cur = f->prev[cur];
+            }
+        }
+    }
+    if (lz0_hash4_probe != 0 && f->head4 && pos + 3 < n) {
+        int trig = (lz0_hash4_probe == 1) || (best_len >= lz0_hash4_probe);
+        if (trig) {
+            if (cen)
+                cen->n_hash4_probe++;
+            uint32_t c4 = f->head4[hash4(in + pos)];
+            if (c4 != LZ0_CHAIN_NIL && c4 < pos) {
+                if (in[c4] == in[pos]) {
+                    int probe = best_len > 0 ? best_len : (minm - 1);
+                    if (!(probe > 0 && probe < maxl && in[c4 + probe] != in[pos + probe])) {
+                        int ml = lz0_matchlen(in + pos, in + c4, maxl);
+                        census_ml(cen, ml);
+                        if (cen)
+                            cen->n_chain_check++;
+                        if (ml >= minm) {
+                            lz0_match m;
+                            m.offset = pos - c4;
+                            m.length = (uint32_t)ml;
+                            if (ml > best_len)
+                                best_len = ml;
+                            keep_candidate(out, &nout, f->max_candidates, m);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (cen)
+        cen->n_cand_hash += (uint64_t)nout;
+    int do_sa = (lz0_sa_win > 0 && f->sa && f->rank);
+    if (do_sa && lz0_sa_hybrid && lz0_sa_thresh > 0 && best_len >= lz0_sa_thresh)
+        do_sa = 0;
+    if (do_sa)
+        sa_probe_neighbors_timed(f, pos, minm, maxl, &best_len, out, &nout, cen);
+    if (cen) {
+        cen->n_cand += (uint64_t)nout;
+        if (nout >= f->max_candidates)
+            cen->n_pos_full++;
+        for (int i = 0; i < nout; i++) {
+            cen->sum_cand_len += out[i].length;
+            if (out[i].length > cen->max_cand_len)
+                cen->max_cand_len = out[i].length;
+        }
+    }
+    return nout;
+}
