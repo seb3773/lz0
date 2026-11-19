@@ -102,11 +102,22 @@ void lz0_h2c8_apply(void) {
     lz0_sdp_census_out = NULL;
 }
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+static double now_ms(void) {
+    LARGE_INTEGER freq, cnt;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&cnt);
+    return (double)cnt.QuadPart * 1000.0 / (double)freq.QuadPart;
+}
+#else
 static double now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
 }
+#endif
 
 int lz0_compress(const unsigned char *in, size_t in_sz,
                  unsigned char **out, size_t *out_sz,

@@ -3,6 +3,8 @@ _work/
 
 # Build artifacts
 bin/
+dist/
+build/
 *.o
 *.a
 *.so
