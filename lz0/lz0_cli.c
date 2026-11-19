@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "lz0.h"
+#include "lz0dec.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -129,7 +130,7 @@ static int cmd_d(const char *in_path, const char *out_path) {
         free(cont);
         return 1;
     }
-    int d = lz0_decompress_to(pay, (int)psz, out, (int)sz);
+    int d = lz0dec_fast(pay, (int)psz, out, (int)sz);
     if (d < 0 || (uint32_t)d != sz) {
         fprintf(stderr, "lz0: decompress failed\n");
         free(out);

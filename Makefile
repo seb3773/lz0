@@ -11,7 +11,7 @@ LZ0_SRC = lz0/lz0_cost.c lz0/lz0_find.c lz0/lz0_parse.c \
 
 LZ0DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.s lz0/lz0dec_fast_x86_64.s
 
-VERSION ?= 0.1.0
+VERSION ?= 0.2.0
 
 .PHONY: all bench clean test smoke bounds diag lite32 state sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz lz0 lz0dec cli sanitize valgrind bench_all bench_dec bench_dec_arm64 test_arm64 arm64 windows dist dist_linux dist_arm64 dist_windows
 
@@ -138,31 +138,31 @@ bench/lz0_freeze: bench/freeze.c $(LZ0_SRC)
 freeze: bench/lz0_freeze
 	./bench/lz0_freeze
 
-bin/lz0: lz0/lz0_cli.c $(LZ0_SRC)
+bin/lz0: lz0/lz0_cli.c $(LZ0_SRC) $(LZ0DEC_SRC)
 	mkdir -p bin
-	$(CC) $(CFLAGS) -o $@ lz0/lz0_cli.c $(LZ0_SRC)
+	$(CC) $(CFLAGS) -o $@ lz0/lz0_cli.c $(LZ0_SRC) $(LZ0DEC_SRC)
 
-bin/lz0dec: lz0/lz0dec_cli.c lz0/lz0dec_fast_x86_64.s
+bin/lz0dec: lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.s lz0/lz0dec_fast_x86_64.s
 	mkdir -p bin
-	$(CC) $(CFLAGS) -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_fast_x86_64.s
+	$(CC) $(CFLAGS) -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.s lz0/lz0dec_fast_x86_64.s
 
 lz0: bin/lz0 bin/lz0dec
 
 lz0dec: bin/lz0dec
 
-bin/lz0_arm64: lz0/lz0_cli.c $(LZ0_SRC)
+bin/lz0_arm64: lz0/lz0_cli.c $(LZ0_SRC) $(ARM64_DEC_SRC)
 	mkdir -p bin
-	$(ARM64_CC) $(ARM64_CFLAGS) -s -o $@ lz0/lz0_cli.c $(LZ0_SRC)
+	$(ARM64_CC) $(ARM64_CFLAGS) -s -o $@ lz0/lz0_cli.c $(LZ0_SRC) $(ARM64_DEC_SRC)
 
-bin/lz0dec_arm64: lz0/lz0dec_cli.c lz0/lz0dec_fast_arm64.s
+bin/lz0dec_arm64: lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_arm64.s lz0/lz0dec_fast_arm64.s
 	mkdir -p bin
-	$(ARM64_CC) $(ARM64_CFLAGS) -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_fast_arm64.s
+	$(ARM64_CC) $(ARM64_CFLAGS) -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_arm64.s lz0/lz0dec_fast_arm64.s
 
 MINGW_CC = x86_64-w64-mingw32-gcc
 
-bin/lz0.exe: lz0/lz0_cli.c $(LZ0_SRC)
+bin/lz0.exe: lz0/lz0_cli.c $(LZ0_SRC) lz0/lz0dec_min.c
 	mkdir -p bin
-	$(MINGW_CC) $(CFLAGS) -static -s -o $@ lz0/lz0_cli.c $(LZ0_SRC)
+	$(MINGW_CC) $(CFLAGS) -static -s -o $@ lz0/lz0_cli.c $(LZ0_SRC) lz0/lz0dec_min.c
 
 bin/lz0dec.exe: lz0/lz0dec_cli.c lz0/lz0dec_min.c
 	mkdir -p bin
