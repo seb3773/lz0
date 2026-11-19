@@ -50,20 +50,28 @@ static int fuzz_roundtrip(int niter, int maxn) {
 #if defined(__x86_64__) || defined(_M_X64)
         unsigned char *d = (unsigned char *)malloc((size_t)n);
         int dd = lz0dec_x86_64(raw, (int)rsz, d, n);
-        if (da != n || db != n || dc != n || dd != n || memcmp(a, in, (size_t)n) ||
-            memcmp(b, in, (size_t)n) || memcmp(c, in, (size_t)n) || memcmp(d, in, (size_t)n)) {
-            printf("rt %d n=%d decode FAIL lib=%d ref=%d min=%d asm=%d\n", i, n, da, db, dc, dd);
+        unsigned char *df_buf = (unsigned char *)malloc((size_t)n);
+        int df = lz0dec_fast_x86_64(raw, (int)rsz, df_buf, n);
+        if (da != n || db != n || dc != n || dd != n || df != n || memcmp(a, in, (size_t)n) ||
+            memcmp(b, in, (size_t)n) || memcmp(c, in, (size_t)n) || memcmp(d, in, (size_t)n) ||
+            memcmp(df_buf, in, (size_t)n)) {
+            printf("rt %d n=%d decode FAIL lib=%d ref=%d min=%d asm=%d fast=%d\n", i, n, da, db, dc, dd, df);
             fail = 1;
         }
+        free(df_buf);
         free(d);
 #elif defined(__aarch64__) || defined(_M_ARM64)
         unsigned char *d = (unsigned char *)malloc((size_t)n);
         int dd = lz0dec_arm64(raw, (int)rsz, d, n);
-        if (da != n || db != n || dc != n || dd != n || memcmp(a, in, (size_t)n) ||
-            memcmp(b, in, (size_t)n) || memcmp(c, in, (size_t)n) || memcmp(d, in, (size_t)n)) {
-            printf("rt %d n=%d decode FAIL lib=%d ref=%d min=%d arm64=%d\n", i, n, da, db, dc, dd);
+        unsigned char *df_buf = (unsigned char *)malloc((size_t)n);
+        int df = lz0dec_fast_arm64(raw, (int)rsz, df_buf, n);
+        if (da != n || db != n || dc != n || dd != n || df != n || memcmp(a, in, (size_t)n) ||
+            memcmp(b, in, (size_t)n) || memcmp(c, in, (size_t)n) || memcmp(d, in, (size_t)n) ||
+            memcmp(df_buf, in, (size_t)n)) {
+            printf("rt %d n=%d decode FAIL lib=%d ref=%d min=%d arm64=%d fast=%d\n", i, n, da, db, dc, dd, df);
             fail = 1;
         }
+        free(df_buf);
         free(d);
 #else
         if (da != n || db != n || dc != n || memcmp(a, in, (size_t)n) ||
@@ -96,13 +104,15 @@ static int fuzz_garbage(int niter) {
         int dc = lz0dec_min(raw, n, out, 4096);
 #if defined(__x86_64__) || defined(_M_X64)
         int dd = lz0dec_x86_64(raw, n, out, 4096);
-        if ((da > 4096) || (db > 4096) || (dc > 4096) || (dd > 4096)) {
+        int df = lz0dec_fast_x86_64(raw, n, out, 4096);
+        if ((da > 4096) || (db > 4096) || (dc > 4096) || (dd > 4096) || (df > 4096)) {
             printf("garbage overflow i=%d\n", i);
             fail = 1;
         }
 #elif defined(__aarch64__) || defined(_M_ARM64)
         int dd = lz0dec_arm64(raw, n, out, 4096);
-        if ((da > 4096) || (db > 4096) || (dc > 4096) || (dd > 4096)) {
+        int df = lz0dec_fast_arm64(raw, n, out, 4096);
+        if ((da > 4096) || (db > 4096) || (dc > 4096) || (dd > 4096) || (df > 4096)) {
             printf("garbage overflow i=%d\n", i);
             fail = 1;
         }

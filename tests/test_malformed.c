@@ -14,12 +14,14 @@ static int expect_fail(const char *name, const unsigned char *raw, int rsz, int 
     int c = lz0dec_min(raw, rsz, buf, cap);
 #if defined(__x86_64__) || defined(_M_X64)
     int d = lz0dec_x86_64(raw, rsz, buf, cap);
-    int ok = (a < 0 && b < 0 && c < 0 && d < 0);
-    printf("%-20s lib=%d ref=%d min=%d asm=%d %s\n", name, a, b, c, d, ok ? "ok" : "FAIL");
+    int df = lz0dec_fast_x86_64(raw, rsz, buf, cap);
+    int ok = (a < 0 && b < 0 && c < 0 && d < 0 && df < 0);
+    printf("%-20s lib=%d ref=%d min=%d asm=%d fast=%d %s\n", name, a, b, c, d, df, ok ? "ok" : "FAIL");
 #elif defined(__aarch64__) || defined(_M_ARM64)
     int d = lz0dec_arm64(raw, rsz, buf, cap);
-    int ok = (a < 0 && b < 0 && c < 0 && d < 0);
-    printf("%-20s lib=%d ref=%d min=%d arm64=%d %s\n", name, a, b, c, d, ok ? "ok" : "FAIL");
+    int df = lz0dec_fast_arm64(raw, rsz, buf, cap);
+    int ok = (a < 0 && b < 0 && c < 0 && d < 0 && df < 0);
+    printf("%-20s lib=%d ref=%d min=%d arm64=%d fast=%d %s\n", name, a, b, c, d, df, ok ? "ok" : "FAIL");
 #else
     int ok = (a < 0 && b < 0 && c < 0);
     printf("%-20s lib=%d ref=%d min=%d %s\n", name, a, b, c, ok ? "ok" : "FAIL");

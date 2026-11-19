@@ -30,6 +30,9 @@ static int decode_all(const char *name, const unsigned char *in, uint32_t n,
             int dd = lz0dec_x86_64(comp, (int)csz, d, (int)n);
             if (dd != (int)n || memcmp(d, in, n))
                 bad = 1;
+            int df = lz0dec_fast_x86_64(comp, (int)csz, d, (int)n);
+            if (df != (int)n || memcmp(d, in, n))
+                bad = 1;
             free(d);
         }
 #elif defined(__aarch64__) || defined(_M_ARM64)
@@ -39,6 +42,9 @@ static int decode_all(const char *name, const unsigned char *in, uint32_t n,
         else {
             int dd = lz0dec_arm64(comp, (int)csz, d, (int)n);
             if (dd != (int)n || memcmp(d, in, n))
+                bad = 1;
+            int df = lz0dec_fast_arm64(comp, (int)csz, d, (int)n);
+            if (df != (int)n || memcmp(d, in, n))
                 bad = 1;
             free(d);
         }

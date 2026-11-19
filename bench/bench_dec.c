@@ -102,7 +102,7 @@ static void bench_one(const char *path) {
     }
 
 #if defined(__x86_64__) || defined(_M_X64)
-    // Benchmark ASM: lz0dec_x86_64
+    // Benchmark ASM Compact: lz0dec_x86_64
     double best_asm_ns = 1e18;
     for (int r = 0; r < 5; r++) {
         double t0 = now_ns();
@@ -112,8 +112,18 @@ static void bench_one(const char *path) {
         double elapsed = (now_ns() - t0) / iters;
         if (elapsed < best_asm_ns) best_asm_ns = elapsed;
     }
+    // Benchmark ASM Fast: lz0dec_fast_x86_64
+    double best_fast_ns = 1e18;
+    for (int r = 0; r < 5; r++) {
+        double t0 = now_ns();
+        for (int i = 0; i < iters; i++) {
+            lz0dec_fast_x86_64(comp, (int)csz, out, (int)in_sz);
+        }
+        double elapsed = (now_ns() - t0) / iters;
+        if (elapsed < best_fast_ns) best_fast_ns = elapsed;
+    }
 #elif defined(__aarch64__) || defined(_M_ARM64)
-    // Benchmark ASM: lz0dec_arm64
+    // Benchmark ASM Compact: lz0dec_arm64
     double best_asm_ns = 1e18;
     for (int r = 0; r < 5; r++) {
         double t0 = now_ns();
@@ -123,23 +133,35 @@ static void bench_one(const char *path) {
         double elapsed = (now_ns() - t0) / iters;
         if (elapsed < best_asm_ns) best_asm_ns = elapsed;
     }
+    // Benchmark ASM Fast: lz0dec_fast_arm64
+    double best_fast_ns = 1e18;
+    for (int r = 0; r < 5; r++) {
+        double t0 = now_ns();
+        for (int i = 0; i < iters; i++) {
+            lz0dec_fast_arm64(comp, (int)csz, out, (int)in_sz);
+        }
+        double elapsed = (now_ns() - t0) / iters;
+        if (elapsed < best_fast_ns) best_fast_ns = elapsed;
+    }
 #else
     double best_asm_ns = 0;
+    double best_fast_ns = 0;
 #endif
 
     double mib = (double)in_sz / (1024.0 * 1024.0);
     double speed_c = mib / (best_c_ns / 1e9);
     double speed_min = mib / (best_min_ns / 1e9);
     double speed_asm = (best_asm_ns > 0) ? mib / (best_asm_ns / 1e9) : 0;
-    double speedup_vs_c = (best_c_ns > 0 && best_asm_ns > 0) ? ((speed_asm / speed_c) - 1.0) * 100.0 : 0;
-    double speedup_vs_min = (best_min_ns > 0 && best_asm_ns > 0) ? ((speed_asm / speed_min) - 1.0) * 100.0 : 0;
+    double speed_fast = (best_fast_ns > 0) ? mib / (best_fast_ns / 1e9) : 0;
+    double speedup_vs_c = (best_c_ns > 0 && best_fast_ns > 0) ? ((speed_fast / speed_c) - 1.0) * 100.0 : 0;
 
-    printf("| `%s` (%.1f K) | %.1f Mo/s (%.1f µs) | %.1f Mo/s (%.1f µs) | **%.1f Mo/s** (%.1f µs) | **%+5.1f%%** | **%+5.1f%%** |\n",
+    printf("| `%s` (%.1f K) | %.1f Mo/s | %.1f Mo/s | %.1f Mo/s | **%.1f Mo/s** | **%+5.1f%%** |\n",
            basename, (double)in_sz / 1024.0,
-           speed_c, best_c_ns / 1e3,
-           speed_min, best_min_ns / 1e3,
-           speed_asm, best_asm_ns / 1e3,
-           speedup_vs_c, speedup_vs_min);
+           speed_c,
+           speed_min,
+           speed_asm,
+           speed_fast,
+           speedup_vs_c);
     fflush(stdout);
 
     free(out);
@@ -149,11 +171,11 @@ static void bench_one(const char *path) {
 
 int main(int argc, char **argv) {
 #if defined(__aarch64__) || defined(_M_ARM64)
-    printf("# Comparatif Décompression ARM64 (AArch64 sous QEMU) : C vs C min vs ASM fait main\n\n");
-    printf("| Fichier (Taille) | C standard (`lz0_decompress_to`) | C minimal (`lz0dec_min`) | ASM pur (`lz0dec_arm64`) | Diff vs C | Diff vs C min |\n");
+    printf("# Comparatif Décompression ARM64 (AArch64) : C vs C min vs ASM Compact vs ASM FAST\n\n");
+    printf("| Fichier (Taille) | C standard | C min (`lz0dec_min`) | ASM Compact (`lz0dec_arm64`) | ASM FAST (`lz0dec_fast_arm64`) | Speedup FAST vs C |\n");
 #else
-    printf("# Comparatif Décompression : C vs C min vs ASM x86-64\n\n");
-    printf("| Fichier (Taille) | C standard (`lz0_decompress_to`) | C minimal (`lz0dec_min`) | ASM pur (`lz0dec_x86_64`) | Diff vs C | Diff vs C min |\n");
+    printf("# Comparatif Décompression x86-64 : C vs C min vs ASM Compact vs ASM FAST\n\n");
+    printf("| Fichier (Taille) | C standard | C min (`lz0dec_min`) | ASM Compact (`lz0dec_x86_64`) | ASM FAST (`lz0dec_fast_x86_64`) | Speedup FAST vs C |\n");
 #endif
     printf("|---|---:|---:|---:|---:|---:|\n");
 

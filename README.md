@@ -167,18 +167,50 @@ To minimize parsing time without sacrificing optimality, the parser implements *
 
 ## 6. Decoder Implementations
 
-The repository provides five independent, interoperable decoders:
+The repository provides independent, interoperable decoders tailored for different footprint and throughput requirements:
 
+#### C Implementations
 1. **`lz0/lz0_decompress.c` (`lz0_decompress_to`)**:  
    The primary library decoder. Features an optimized bitreader loop and direct copy operations.
 2. **`lz0/lz0dec_ref.c` (`lz0dec_ref`)**:  
-   The normative reference decoder. Co-authoritative with [docs/LZ0_FORMAT.md](docs/LZ0_FORMAT.md); concise and strictly conforming.
+   The normative reference decoder. Co-authoritative with [docs/LZ0_FORMAT.md](docs/LZ0_FORMAT.md); concise, didactic and strictly conforming.
 3. **`lz0/lz0dec_min.c` (`lz0dec_min`)**:  
-   An ultra-compact, standalone single-function implementation (~150 lines of C). Has zero internal function calls, zero includes beyond basic types, and zero heap allocations. Ideal for embedding into bootloaders, ROMs, or kernel drivers.
-4. **`lz0/lz0dec_x86_64.s` (`lz0dec_x86_64`)**:  
-   Hand-crafted x86-64 assembly implementation (~1.3 KiB code size). Delivers **+30% to +40% faster** throughput than the `-O3` C decoder while maintaining strict memory safety and zero heap allocations.
-5. **`lz0/lz0dec_arm64.s` (`lz0dec_arm64`)**:  
-   Hand-crafted 64-bit ARM (AArch64) assembly implementation. Fully verified against all test suites and corpus under QEMU.
+   An ultra-compact, standalone single-function implementation (~40 lines of C99, ~200 bytes of machine code). Zero internal function calls, zero tables in memory, zero includes beyond basic types, and zero heap allocations. Ideal for bootloaders, ROMs, microcontrollers (AVR, STM32, Cortex-M0), and kernel drivers.
+
+#### Compact Assembly Implementations (Footprint & RAM-efficient)
+4. **`lz0/lz0dec_x86_64.s` (`lz0dec_x86_64` / `lz0dec_compact`)**:  
+   Compact hand-crafted x86-64 assembly decoder (~1.3 KiB code size). Zero lookup tables, pure arithmetic bit-unpacking, tail-overlapping 64-bit stores, and zero heap allocations.
+5. **`lz0/lz0dec_arm64.s` (`lz0dec_arm64` / `lz0dec_compact`)**:  
+   Compact hand-crafted 64-bit ARM (AArch64) assembly decoder (~1.3 KiB code size). Pure leaf function, zero lookup tables, and zero heap allocations.
+
+#### High-Throughput Assembly Implementations ("FAST" Engine)
+6. **`lz0/lz0dec_fast_x86_64.s` (`lz0dec_fast_x86_64` / `lz0dec_fast`)**:  
+   Ultra-fast x86-64 assembly decoder (~2.8 KiB code size + 264-byte constant table). Delivers top-tier throughput (up to 800–1200+ MB/s) with a dual FAST/SAFE engine architecture.
+7. **`lz0/lz0dec_fast_arm64.s` (`lz0dec_fast_arm64` / `lz0dec_fast`)**:  
+   Ultra-fast AArch64 assembly decoder (~2.7 KiB code size + 264-byte constant table). Pure leaf (0 stack bytes), NEON vector copies, and branch-free Elias gamma decoding.
+
+### Architecture du Décodeur ASM "FAST" (x86-64 & ARM64)
+
+Le décodeur haute performance introduit plusieurs innovations micro-architecturales avancées :
+
+* **Architecture à deux moteurs (FAST vs SAFE)** :
+  * **Moteur FAST** (actif tant qu'il reste au moins 16 octets en entrée et en sortie) : utilise des transferts vectoriels de 16 octets (SSE2 `movdqu` sur x86, NEON `ldr q`/`str q` sur ARM64).
+  * **Moteur SAFE** (pour les 16 derniers octets et les très rares codes Elias géants) : lecteur de bits à sentinelle (`add r8b, r8b` sur x86, `adds w8, w8, w8` sur ARM plaçant le bit dans le carry et détectant l'épuisement par le zero flag), éliminant le registre compteur de bits et garantissant **zéro dépassement de mémoire**.
+
+* **La "Fenêtre de Segment" (Résolution de la contrainte LZ0)** :
+  * Dans LZ0, les octets bruts (littéraux et octet bas de match) sont entrelacés avec des groupes de bits de contrôle. Un refill classique de 64 bits avalerait des octets de littéraux.
+  * **L'idée clé** : tous les bits de contrôle entre deux lectures d'octets bruts forment un segment continu. Le décodeur charge une fenêtre de 64 bits (\(W = \text{leftover} \mid (\text{bswap}(\text{load64}) \gg k)\)), décode l'intégralité du segment en registres par décalages, et ne commet le pointeur (`in_ptr += q >> 3`) qu'au moment de lire le prochain octet brut.
+  * **Impact** : élimination des tests de refill par bit (qui provoquaient de nombreuses erreurs de prédiction de branchement dans le texte).
+
+* **Décodage Elias Gamma sans branchement (*Branch-Free*)** :
+  * Pour \(n \le 8\) (longueurs \(\le 511\) et distances \(\le 131\ 071\), soit >99 % des cas réels) :
+    * Détection directe de la taille en 1 instruction : `bsr` (x86-64) ou `clz` (ARM64).
+    * Extraction de la charge utile via deux lectures dans une table compacte de 256 octets (`.Lunzip`).
+    * Zéro boucle, zéro pénalité de branchement (*branch misprediction*).
+
+* **Élimination totale des appels de fonction (`call` / `ret`)** :
+  * Sur x86-64, tous les sites d'appels ont été inlinés dans la boucle principale.
+  * Sur ARM64, la fonction est une **feuille pure (*pure leaf*)** : 0 octet alloué sur la pile, utilisation exclusive des registres appelants banalisés (`x0..x17` et `v0`).
 
 ### Safety Contract
 All decoders adhere to strict safety guarantees:
@@ -228,41 +260,47 @@ Comparison on standard corpus files ([Canterbury Corpus](https://corpus.canterbu
 
 | Compressor | Compressed Ratio | Encoding Time (1 MiB) | Decompression Throughput | Decoder Memory / Footprint |
 |---|---:|---:|---:|---|
-| **LZ0 (ASM x86_64)** | **20% – 47%** | **~5.2 s** (`-6`) | **250 – 750 MB/s** | **0 bytes** (1.3 KiB asm, 0 malloc) |
-| **LZ0 (C library)** | **20% – 47%** | **~5.2 s** (`-6`) | **180 – 600 MB/s** | **0 bytes** (portable C, 0 malloc) |
+| **LZ0 (ASM FAST)** | **20% – 47%** | **~5.2 s** (`-6`) | **400 – 1,330 MB/s** | **0 bytes** (2.8 KiB asm + 264 B table, 0 malloc) |
+| **LZ0 (ASM Compact)** | **20% – 47%** | **~5.2 s** (`-6`) | **230 – 760 MB/s** | **0 bytes** (1.3 KiB asm, 0 malloc) |
+| **LZ0 (C library)** | **20% – 47%** | **~5.2 s** (`-6`) | **175 – 600 MB/s** | **0 bytes** (portable C, 0 malloc) |
 | **ZX0** | 19% – 45% | *Minutes to hours* | ~250 MB/s | **0 bytes** (tiny C, 0 malloc) |
 | **UPKR** | 6% – 36% | ~146 s | **2 – 24 MB/s** (10×–100× slower) | Requires rANS entropy tables |
 | **LZ4** | 36% – 67% | < 3 ms | ~2,500 – 3,200 MB/s | Fast hash table |
 
 ---
 
-### 8.3 Decompression Speedup: C vs. Hand-Crafted Assembly
+### 8.3 Decompression Speedup: C vs. Compact ASM vs. FAST ASM
 
 Measured with `make bench_dec` (x86-64 native) and `make bench_dec_arm64` (AArch64 under QEMU):
 
 #### x86-64 Native Decompression
 
-| File | C standard (`lz0_decompress_to`) | C minimal (`lz0dec_min`) | Pure ASM (`lz0dec_x86_64`) | Speedup vs C `-O3` |
-|---|---:|---:|---:|---:|
-| `fields.c` | 305.8 MB/s | 368.1 MB/s | **421.2 MB/s** | **+37.7%** |
-| `cp.html` | 275.5 MB/s | 321.4 MB/s | **346.7 MB/s** | **+25.8%** |
-| `alice29.txt` | 206.9 MB/s | 260.4 MB/s | **280.4 MB/s** | **+35.5%** |
-| `plrabn12.txt` | 179.7 MB/s | 224.9 MB/s | **244.5 MB/s** | **+36.1%** |
-| `kennedy.xls` | 593.0 MB/s | 681.3 MB/s | **749.8 MB/s** | **+26.4%** |
-| `dickens_1m.txt` | 200.1 MB/s | 247.9 MB/s | **281.5 MB/s** | **+40.7%** |
-| `bash_x86_64.bin` | 179.3 MB/s | 225.8 MB/s | **248.6 MB/s** | **+38.6%** |
+| File | C standard (`lz0_decompress_to`) | C minimal (`lz0dec_min`) | ASM Compact (`lz0dec_x86_64`) | ASM FAST (`lz0dec_fast_x86_64`) | Speedup FAST vs C |
+|---|---:|---:|---:|---:|---:|
+| `fields.c` | 304.0 MB/s | 315.3 MB/s | 420.3 MB/s | **1,022.2 MB/s** | **+236.3%** |
+| `cp.html` | 206.0 MB/s | 212.9 MB/s | 287.4 MB/s | **842.2 MB/s** | **+308.9%** |
+| `alice29.txt` | 197.0 MB/s | 206.4 MB/s | 277.1 MB/s | **616.0 MB/s** | **+212.6%** |
+| `plrabn12.txt` | 186.4 MB/s | 195.0 MB/s | 268.0 MB/s | **528.1 MB/s** | **+183.3%** |
+| `kennedy.xls` | 598.1 MB/s | 600.4 MB/s | 757.2 MB/s | **1,330.3 MB/s** | **+122.4%** |
+| `dickens_1m.txt` | 200.2 MB/s | 221.6 MB/s | 291.6 MB/s | **521.4 MB/s** | **+160.5%** |
+| `bash_x86_64.bin` | 175.3 MB/s | 179.3 MB/s | 232.9 MB/s | **397.1 MB/s** | **+126.5%** |
 
 #### AArch64 / ARM64 Decompression (under QEMU)
 
-| File | C standard (`lz0_decompress_to`) | C minimal (`lz0dec_min`) | Pure ASM (`lz0dec_arm64`) | Speedup vs C standard |
-|---|---:|---:|---:|---:|
-| `fields.c` | 46.6 MB/s | 92.1 MB/s | **86.5 MB/s** | **+85.6%** |
-| `cp.html` | 40.5 MB/s | 78.6 MB/s | **73.5 MB/s** | **+81.4%** |
-| `alice29.txt` | 37.8 MB/s | 71.2 MB/s | **68.8 MB/s** | **+82.2%** |
-| `plrabn12.txt` | 36.9 MB/s | 65.5 MB/s | **59.1 MB/s** | **+60.1%** |
-| `kennedy.xls` | 54.8 MB/s | 128.5 MB/s | **125.7 MB/s** | **+129.2%** |
-| `dickens_1m.txt` | 43.0 MB/s | 67.1 MB/s | **68.0 MB/s** | **+58.3%** |
-| `bash_x86_64.bin` | 32.8 MB/s | 62.5 MB/s | **59.6 MB/s** | **+81.7%** |
+| File | C standard (`lz0_decompress_to`) | C minimal (`lz0dec_min`) | ASM Compact (`lz0dec_arm64`) | ASM FAST (`lz0dec_fast_arm64`) | Speedup FAST vs C |
+|---|---:|---:|---:|---:|---:|
+| `fields.c` | 43.4 MB/s | 94.9 MB/s | 74.5 MB/s | **261.0 MB/s** | **+502.0%** |
+| `cp.html` | 35.6 MB/s | 76.2 MB/s | 55.3 MB/s | **214.9 MB/s** | **+503.6%** |
+| `alice29.txt` | 34.9 MB/s | 68.9 MB/s | 41.8 MB/s | **213.0 MB/s** | **+510.5%** |
+| `plrabn12.txt` | 32.3 MB/s | 64.8 MB/s | 34.6 MB/s | **175.6 MB/s** | **+443.7%** |
+| `kennedy.xls` | 53.6 MB/s | 125.8 MB/s | 121.8 MB/s | **377.4 MB/s** | **+604.6%** |
+| `dickens_1m.txt` | 36.4 MB/s | 72.6 MB/s | 35.6 MB/s | **170.1 MB/s** | **+367.6%** |
+| `bash_x86_64.bin` | 30.8 MB/s | 61.3 MB/s | 45.2 MB/s | **143.7 MB/s** | **+366.6%** |
+
+> [!NOTE]
+> **Key Architectural Takeaways on Decompression Speedup**:
+> * **On x86-64**: Decompression throughput doubles or triples on text and source code (jumping from ~200 MB/s to **520 – 840 MB/s**), and reaches **1,330 MB/s (1.33 GB/s)** on structured datasets (`kennedy.xls`). The speedup stems directly from eliminating branch misprediction penalties on Elias gamma bit-sequences via 64-bit window decoding, and deploying 16-byte SSE2 wildcopies.
+> * **On AArch64 / ARM64**: Pure leaf function structure (0 bytes allocated on stack, 0 subroutine calls) combined with branch-free Elias gamma decoding drastically reduces dynamic instruction count, translating to a **5× to 7× speedup** over the standard C decoder.
 
 ---
 

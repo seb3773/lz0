@@ -9,7 +9,7 @@ ZX0_SRC = zx0_compressor/compress.c zx0_compressor/optimize.c \
 LZ0_SRC = lz0/lz0_cost.c lz0/lz0_find.c lz0/lz0_parse.c \
           lz0/lz0_emit.c lz0/lz0_decompress.c lz0/lz0_compress.c
 
-LZ0DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.s
+LZ0DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.s lz0/lz0dec_fast_x86_64.s
 
 VERSION ?= 0.1.0
 
@@ -142,9 +142,9 @@ bin/lz0: lz0/lz0_cli.c $(LZ0_SRC)
 	mkdir -p bin
 	$(CC) $(CFLAGS) -o $@ lz0/lz0_cli.c $(LZ0_SRC)
 
-bin/lz0dec: lz0/lz0dec_cli.c lz0/lz0dec_x86_64.s
+bin/lz0dec: lz0/lz0dec_cli.c lz0/lz0dec_fast_x86_64.s
 	mkdir -p bin
-	$(CC) $(CFLAGS) -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_x86_64.s
+	$(CC) $(CFLAGS) -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_fast_x86_64.s
 
 lz0: bin/lz0 bin/lz0dec
 
@@ -154,9 +154,9 @@ bin/lz0_arm64: lz0/lz0_cli.c $(LZ0_SRC)
 	mkdir -p bin
 	$(ARM64_CC) $(ARM64_CFLAGS) -s -o $@ lz0/lz0_cli.c $(LZ0_SRC)
 
-bin/lz0dec_arm64: lz0/lz0dec_cli.c lz0/lz0dec_arm64.s
+bin/lz0dec_arm64: lz0/lz0dec_cli.c lz0/lz0dec_fast_arm64.s
 	mkdir -p bin
-	$(ARM64_CC) $(ARM64_CFLAGS) -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_arm64.s
+	$(ARM64_CC) $(ARM64_CFLAGS) -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_fast_arm64.s
 
 MINGW_CC = x86_64-w64-mingw32-gcc
 
@@ -250,9 +250,9 @@ test: smoke bounds bench/lz0_bench vectors boundary malformed
 ARM64_CC = aarch64-linux-gnu-gcc
 ARM64_EMU = qemu-aarch64-static
 ARM64_CFLAGS = -O3 -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Izx0_compressor -Izx0_decompressor -Ilz0 -static
-ARM64_DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_arm64.s
+ARM64_DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_arm64.s lz0/lz0dec_fast_arm64.s
 
-test_arm64: lz0/lz0dec_arm64.s
+test_arm64: lz0/lz0dec_arm64.s lz0/lz0dec_fast_arm64.s
 	@echo "=== Cross-compiling and running ARM64 / AArch64 tests under QEMU ==="
 	$(ARM64_CC) $(ARM64_CFLAGS) -o tests/test_vectors_arm64 tests/test_vectors.c $(LZ0_SRC) $(ARM64_DEC_SRC)
 	$(ARM64_EMU) ./tests/test_vectors_arm64
