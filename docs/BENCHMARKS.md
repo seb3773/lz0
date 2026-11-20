@@ -1,6 +1,6 @@
 # LZ0 Benchmarks & Performance Guide
 
-Ce document présente l'évaluation comparative exhaustive du compresseur **LZ0** (version v0.2.0) face aux références de l'état de l'art : **UPKR** (compresseur asymétrique à base de bitstream rANS), **LZ4** (standard industriel de décompression ultra-rapide) et **ZX0** (référence du parsing optimal rétro-compatible).
+Ce document présente l'évaluation comparative exhaustive du compresseur **LZ0** (version v0.3.0) face aux références de l'état de l'art : **UPKR** (compresseur asymétrique à base de bitstream rANS), **LZ4** (standard industriel de décompression ultra-rapide) et **ZX0** (référence du parsing optimal rétro-compatible).
 
 Toutes les décompressions LZ0 présentées ci-dessous ont été vérifiées **100 % bit-exactes** avec les décodeurs de référence et haute performance (`lz0dec_fast`, `lz0dec_compact`, `lz0dec_min`, `lz0dec_ref`).
 
