@@ -154,7 +154,7 @@ size_t lz0_ram_dp(uint32_t n) {
 size_t lz0_ram_sdp(uint32_t n, int k) {
     if (k < 1)
         k = 4;
-    if (k > 16)
-        k = 16;
+    if (k > 32)
+        k = 32;
     return (size_t)(n + 1) * (size_t)k * 24u + (size_t)(n + 1);
 }

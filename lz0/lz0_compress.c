@@ -128,6 +128,12 @@ int lz0_compress(const unsigned char *in, size_t in_sz,
     if (!cfg) {
         lz0_config_default(&local, LZ0_PARSE_LAZY);
         cfg = &local;
+    } else {
+        local = *cfg;
+        cfg = &local;
+    }
+    if (local.max_states >= 16 && in_sz <= 65536) {
+        local.max_states = 32;
     }
     lz0_stats dummy;
     if (!stats)
@@ -184,21 +190,13 @@ int lz0_compress(const unsigned char *in, size_t in_sz,
     rc = lz0_emit(in, (uint32_t)in_sz, &tl, out, out_sz, &acct);
     double t3 = now_ms();
 
+    uint32_t lo = LZ0_INITIAL_OFFSET;
     for (uint32_t i = 0; i < tl.n; i++) {
         if (!tl.t[i].offset)
             stats->n_literals++;
         else {
-            int is_last = 0;
-            if (i == 0)
-                is_last = (tl.t[i].offset == LZ0_INITIAL_OFFSET);
-            else {
-                uint32_t lo = LZ0_INITIAL_OFFSET;
-                for (uint32_t j = 0; j < i; j++) {
-                    if (tl.t[j].offset)
-                        lo = tl.t[j].offset;
-                }
-                is_last = (tl.t[i].offset == lo);
-            }
+            int is_last = (tl.t[i].offset == lo);
+            lo = tl.t[i].offset;
             if (is_last)
                 stats->n_last++;
             else

@@ -13,12 +13,24 @@ LZ0DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.s lz0/lz0dec_fa
 
 VERSION ?= 0.2.0
 
-.PHONY: all bench clean test smoke bounds diag lite32 state sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz lz0 lz0dec cli sanitize valgrind bench_all bench_dec bench_dec_arm64 test_arm64 arm64 windows dist dist_linux dist_arm64 dist_windows
+.PHONY: all bench clean test smoke bounds diag lite32 state sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz lz0 lz0dec cli sanitize valgrind bench_all bench_ratio bench_dec bench_dec_arm64 bench_blobs test_arm64 arm64 windows dist dist_linux dist_arm64 dist_windows
 
 all: bench/lz0_bench bench/lz0_smoke bench/lz0_bounds bench/lz0_diag_rep bench/lz0_lite32 bench/lz0_diag_state bench/lz0_sdp32 bench/lz0_scale bench/lz0_prof bench/lz0_cmpfind bench/lz0_jumpsweep bench/lz0_pruneab bench/lz0_bits bench/lz0_final
 
+bench/lz0_bench_ratio: bench/bench_ratio.c $(ZX0_SRC) $(LZ0_SRC) $(LZ0DEC_SRC)
+	$(CC) $(CFLAGS) -o $@ bench/bench_ratio.c $(ZX0_SRC) $(LZ0_SRC) $(LZ0DEC_SRC) -lm
+
+bench_ratio: bench/lz0_bench_ratio
+	./bench/lz0_bench_ratio
+
 bench/lz0_bench: bench/bench.c $(ZX0_SRC) $(LZ0_SRC)
 	$(CC) $(CFLAGS) -o $@ bench/bench.c $(ZX0_SRC) $(LZ0_SRC)
+
+bench/lz0_bench_blobs: bench/bench_blobs.c $(LZ0_SRC) $(LZ0DEC_SRC) bench/external/upkr/c_unpacker/unpack.c
+	$(CC) $(CFLAGS) -o $@ bench/bench_blobs.c $(LZ0_SRC) $(LZ0DEC_SRC) bench/external/upkr/c_unpacker/unpack.c -lm
+
+bench_blobs: bench/lz0_bench_blobs
+	./bench/lz0_bench_blobs
 
 bench/lz0_bench_all: bench/bench_all.c $(ZX0_SRC) $(LZ0_SRC) $(LZ0DEC_SRC)
 	$(CC) $(CFLAGS) -o $@ bench/bench_all.c $(ZX0_SRC) $(LZ0_SRC) $(LZ0DEC_SRC) -llz4

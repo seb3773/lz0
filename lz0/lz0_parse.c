@@ -1626,8 +1626,8 @@ static int lz0_parse_sdp_k2(lz0_finder *f, lz0_toklist *tl) {
 int lz0_parse_sdp(lz0_finder *f, lz0_toklist *tl) {
     uint32_t n = f->n;
     int K = f->max_states > 0 ? f->max_states : 2;
-    if (K > 16)
-        K = 16;
+    if (K > 32)
+        K = 32;
     if (K == 2)
         return lz0_parse_sdp_k2(f, tl);
     lz0_sdp_census *cen = lz0_sdp_census_out;

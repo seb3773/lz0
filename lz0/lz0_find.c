@@ -49,6 +49,7 @@ int lz0_sa_sample = 1;
 int lz0_sa_hybrid = 0;
 int lz0_sa_thresh = 0;
 int lz0_sa_adapt = 0;
+int lz0_sa_multiscale = 0;
 int lz0_sa_csort_v2 = 1;
 int lz0_sa_csort_smode = 1;
 int lz0_sa_pf_look = 16;
@@ -553,6 +554,96 @@ static int cheap_ml_a(const unsigned char *in, uint32_t cur, uint32_t pos, int m
     return -1;
 }
 
+/* Levier 1: Stride and periodic pattern auto-detection (single window) */
+static int lz0_detect_strides_win(const unsigned char *win, uint32_t win_sz,
+                                  uint32_t *strides, int n_existing, int max_strides) {
+    if (win_sz < 64 || n_existing >= max_strides)
+        return n_existing;
+    uint32_t M = win_sz < 8192 ? win_sz : 8192;
+
+    size_t base_matches = 0, base_total = 0;
+    static const int primes[] = {19, 23, 29, 31};
+    for (int k = 0; k < 4; k++) {
+        int p = primes[k];
+        if (p < (int)M) {
+            for (uint32_t i = (uint32_t)p; i < M; i += 4) {
+                if (win[i] == win[i - p])
+                    base_matches++;
+                base_total++;
+            }
+        }
+    }
+    double baseline = base_total ? (double)base_matches / (double)base_total : 0.05;
+    double thresh = baseline * 2.5;
+    if (thresh < 0.18)
+        thresh = 0.18;
+
+    int n_out = n_existing;
+    uint32_t max_p = (M / 2 < 1024) ? (M / 2) : 1024;
+
+    typedef struct {
+        uint32_t p;
+        double rate;
+    } cand_p_t;
+    cand_p_t cands[64];
+    int n_cands = 0;
+
+    for (uint32_t p = 2; p <= max_p; p++) {
+        size_t matches = 0, total = 0;
+        for (uint32_t i = p; i < M; i += 2) {
+            if (win[i] == win[i - p])
+                matches++;
+            total++;
+        }
+        double rate = total ? (double)matches / (double)total : 0;
+        if (rate >= thresh && n_cands < 64) {
+            cands[n_cands].p = p;
+            cands[n_cands].rate = rate;
+            n_cands++;
+        }
+    }
+
+    for (int i = 0; i < n_cands && n_out < max_strides; i++) {
+        uint32_t p = cands[i].p;
+        int exists = 0;
+        for (int k = 0; k < n_out; k++) {
+            if (p == strides[k] || (strides[k] > 0 && p % strides[k] == 0)) {
+                exists = 1;
+                break;
+            }
+        }
+        if (!exists) {
+            strides[n_out++] = p;
+        }
+    }
+    return n_out;
+}
+
+int lz0_legacy_single_window_scan = 0;
+
+/* Multi-window stride scanning across the entire buffer */
+static int lz0_detect_strides(const unsigned char *in, uint32_t n, uint32_t *strides, int max_strides) {
+    if (n < 64 || max_strides <= 0)
+        return 0;
+    int n_out = 0;
+    /* Window 0 at the start */
+    n_out = lz0_detect_strides_win(in, n, strides, 0, max_strides);
+
+    if (lz0_legacy_single_window_scan)
+        return n_out;
+
+    /* For buffers > 32 KB (e.g. multi-resource blobs), sample additional windows */
+    if (n > 32768 && n_out < max_strides) {
+        uint32_t step = n / 4;
+        if (step < 32768)
+            step = 32768;
+        for (uint32_t off = step; off < n && n_out < max_strides; off += step) {
+            n_out = lz0_detect_strides_win(in + off, n - off, strides, n_out, max_strides);
+        }
+    }
+    return n_out;
+}
+
 int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
                     const lz0_config *cfg) {
     memset(f, 0, sizeof(*f));
@@ -636,6 +727,10 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
         lz0_sa_build_ms = sa_now_ms() - t0;
         if (lz0_sdp_census_out)
             lz0_sdp_census_out->ms_sa_build = lz0_sa_build_ms;
+    }
+    f->num_strides = 0;
+    if (cfg->max_candidates >= 32) {
+        f->num_strides = lz0_detect_strides(in, n, f->strides, lz0_legacy_single_window_scan ? 4 : 8);
     }
     return 0;
 }
@@ -742,20 +837,43 @@ static int already_has_offset(const lz0_match *out, int n, uint32_t off) {
     return 0;
 }
 
-static uint32_t len_class(uint32_t L) {
+static inline int match_score(lz0_match m) {
+    int L = (int)m.length;
+    uint32_t off = m.offset;
+    if (L < 2 || off == 0)
+        return -1000;
+    int msb = ((off - 1) >> 8) + 1;
 #ifdef __GNUC__
-    return L ? (uint32_t)(32 - __builtin_clz(L)) : 0;
+    int msb_elias = (msb <= 1) ? 1 : ((32 - __builtin_clz((unsigned)msb)) << 1) - 1;
+    int len_cost = (L <= 8) ? 3 : (3 + ((32 - __builtin_clz((unsigned)(L - 7))) << 1) - 1);
 #else
-    uint32_t c = 0;
-    while (L > 1) {
-        L >>= 1;
-        c++;
-    }
-    return c;
+    int msb_elias = (msb <= 1) ? 1 : 7;
+    int len_cost = (L <= 8) ? 3 : 7;
 #endif
+    int cost = 10 + msb_elias + len_cost;
+    int savings = (L << 3) - cost;
+    if (off <= 256)
+        savings += 4;
+    if ((off & 3) == 0)
+        savings += 2;
+    if ((off & 7) == 0)
+        savings += 2;
+    return savings;
+}
+
+int lz0_len2_max_off = 0;
+
+static inline int is_valid_candidate(uint32_t len, uint32_t off) {
+    if (len < 2 || off == 0)
+        return 0;
+    if (len == 2 && lz0_len2_max_off > 0 && off > (uint32_t)lz0_len2_max_off)
+        return 0;
+    return 1;
 }
 
 static int keep_candidate(lz0_match *out, int *n, int max_c, lz0_match m) {
+    if (!is_valid_candidate(m.length, m.offset))
+        return 0;
     if (already_has_offset(out, *n, m.offset)) {
         for (int i = 0; i < *n; i++) {
             if (out[i].offset == m.offset && m.length > out[i].length)
@@ -767,25 +885,17 @@ static int keep_candidate(lz0_match *out, int *n, int max_c, lz0_match m) {
         out[(*n)++] = m;
         return 1;
     }
-    int same_class = -1;
-    uint32_t mc = len_class(m.length);
-    for (int i = 0; i < *n; i++) {
-        if (len_class(out[i].length) == mc) {
-            same_class = i;
-            break;
+    int m_score = match_score(m);
+    int worst = 0;
+    int worst_score = match_score(out[0]);
+    for (int i = 1; i < *n; i++) {
+        int s = match_score(out[i]);
+        if (s < worst_score || (s == worst_score && out[i].length < out[worst].length)) {
+            worst = i;
+            worst_score = s;
         }
     }
-    if (same_class >= 0) {
-        if (m.length > out[same_class].length)
-            out[same_class] = m;
-        return 1;
-    }
-    int worst = 0;
-    for (int i = 1; i < *n; i++) {
-        if (out[i].length < out[worst].length)
-            worst = i;
-    }
-    if (m.length > out[worst].length) {
+    if (m_score > worst_score) {
         out[worst] = m;
         return 1;
     }
@@ -861,7 +971,14 @@ static void sa_probe_neighbors(lz0_finder *f, uint32_t pos, int minm, int maxl,
     int stop_at = 0;
     if (cen)
         cen->n_sa_invoke++;
-    for (int d = 1; d <= win; d++) {
+    int d = 1;
+    int max_d = win;
+    if (lz0_sa_multiscale == 1 && max_d < 512)
+        max_d = 512;
+    if (lz0_sa_multiscale == 2 && max_d < 1024)
+        max_d = 1024;
+
+    while (d <= max_d) {
         int rkL = r - d;
         int rkR = r + d;
         if (rkL >= 0) {
@@ -918,6 +1035,31 @@ static void sa_probe_neighbors(lz0_finder *f, uint32_t pos, int minm, int maxl,
                 break;
             }
         }
+        if (lz0_sa_multiscale == 0) {
+            d++;
+        } else if (lz0_sa_multiscale == 1) {
+            if (d < 32)
+                d++;
+            else if (d < 64)
+                d += 8;
+            else if (d < 128)
+                d += 16;
+            else if (d < 256)
+                d += 32;
+            else
+                d += 64;
+        } else {
+            if (d < 48)
+                d++;
+            else if (d < 128)
+                d += 8;
+            else if (d < 256)
+                d += 16;
+            else if (d < 512)
+                d += 32;
+            else
+                d += 64;
+        }
     }
     if (cen) {
         if (stop_at == 4)
@@ -950,6 +1092,13 @@ int lz0_find_last_len(lz0_finder *f, uint32_t pos, uint32_t last_offset) {
     if (max_left < 1)
         return 0;
     if (last_offset >= 1 && last_offset <= pos) {
+        if (last_offset == 1 && pos < f->rle_end) {
+            int ml = (int)(f->rle_end - pos);
+            if (ml > max_left)
+                ml = max_left;
+            census_ml(cen, ml);
+            return ml;
+        }
         int ml = lz0_matchlen(f->in + pos, f->in + pos - last_offset, max_left);
         census_ml(cen, ml);
         return ml;
@@ -974,17 +1123,44 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
     if (max_left < 2)
         return 0;
 
+    int maxl = max_left;
+
+    /* Levier 5: RLE / Run-length fast path for repeated bytes */
+    int rlen = 0;
+    if (pos < f->rle_end) {
+        rlen = (int)(f->rle_end - pos);
+    } else if (pos > 0 && in[pos] == in[pos - 1]) {
+        rlen = lz0_matchlen(in + pos, in + pos - 1, maxl);
+        if (rlen >= 16)
+            f->rle_end = pos + (uint32_t)rlen;
+    }
+
     if (last_offset >= 1 && last_offset <= pos) {
-        int ml = lz0_matchlen(in + pos, in + pos - last_offset, max_left);
-        *last_len = ml;
-        census_ml(cen, ml);
+        if (last_offset == 1 && pos < f->rle_end) {
+            int ml = (int)(f->rle_end - pos);
+            if (ml > max_left)
+                ml = max_left;
+            *last_len = ml;
+            census_ml(cen, ml);
+        } else {
+            int ml = lz0_matchlen(in + pos, in + pos - last_offset, max_left);
+            *last_len = ml;
+            census_ml(cen, ml);
+        }
+    }
+
+    if (rlen >= 16) {
+        lz0_match m;
+        m.offset = 1;
+        m.length = (uint32_t)rlen;
+        keep_candidate(out, &nout, f->max_candidates, m);
+        return nout;
     }
 
     if (pos + (uint32_t)minm > n)
         return nout;
 
     int best_len = minm - 1;
-    int maxl = max_left;
 
     double t_pow0 = 0, t_ch0 = 0;
     if (cen)
@@ -1020,6 +1196,72 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
     }
     if (cen)
         cen->ms_hash_pow2 += sa_now_ms() - t_pow0;
+
+    /* Levier 2: 4-byte and 8-byte aligned small offset probes for executable binaries */
+    if (f->max_candidates >= 32) {
+        static const uint16_t bin_offsets[] = {
+            4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64,
+            72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176,
+            184, 192, 200, 208, 216, 224, 232, 240, 248, 256
+        };
+        for (int b = 0; b < 40; b++) {
+            uint32_t off = (uint32_t)bin_offsets[b];
+            if (off > pos)
+                break;
+            uint32_t src = pos - off;
+            if (in[src] == in[pos]) {
+                int probe = best_len > 0 ? best_len : (minm - 1);
+                if (!(probe > 0 && probe < maxl && in[src + probe] != in[pos + probe])) {
+                    int ml = lz0_matchlen(in + pos, in + src, maxl);
+                    census_ml(cen, ml);
+                    if (ml >= minm) {
+                        lz0_match m;
+                        m.offset = off;
+                        m.length = (uint32_t)ml;
+                        if (ml > best_len)
+                            best_len = ml;
+                        keep_candidate(out, &nout, f->max_candidates, m);
+                    }
+                }
+            }
+        }
+    }
+
+    /* Levier 1: Periodic stride match probing */
+    for (int s = 0; s < f->num_strides; s++) {
+        uint32_t stride = f->strides[s];
+        if (stride < 2)
+            continue;
+        uint32_t off = stride;
+        int step_mult = 1;
+        while (off <= pos) {
+            uint32_t src = pos - off;
+            if (in[src] == in[pos]) {
+                int probe = best_len > 0 ? best_len : (minm - 1);
+                if (!(probe > 0 && probe < maxl && in[src + probe] != in[pos + probe])) {
+                    int ml = lz0_matchlen(in + pos, in + src, maxl);
+                    census_ml(cen, ml);
+                    if (ml >= minm) {
+                        lz0_match m;
+                        m.offset = off;
+                        m.length = (uint32_t)ml;
+                        if (ml > best_len)
+                            best_len = ml;
+                        keep_candidate(out, &nout, f->max_candidates, m);
+                    }
+                }
+            }
+            if (step_mult < 8) {
+                step_mult++;
+                off = (uint32_t)step_mult * stride;
+            } else if (step_mult < 1024) {
+                step_mult *= 2;
+                off = (uint32_t)step_mult * stride;
+            } else {
+                break;
+            }
+        }
+    }
 
     if (lz0_chain_prune == 4 && f->head3 && pos + 2 < n) {
         uint32_t c3 = f->head3[hash3(in + pos)];

@@ -31,6 +31,9 @@ bench/external/
 # Large downloaded corpus slices (regenerated via bench/fetch_corpus.sh)
 bench/corpus/dickens_*.txt
 bench/corpus/bash_x86_64.bin
+bench/blobs/
+__pycache__/
+*.pyc
 
 # Dynamic analysis, profiling and core dumps
 vgcore.*

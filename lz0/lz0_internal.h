@@ -36,6 +36,9 @@ typedef struct {
     int max_states;
     int jump_levels;
     uint32_t last_insert;
+    uint32_t rle_end;
+    int num_strides;
+    uint32_t strides[8];
 } lz0_finder;
 
 typedef struct {
@@ -94,6 +97,8 @@ extern int lz0_sa_pf_look;
 extern int lz0_sa_count_mode;
 extern int lz0_sa_algo;
 extern int lz0_sdp_fine_matches;
+extern int lz0_len2_max_off;
+extern int lz0_sa_multiscale;
 extern double lz0_sa_build_ms;
 
 int lz0_sa_debug_build(const unsigned char *in, size_t n, int v2,
@@ -247,6 +252,7 @@ typedef struct {
 } lz0_stream_census;
 
 extern lz0_stream_census *lz0_stream_census_out;
+extern int lz0_legacy_single_window_scan;
 
 int lz0_emit(const unsigned char *in, uint32_t n, const lz0_toklist *tl,
              unsigned char **out, size_t *out_sz, lz0_bitacct *acct);
