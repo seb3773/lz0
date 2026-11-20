@@ -69,9 +69,10 @@ void lz0_config_level(lz0_config *cfg, int level) {
         cfg->max_candidates = 48;
         cfg->parser = LZ0_PARSE_SDP;
         cfg->score_k = 8;
-        cfg->max_states = 16;
+        cfg->max_states = 32;
         cfg->jump_levels = 0;
         lz0_sa_win = 128;
+        lz0_sa_multiscale = 1;
         lz0_sa_adapt = 0;
         lz0_sdp_fine_matches = 1;
         lz0_deep_probe = 4;
@@ -92,6 +93,7 @@ void lz0_h2c8_apply(void) {
     lz0_sa_hybrid = 1;
     lz0_sa_thresh = 0;
     lz0_sa_adapt = 1;
+    lz0_sa_multiscale = 0;
     lz0_sa_csort_v2 = 1;
     lz0_sa_csort_smode = 1;
     lz0_sa_pf_look = 16;

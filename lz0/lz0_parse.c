@@ -128,6 +128,8 @@ static void best_match_at(lz0_finder *f, uint32_t i, uint32_t last_off, int allo
         if (off == last_off)
             continue;
         int start = 2;
+        if (start == 2 && lz0_len2_max_off > 0 && off > (uint32_t)lz0_len2_max_off)
+            start = 3;
         while (start <= L) {
             int end = lz0_next_plateau_new(start, L);
             int c = lz0_cost_new((int)off, end);
@@ -259,6 +261,8 @@ static void options_at(lz0_finder *f, uint32_t i, uint32_t last_off, int allow_l
         if (L < 2 || off == 0 || off == last_off)
             continue;
         int start = 2;
+        if (start == 2 && lz0_len2_max_off > 0 && off > (uint32_t)lz0_len2_max_off)
+            start = 3;
         while (start <= L) {
             int end = lz0_next_plateau_new(start, L);
             int c = lz0_cost_new((int)off, end);
@@ -464,6 +468,8 @@ static int lite_match_edges(lz0_finder *f, uint32_t pos, uint32_t last_off, int 
             if (L < 2 || off == 0 || off == last_off)
                 continue;
             int start = 2;
+            if (start == 2 && lz0_len2_max_off > 0 && off > (uint32_t)lz0_len2_max_off)
+                start = 3;
             while (start <= L) {
                 int end = lz0_next_plateau_new(start, L);
                 lite_edge e;
@@ -858,6 +864,8 @@ static void h2_best_plateau_last(int L, uint32_t last_off, int k, fbr_t *out) {
 static void h2_best_plateau_new(int L, uint32_t off, int k, fbr_t *out) {
     out->kind = -1;
     int start = 2;
+    if (start == 2 && lz0_len2_max_off > 0 && off > (uint32_t)lz0_len2_max_off)
+        start = 3;
     while (start <= L) {
         int end = lz0_next_plateau_new(start, L);
         int c = lz0_cost_new((int)off, end);
@@ -1103,6 +1111,8 @@ int lz0_parse_dp(lz0_finder *f, lz0_toklist *tl) {
                     if (L < 2 || off == 0 || off == am[i].last_off)
                         continue;
                     int st = 2;
+                    if (st == 2 && lz0_len2_max_off > 0 && off > (uint32_t)lz0_len2_max_off)
+                        st = 3;
                     while (st <= L) {
                         int end = lz0_next_plateau_new(st, L);
                         int c = am[i].bits + lz0_cost_new((int)off, end);
@@ -1144,6 +1154,8 @@ int lz0_parse_dp(lz0_finder *f, lz0_toklist *tl) {
                 if (L < 2 || off == 0 || off == al[i].last_off)
                     continue;
                 int st = 2;
+                if (st == 2 && lz0_len2_max_off > 0 && off > (uint32_t)lz0_len2_max_off)
+                    st = 3;
                 while (st <= L) {
                     int end = lz0_next_plateau_new(st, L);
                     int c = al[i].bits + lz0_cost_new((int)off, end);
@@ -1393,6 +1405,8 @@ static void sdp_emit_new2(sdp_st *st, uint8_t *ns, uint32_t i, int L, uint32_t o
         return;
     }
     int start = 2;
+    if (start == 2 && lz0_len2_max_off > 0 && off > (uint32_t)lz0_len2_max_off)
+        start = 3;
     while (start <= L) {
         int end = lz0_next_plateau_new(start, L);
         sdp_relax2(st + (size_t)(i + (uint32_t)end) * 2u, &ns[i + (uint32_t)end], off, 0,
@@ -1437,6 +1451,8 @@ static void sdp_emit_new(sdp_st *st, uint8_t *ns, int K, uint32_t i, int L,
     if (lz0_sdp_fine_matches) {
         int max_fine = L < 8 ? L : 8;
         for (int l = 2; l <= max_fine; l++) {
+            if (l == 2 && lz0_len2_max_off > 0 && off > (uint32_t)lz0_len2_max_off)
+                continue;
             sdp_relax(st + (size_t)(i + (uint32_t)l) * (size_t)K, &ns[i + (uint32_t)l], K,
                       off, 0, cost + lz0_cost_new((int)off, l), i, slot, (uint32_t)l, off,
                       cen);
@@ -1452,6 +1468,8 @@ static void sdp_emit_new(sdp_st *st, uint8_t *ns, int K, uint32_t i, int L,
         return;
     }
     int start = 2;
+    if (start == 2 && lz0_len2_max_off > 0 && off > (uint32_t)lz0_len2_max_off)
+        start = 3;
     while (start <= L) {
         int end = lz0_next_plateau_new(start, L);
         sdp_relax(st + (size_t)(i + (uint32_t)end) * (size_t)K, &ns[i + (uint32_t)end], K,
@@ -1628,6 +1646,11 @@ int lz0_parse_sdp(lz0_finder *f, lz0_toklist *tl) {
     int K = f->max_states > 0 ? f->max_states : 2;
     if (K > 32)
         K = 32;
+    /* Adaptive K according to file size in Ultra: K=32 for <= 512KB, K=16 for <= 2MB, K=8 for > 2MB */
+    if (K > 16 && n > 512 * 1024)
+        K = 16;
+    if (K > 8 && n > 2048 * 1024)
+        K = 8;
     if (K == 2)
         return lz0_parse_sdp_k2(f, tl);
     lz0_sdp_census *cen = lz0_sdp_census_out;

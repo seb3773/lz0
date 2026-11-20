@@ -581,6 +581,64 @@ static int lz0_detect_strides_win(const unsigned char *win, uint32_t win_sz,
     int n_out = n_existing;
     uint32_t max_p = (M / 2 < 1024) ? (M / 2) : 1024;
 
+    /* Check for MP3 CBR frame strides (e.g. 576, 417, 418, 626, 1044) */
+    static const uint16_t mp3_candidates[] = {
+        384, 417, 418, 576, 626, 627, 835, 836, 1044, 1045
+    };
+    uint32_t best_mp3_stride = 0;
+    int best_mp3_matches = 0;
+    for (int m = 0; m < 10; m++) {
+        uint32_t p = (uint32_t)mp3_candidates[m];
+        if (p + 4 < M) {
+            int sync_matches = 0;
+            for (uint32_t i = p; i + 4 <= M; i++) {
+                if (win[i] == 0xFF && (win[i + 1] & 0xE0) == 0xE0 &&
+                    memcmp(win + i, win + i - p, 4) == 0 &&
+                    ((win[i + 1] >> 3) & 3) != 1 && ((win[i + 1] >> 1) & 3) == 1 &&
+                    ((win[i + 2] >> 4) & 15) != 0 && ((win[i + 2] >> 4) & 15) != 15 &&
+                    ((win[i + 2] >> 2) & 3) != 3) {
+                    sync_matches++;
+                }
+            }
+            if (sync_matches > best_mp3_matches && sync_matches >= 3) {
+                best_mp3_matches = sync_matches;
+                best_mp3_stride = p;
+            }
+        }
+    }
+    if (best_mp3_stride > 0 && n_out < max_strides) {
+        int exists = 0;
+        for (int k = 0; k < n_out; k++) {
+            if (strides[k] == best_mp3_stride) { exists = 1; break; }
+        }
+        if (!exists) {
+            strides[n_out++] = best_mp3_stride;
+        }
+    }
+
+    /* Check for Ogg container page strides (OggS) */
+    uint32_t last_oggs = 0;
+    int oggs_count = 0;
+    uint32_t oggs_stride = 0;
+    for (uint32_t i = 0; i + 4 <= M; i++) {
+        if (win[i] == 'O' && win[i + 1] == 'g' && win[i + 2] == 'g' && win[i + 3] == 'S') {
+            if (oggs_count > 0 && oggs_stride == 0) {
+                oggs_stride = i - last_oggs;
+            }
+            last_oggs = i;
+            oggs_count++;
+        }
+    }
+    if (oggs_stride >= 64 && oggs_stride <= 16384 && n_out < max_strides) {
+        int exists = 0;
+        for (int k = 0; k < n_out; k++) {
+            if (strides[k] == oggs_stride) { exists = 1; break; }
+        }
+        if (!exists) {
+            strides[n_out++] = oggs_stride;
+        }
+    }
+
     typedef struct {
         uint32_t p;
         double rate;
@@ -590,7 +648,8 @@ static int lz0_detect_strides_win(const unsigned char *win, uint32_t win_sz,
 
     for (uint32_t p = 2; p <= max_p; p++) {
         size_t matches = 0, total = 0;
-        for (uint32_t i = p; i < M; i += 2) {
+        int step = (p <= 32) ? 1 : 2;
+        for (uint32_t i = p; i < M; i += (uint32_t)step) {
             if (win[i] == win[i - p])
                 matches++;
             total++;
@@ -603,11 +662,23 @@ static int lz0_detect_strides_win(const unsigned char *win, uint32_t win_sz,
         }
     }
 
+    /* Sort candidates by correlation rate descending to prioritize dominant stride */
+    for (int i = 0; i < n_cands - 1; i++) {
+        for (int j = i + 1; j < n_cands; j++) {
+            if (cands[j].rate > cands[i].rate) {
+                cand_p_t tmp = cands[i];
+                cands[i] = cands[j];
+                cands[j] = tmp;
+            }
+        }
+    }
+
     for (int i = 0; i < n_cands && n_out < max_strides; i++) {
         uint32_t p = cands[i].p;
         int exists = 0;
         for (int k = 0; k < n_out; k++) {
-            if (p == strides[k] || (strides[k] > 0 && p % strides[k] == 0)) {
+            uint32_t s = strides[k];
+            if (s > 0 && (p == s || p % s == 0 || s % p == 0)) {
                 exists = 1;
                 break;
             }
@@ -729,7 +800,7 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
             lz0_sdp_census_out->ms_sa_build = lz0_sa_build_ms;
     }
     f->num_strides = 0;
-    if (cfg->max_candidates >= 32) {
+    if (cfg->max_candidates >= 16) {
         f->num_strides = lz0_detect_strides(in, n, f->strides, lz0_legacy_single_window_scan ? 4 : 8);
     }
     return 0;
@@ -861,7 +932,7 @@ static inline int match_score(lz0_match m) {
     return savings;
 }
 
-int lz0_len2_max_off = 0;
+int lz0_len2_max_off = 32;
 
 static inline int is_valid_candidate(uint32_t len, uint32_t off) {
     if (len < 2 || off == 0)
@@ -1038,12 +1109,8 @@ static void sa_probe_neighbors(lz0_finder *f, uint32_t pos, int minm, int maxl,
         if (lz0_sa_multiscale == 0) {
             d++;
         } else if (lz0_sa_multiscale == 1) {
-            if (d < 32)
+            if (d < 128)
                 d++;
-            else if (d < 64)
-                d += 8;
-            else if (d < 128)
-                d += 16;
             else if (d < 256)
                 d += 32;
             else

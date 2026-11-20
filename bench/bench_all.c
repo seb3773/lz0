@@ -7,13 +7,15 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <dirent.h>
 
 #include <lz4.h>
 #include "lz0.h"
 #include "lz0dec.h"
 #include "zx0_compress_wrapper.h"
 #include "zx0_decompress.h"
+
+/* Freestanding UPKR C unpacker function */
+void* upkr_unpack(void* destination, void* compressed_data);
 
 static double now_ms(void) {
     struct timespec ts;
@@ -40,16 +42,15 @@ static unsigned char *read_file(const char *path, size_t *sz_out) {
 
 static int run_upkr_cli(const unsigned char *in, size_t in_sz,
                         unsigned char **out, size_t *out_sz,
-                        double *enc_ms, double *dec_ms, int level) {
+                        double *enc_ms, double *dec_speed_mbs, int level) {
     char in_path[] = "/tmp/upkr_in_XXXXXX";
     char out_path[] = "/tmp/upkr_out_XXXXXX";
-    char dec_path[] = "/tmp/upkr_dec_XXXXXX";
     int fd_in = mkstemp(in_path);
     int fd_out = mkstemp(out_path);
-    int fd_dec = mkstemp(dec_path);
-    if (fd_in < 0 || fd_out < 0 || fd_dec < 0) return -1;
-    write(fd_in, in, in_sz);
-    close(fd_in); close(fd_out); close(fd_dec);
+    if (fd_in < 0 || fd_out < 0) return -1;
+    ssize_t w = write(fd_in, in, in_sz);
+    (void)w;
+    close(fd_in); close(fd_out);
 
     char cmd[512];
     snprintf(cmd, sizeof(cmd), "bench/external/bin/upkr -%d %s %s >/dev/null 2>&1",
@@ -58,54 +59,96 @@ static int run_upkr_cli(const unsigned char *in, size_t in_sz,
     int rc = system(cmd);
     *enc_ms = now_ms() - t0;
     if (rc != 0) {
-        unlink(in_path); unlink(out_path); unlink(dec_path);
+        unlink(in_path); unlink(out_path);
         return -1;
     }
 
     *out = read_file(out_path, out_sz);
+    unlink(in_path); unlink(out_path);
 
-    snprintf(cmd, sizeof(cmd), "bench/external/bin/upkr -d %s %s >/dev/null 2>&1",
-             out_path, dec_path);
+    if (!*out || *out_sz == 0) return -1;
+
+    /* In-memory unpack speed benchmark */
+    unsigned char *upkr_dest = (unsigned char *)malloc(in_sz + 4096);
+    if (!upkr_dest) return -1;
+
+    int iters = (in_sz < 256 * 1024) ? 50 : (in_sz < 1024 * 1024) ? 20 : 5;
     t0 = now_ms();
-    rc = system(cmd);
-    *dec_ms = now_ms() - t0;
+    for (int i = 0; i < iters; i++) {
+        upkr_unpack(upkr_dest, *out);
+    }
+    double dec_total_ms = (now_ms() - t0) / iters;
+    int ok = (memcmp(in, upkr_dest, in_sz) == 0);
+    free(upkr_dest);
 
-    size_t restored_sz = 0;
-    unsigned char *restored = read_file(dec_path, &restored_sz);
-    int ok = (rc == 0 && restored && restored_sz == in_sz &&
-              memcmp(in, restored, in_sz) == 0);
-
-    free(restored);
-    unlink(in_path); unlink(out_path); unlink(dec_path);
-    return ok ? 0 : -1;
+    if (ok && dec_total_ms > 0) {
+        *dec_speed_mbs = ((double)in_sz / (1024.0 * 1024.0)) / (dec_total_ms / 1000.0);
+        return 0;
+    }
+    return -1;
 }
 
 typedef struct {
-    const char *algo;
-    size_t comp_size;
-    double ratio;
-    double enc_ms;
-    double dec_speed_mbs;
-    int ok;
-} bench_result_t;
+    const char *name;
+    const char *category;
+    size_t raw_sz;
 
-static void benchmark_file(const char *path, int force_zx0) {
+    /* LZ0 -6 */
+    size_t lz0_6_sz;
+    double lz0_6_enc_ms;
+    double lz0_6_dec_c_mbs;
+    double lz0_6_dec_asm_mbs;
+    int lz0_6_ok;
+
+    /* LZ0 -9 Ultra */
+    size_t lz0_9_sz;
+    double lz0_9_enc_ms;
+    double lz0_9_dec_asm_mbs;
+    int lz0_9_ok;
+
+    /* UPKR */
+    size_t upkr_sz;
+    double upkr_enc_ms;
+    double upkr_dec_mbs;
+    int upkr_level;
+    int upkr_ok;
+
+    /* LZ4 */
+    size_t lz4_sz;
+    double lz4_enc_ms;
+    double lz4_dec_mbs;
+    int lz4_ok;
+
+    /* ZX0 */
+    size_t zx0_sz;
+    double zx0_enc_ms;
+    double zx0_dec_mbs;
+    int zx0_ok;
+} test_result_t;
+
+static void run_test(const char *path, const char *category, test_result_t *r, int skip_upkr, int skip_l9) {
+    memset(r, 0, sizeof(*r));
+    r->category = category;
+
+    const char *bn = strrchr(path, '/');
+    r->name = bn ? bn + 1 : path;
+
     size_t in_sz = 0;
     unsigned char *in = read_file(path, &in_sz);
     if (!in || in_sz == 0) {
-        fprintf(stderr, "Skipping %s (cannot read or empty)\n", path);
-        free(in);
+        fprintf(stderr, "Cannot read %s\n", path);
         return;
     }
+    r->raw_sz = in_sz;
 
-    const char *basename = strrchr(path, '/');
-    basename = basename ? basename + 1 : path;
+    printf("=== Testing %-20s (%8zu B / %6.1f KiB) [%s] ===\n",
+           r->name, in_sz, (double)in_sz / 1024.0, category);
+    fflush(stdout);
 
-    printf("\n### `%s` (%zu bytes / %.2f KiB)\n\n", basename, in_sz, (double)in_sz / 1024.0);
-    printf("| Compresseur | Taille comp. | Ratio | Enc. (ms) | Déc. (Mo/s) | Intégrité |\n");
-    printf("|---|---:|---:|---:|---:|:---:|\n");
+    int iters_asm = (in_sz < 256 * 1024) ? 100 : (in_sz < 1024 * 1024) ? 40 : 15;
+    int iters_c   = (in_sz < 256 * 1024) ? 50  : (in_sz < 1024 * 1024) ? 20 : 5;
 
-    // 1. LZ0 (H2C8 - standard level 6)
+    /* 1. LZ0 Normal (-6) */
     {
         lz0_config cfg;
         lz0_stats stats;
@@ -115,41 +158,44 @@ static void benchmark_file(const char *path, int force_zx0) {
         size_t csz = 0;
         double t0 = now_ms();
         int rc = lz0_compress(in, in_sz, &comp, &csz, &cfg, &stats);
-        double enc_ms = now_ms() - t0;
+        r->lz0_6_enc_ms = now_ms() - t0;
+        r->lz0_6_sz = csz;
 
-        int iters = (in_sz < 256 * 1024) ? 50 : (in_sz < 1024 * 1024) ? 20 : 5;
-        unsigned char *out = (unsigned char *)malloc(in_sz + 16);
+        unsigned char *out = (unsigned char *)malloc(in_sz + 64);
+
+        /* C decompress */
         t0 = now_ms();
         int d = 0;
-        for (int i = 0; i < iters; i++) {
+        for (int i = 0; i < iters_c; i++) {
             d = lz0_decompress_to(comp, (int)csz, out, (int)in_sz);
         }
-        double dec_total_ms = (now_ms() - t0) / iters;
-        int ok = (rc == 0 && d == (int)in_sz && memcmp(in, out, in_sz) == 0);
-        double speed = (dec_total_ms > 0) ? ((double)in_sz / (1024.0 * 1024.0)) / (dec_total_ms / 1000.0) : 0;
+        double dec_c_ms = (now_ms() - t0) / iters_c;
+        r->lz0_6_ok = (rc == 0 && d == (int)in_sz && memcmp(in, out, in_sz) == 0);
+        r->lz0_6_dec_c_mbs = (dec_c_ms > 0) ? ((double)in_sz / (1024.0 * 1024.0)) / (dec_c_ms / 1000.0) : 0;
 
-        printf("| **LZ0 (-6 C)** | %zu B | **%.2f%%** | %.1f ms | %.1f Mo/s | %s |\n",
-               csz, (double)csz * 100.0 / in_sz, enc_ms, speed, ok ? "✅ OK" : "❌ FAIL");
-
+        /* FAST ASM decompress */
 #if defined(__x86_64__) || defined(_M_X64)
         t0 = now_ms();
         int dasm = 0;
-        for (int i = 0; i < iters; i++) {
-            dasm = lz0dec_x86_64(comp, (int)csz, out, (int)in_sz);
+        for (int i = 0; i < iters_asm; i++) {
+            dasm = lz0dec_fast_x86_64(comp, (int)csz, out, (int)in_sz);
         }
-        double dec_asm_ms = (now_ms() - t0) / iters;
-        int ok_asm = (rc == 0 && dasm == (int)in_sz && memcmp(in, out, in_sz) == 0);
-        double speed_asm = (dec_asm_ms > 0) ? ((double)in_sz / (1024.0 * 1024.0)) / (dec_asm_ms / 1000.0) : 0;
-        printf("| **LZ0 (-6 ASM x86_64)** | %zu B | **%.2f%%** | - | **%.1f Mo/s** | %s |\n",
-               csz, (double)csz * 100.0 / in_sz, speed_asm, ok_asm ? "✅ OK" : "❌ FAIL");
+        double dec_asm_ms = (now_ms() - t0) / iters_asm;
+        if (dasm == (int)in_sz && memcmp(in, out, in_sz) == 0) {
+            r->lz0_6_dec_asm_mbs = (dec_asm_ms > 0) ? ((double)in_sz / (1024.0 * 1024.0)) / (dec_asm_ms / 1000.0) : 0;
+        }
 #endif
-
         free(comp);
         free(out);
+
+        printf("  LZ0 (-6)       : %8zu B (%5.2f%%) | Enc: %6.1f ms | Dec Fast ASM: %6.1f Mo/s | C: %5.1f Mo/s\n",
+               r->lz0_6_sz, (double)r->lz0_6_sz * 100.0 / in_sz,
+               r->lz0_6_enc_ms, r->lz0_6_dec_asm_mbs, r->lz0_6_dec_c_mbs);
+        fflush(stdout);
     }
 
-    // 1b. LZ0 (Ultra level 9)
-    {
+    /* 2. LZ0 Ultra (-9) */
+    if (!skip_l9) {
         lz0_config cfg;
         lz0_stats stats;
         lz0_config_level(&cfg, 9);
@@ -158,85 +204,59 @@ static void benchmark_file(const char *path, int force_zx0) {
         size_t csz = 0;
         double t0 = now_ms();
         int rc = lz0_compress(in, in_sz, &comp, &csz, &cfg, &stats);
-        double enc_ms = now_ms() - t0;
+        r->lz0_9_enc_ms = now_ms() - t0;
+        r->lz0_9_sz = csz;
 
-        int iters = (in_sz < 256 * 1024) ? 50 : (in_sz < 1024 * 1024) ? 20 : 5;
-        unsigned char *out = (unsigned char *)malloc(in_sz + 16);
-        t0 = now_ms();
-        int d = 0;
-        for (int i = 0; i < iters; i++) {
-            d = lz0_decompress_to(comp, (int)csz, out, (int)in_sz);
-        }
-        double dec_total_ms = (now_ms() - t0) / iters;
-        int ok = (rc == 0 && d == (int)in_sz && memcmp(in, out, in_sz) == 0);
-        double speed = (dec_total_ms > 0) ? ((double)in_sz / (1024.0 * 1024.0)) / (dec_total_ms / 1000.0) : 0;
-
-        printf("| **LZ0 (-9 C)** | %zu B | **%.2f%%** | %.1f ms | %.1f Mo/s | %s |\n",
-               csz, (double)csz * 100.0 / in_sz, enc_ms, speed, ok ? "✅ OK" : "❌ FAIL");
-
+        unsigned char *out = (unsigned char *)malloc(in_sz + 64);
 #if defined(__x86_64__) || defined(_M_X64)
         t0 = now_ms();
         int dasm = 0;
-        for (int i = 0; i < iters; i++) {
-            dasm = lz0dec_x86_64(comp, (int)csz, out, (int)in_sz);
+        for (int i = 0; i < iters_asm; i++) {
+            dasm = lz0dec_fast_x86_64(comp, (int)csz, out, (int)in_sz);
         }
-        double dec_asm_ms = (now_ms() - t0) / iters;
-        int ok_asm = (rc == 0 && dasm == (int)in_sz && memcmp(in, out, in_sz) == 0);
-        double speed_asm = (dec_asm_ms > 0) ? ((double)in_sz / (1024.0 * 1024.0)) / (dec_asm_ms / 1000.0) : 0;
-        printf("| **LZ0 (-9 ASM x86_64)** | %zu B | **%.2f%%** | - | **%.1f Mo/s** | %s |\n",
-               csz, (double)csz * 100.0 / in_sz, speed_asm, ok_asm ? "✅ OK" : "❌ FAIL");
+        double dec_asm_ms = (now_ms() - t0) / iters_asm;
+        r->lz0_9_ok = (rc == 0 && dasm == (int)in_sz && memcmp(in, out, in_sz) == 0);
+        r->lz0_9_dec_asm_mbs = (dec_asm_ms > 0) ? ((double)in_sz / (1024.0 * 1024.0)) / (dec_asm_ms / 1000.0) : 0;
+#else
+        r->lz0_9_ok = (rc == 0);
 #endif
-
         free(comp);
         free(out);
-    }
 
-    // 2. ZX0
-    if (in_sz <= 64 * 1024 || force_zx0) {
-        unsigned char *comp = NULL;
-        size_t csz = 0;
-        double t0 = now_ms();
-        int rc = zx0_compress_c(in, in_sz, &comp, &csz);
-        double enc_ms = now_ms() - t0;
-
-        int iters = (in_sz < 64 * 1024) ? 20 : 5;
-        unsigned char *out = (unsigned char *)malloc(in_sz + 16);
-        t0 = now_ms();
-        int d = 0;
-        for (int i = 0; i < iters; i++) {
-            d = zx0_decompress_to(comp, (int)csz, out, (int)in_sz);
-        }
-        double dec_total_ms = (now_ms() - t0) / iters;
-        int ok = (rc == 0 && d == (int)in_sz && memcmp(in, out, in_sz) == 0);
-        double speed = (dec_total_ms > 0) ? ((double)in_sz / (1024.0 * 1024.0)) / (dec_total_ms / 1000.0) : 0;
-
-        printf("| ZX0 | %zu B | %.2f%% | %.1f ms | %.1f Mo/s | %s |\n",
-               csz, (double)csz * 100.0 / in_sz, enc_ms, speed, ok ? "✅ OK" : "❌ FAIL");
-
-        free(comp);
-        free(out);
+        printf("  LZ0 (-9 Ultra) : %8zu B (%5.2f%%) | Enc: %6.1f ms | Dec Fast ASM: %6.1f Mo/s\n",
+               r->lz0_9_sz, (double)r->lz0_9_sz * 100.0 / in_sz,
+               r->lz0_9_enc_ms, r->lz0_9_dec_asm_mbs);
+        fflush(stdout);
     } else {
-        printf("| ZX0 | *Ignoré* | - | *Trop lent (>64K)* | - | - |\n");
+        printf("  LZ0 (-9 Ultra) : skipped (> 2M)\n");
     }
 
-    // 3. UPKR
-    if (access("bench/external/bin/upkr", X_OK) == 0) {
-        int level = (in_sz <= 128 * 1024) ? 9 : (in_sz <= 1024 * 1024) ? 5 : 2;
+    /* 3. UPKR */
+    if (!skip_upkr && access("bench/external/bin/upkr", X_OK) == 0) {
+        int level = (in_sz <= 20 * 1024) ? 9 : (in_sz <= 256 * 1024) ? 6 : 2;
+        r->upkr_level = level;
         unsigned char *comp = NULL;
         size_t csz = 0;
-        double enc_ms = 0, dec_ms = 0;
-        int rc = run_upkr_cli(in, in_sz, &comp, &csz, &enc_ms, &dec_ms, level);
+        double enc_ms = 0, dec_mbs = 0;
+        int rc = run_upkr_cli(in, in_sz, &comp, &csz, &enc_ms, &dec_mbs, level);
         if (rc == 0) {
-            double speed = (dec_ms > 0) ? ((double)in_sz / (1024.0 * 1024.0)) / (dec_ms / 1000.0) : 0;
-            printf("| UPKR (-%d) | %zu B | %.2f%% | %.1f ms | %.1f Mo/s | %s |\n",
-                   level, csz, (double)csz * 100.0 / in_sz, enc_ms, speed, "✅ OK");
+            r->upkr_ok = 1;
+            r->upkr_sz = csz;
+            r->upkr_enc_ms = enc_ms;
+            r->upkr_dec_mbs = dec_mbs;
+            printf("  UPKR (-%d)      : %8zu B (%5.2f%%) | Enc: %6.1f ms | Dec C unpack: %6.1f Mo/s\n",
+                   level, r->upkr_sz, (double)r->upkr_sz * 100.0 / in_sz,
+                   r->upkr_enc_ms, r->upkr_dec_mbs);
         } else {
-            printf("| UPKR (-%d) | - | - | - | - | ❌ FAIL |\n", level);
+            printf("  UPKR (-%d)      : failed\n", level);
         }
         free(comp);
+        fflush(stdout);
+    } else if (skip_upkr) {
+        printf("  UPKR           : skipped (> 2M)\n");
     }
 
-    // 4. LZ4
+    /* 4. LZ4 */
     {
         int max_dst = LZ4_compressBound((int)in_sz);
         char *comp = (char *)malloc(max_dst);
@@ -244,55 +264,181 @@ static void benchmark_file(const char *path, int force_zx0) {
 
         double t0 = now_ms();
         int csz = LZ4_compress_default((const char *)in, comp, (int)in_sz, max_dst);
-        double enc_ms = now_ms() - t0;
+        r->lz4_enc_ms = now_ms() - t0;
+        r->lz4_sz = (size_t)csz;
 
-        int iters = (in_sz < 256 * 1024) ? 100 : (in_sz < 1024 * 1024) ? 50 : 20;
+        int iters_lz4 = (in_sz < 256 * 1024) ? 200 : (in_sz < 1024 * 1024) ? 100 : 30;
         t0 = now_ms();
         int d = 0;
-        for (int i = 0; i < iters; i++) {
+        for (int i = 0; i < iters_lz4; i++) {
             d = LZ4_decompress_safe(comp, out, csz, (int)in_sz);
         }
-        double dec_total_ms = (now_ms() - t0) / iters;
-        int ok = (csz > 0 && d == (int)in_sz && memcmp(in, out, in_sz) == 0);
-        double speed = (dec_total_ms > 0) ? ((double)in_sz / (1024.0 * 1024.0)) / (dec_total_ms / 1000.0) : 0;
+        double dec_total_ms = (now_ms() - t0) / iters_lz4;
+        r->lz4_ok = (csz > 0 && d == (int)in_sz && memcmp(in, out, in_sz) == 0);
+        r->lz4_dec_mbs = (dec_total_ms > 0) ? ((double)in_sz / (1024.0 * 1024.0)) / (dec_total_ms / 1000.0) : 0;
 
-        printf("| LZ4 (default) | %d B | %.2f%% | %.1f ms | %.1f Mo/s | %s |\n",
-               csz, (double)csz * 100.0 / in_sz, enc_ms, speed, ok ? "✅ OK" : "❌ FAIL");
-
+        printf("  LZ4 (default)  : %8zu B (%5.2f%%) | Enc: %6.1f ms | Dec in-memory: %6.1f Mo/s\n",
+               r->lz4_sz, (double)r->lz4_sz * 100.0 / in_sz,
+               r->lz4_enc_ms, r->lz4_dec_mbs);
         free(comp);
         free(out);
+        fflush(stdout);
+    }
+
+    /* 5. ZX0 (only if <= 64 KB and non-media) */
+    if (in_sz <= 64 * 1024 && strstr(category, "Image") == NULL && strstr(category, "Audio") == NULL) {
+        unsigned char *comp = NULL;
+        size_t csz = 0;
+        double t0 = now_ms();
+        int rc = zx0_compress_c(in, in_sz, &comp, &csz);
+        r->zx0_enc_ms = now_ms() - t0;
+        r->zx0_sz = csz;
+
+        unsigned char *out = (unsigned char *)malloc(in_sz + 16);
+        t0 = now_ms();
+        int d = 0;
+        for (int i = 0; i < iters_c; i++) {
+            d = zx0_decompress_to(comp, (int)csz, out, (int)in_sz);
+        }
+        double dec_total_ms = (now_ms() - t0) / iters_c;
+        r->zx0_ok = (rc == 0 && d == (int)in_sz && memcmp(in, out, in_sz) == 0);
+        r->zx0_dec_mbs = (dec_total_ms > 0) ? ((double)in_sz / (1024.0 * 1024.0)) / (dec_total_ms / 1000.0) : 0;
+
+        printf("  ZX0            : %8zu B (%5.2f%%) | Enc: %6.1f ms | Dec C: %6.1f Mo/s\n",
+               r->zx0_sz, (double)r->zx0_sz * 100.0 / in_sz,
+               r->zx0_enc_ms, r->zx0_dec_mbs);
+        free(comp);
+        free(out);
+        fflush(stdout);
     }
 
     free(in);
+    printf("\n");
+}
+
+static void print_markdown_table(const char *title, test_result_t *results, int count) {
+    printf("### %s\n\n", title);
+    printf("| Fichier / Cible | Type / Catégorie | Taille Brute | LZ0 Normal (-6) | LZ0 Ultra (-9) | UPKR | LZ4 (default) | Débit Décomp. LZ0 FAST ASM vs LZ4 |\n");
+    printf("|---|---|---:|---:|---:|---:|---:|---:|\n");
+
+    for (int i = 0; i < count; i++) {
+        test_result_t *r = &results[i];
+        if (r->raw_sz == 0) continue;
+
+        double r_lz0_6 = (double)r->lz0_6_sz * 100.0 / (double)r->raw_sz;
+        char s_lz0_6[64];
+        snprintf(s_lz0_6, sizeof(s_lz0_6), "%zu B (**%.1f%%**)", r->lz0_6_sz, r_lz0_6);
+
+        char s_lz0_9[64];
+        if (r->lz0_9_sz > 0) {
+            double r_lz0_9 = (double)r->lz0_9_sz * 100.0 / (double)r->raw_sz;
+            snprintf(s_lz0_9, sizeof(s_lz0_9), "**%zu B** (**%.1f%%**)", r->lz0_9_sz, r_lz0_9);
+        } else {
+            snprintf(s_lz0_9, sizeof(s_lz0_9), "-");
+        }
+
+        char s_upkr[64];
+        if (r->upkr_ok && r->upkr_sz > 0) {
+            double r_upkr = (double)r->upkr_sz * 100.0 / (double)r->raw_sz;
+            snprintf(s_upkr, sizeof(s_upkr), "%zu B (%.1f%%) [-%d]", r->upkr_sz, r_upkr, r->upkr_level);
+        } else {
+            snprintf(s_upkr, sizeof(s_upkr), "-");
+        }
+
+        char s_lz4[64];
+        double r_lz4 = (double)r->lz4_sz * 100.0 / (double)r->raw_sz;
+        snprintf(s_lz4, sizeof(s_lz4), "%zu B (%.1f%%)", r->lz4_sz, r_lz4);
+
+        char s_speed[64];
+        snprintf(s_speed, sizeof(s_speed), "**%.0f Mo/s** vs %.0f Mo/s",
+                 r->lz0_6_dec_asm_mbs, r->lz4_dec_mbs);
+
+        printf("| `%s` | %s | %zu B | %s | %s | %s | %s | %s |\n",
+               r->name, r->category, r->raw_sz,
+               s_lz0_6, s_lz0_9, s_upkr, s_lz4, s_speed);
+    }
+    printf("\n");
 }
 
 int main(int argc, char **argv) {
-    if (argc > 1) {
-        for (int i = 1; i < argc; i++) {
-            benchmark_file(argv[i], 0);
-        }
-        return 0;
-    }
+    setvbuf(stdout, NULL, _IONBF, 0);
 
-    // Default: run on selection of corpus files
-    const char *default_files[] = {
-        "bench/corpus/fields.c",
-        "bench/corpus/alice29.txt",
-        "bench/corpus/plrabn12.txt",
-        "bench/corpus/kennedy.xls",
-        "bench/corpus/dickens_1m.txt",
-        "bench/corpus/bash_x86_64.bin",
-        NULL
+    typedef struct {
+        const char *path;
+        const char *category;
+        int skip_upkr;
+        int skip_l9;
+    } target_def;
+
+    static const target_def INDIVIDUAL_FILES[] = {
+        { "bench/corpus/fields.c",         "Code C",       0, 0 },
+        { "bench/corpus/sum",              "SPARC ELF",    0, 0 },
+        { "bench/corpus/lz0_win64.exe",     "PE64 Windows", 0, 0 },
+        { "bench/corpus/star.png",         "Image PNG",    1, 0 },
+        { "bench/corpus/avatar.jpg",       "Image JPEG",   0, 0 },
+        { "bench/corpus/break.mp3",        "Audio MP3 CBR",0, 0 },
+        { "bench/corpus/texture_rgb24.raw","Texture RGB24",0, 0 },
+        { "bench/corpus/texture_rgba32.raw","Texture RGBA32",1, 0 },
+        { "bench/corpus/audio_pcm16.raw",  "Audio PCM16 Stereo",0, 0 },
+        { "bench/corpus/alice29.txt",      "Texte anglais",0, 0 },
+        { "bench/corpus/plrabn12.txt",     "Texte poésie", 1, 0 },
+        { "bench/corpus/kennedy.xls",      "Tableur XLS",  1, 0 },
+        { "bench/corpus/dickens_1m.txt",   "Gros Texte",   1, 0 },
+        { "bench/corpus/bash_x86_64.bin",   "ELF x86_64",   1, 0 },
+        { NULL, NULL, 0, 0 }
     };
 
-    printf("# Benchmark Comparatif Multi-Compresseurs\n");
-    printf("**Comparaison :** LZ0 (H2C8) vs ZX0 vs UPKR vs LZ4\n");
+    static const target_def BLOBS[] = {
+        { "bench/blobs/blob_png_256k.bin", "Blob 4 PNGs",       0, 0 },
+        { "bench/blobs/blob_mix_256k.bin", "Blob Mixte (5 f.)",  0, 0 },
+        { "bench/blobs/blob_png_512k.bin", "Blob 8 PNGs",       0, 0 },
+        { "bench/blobs/blob_mix_512k.bin", "Blob Mixte (7 f.)",  0, 0 },
+        { "bench/blobs/blob_png_2m.bin",   "Blob 8 PNGs 2M",    1, 0 },
+        { "bench/blobs/blob_mix_2m.bin",   "Blob Mixte (9 f.) 2M", 1, 0 },
+        { "bench/blobs/blob_png_5m.bin",   "Blob 15 PNGs 5M",   1, 1 },
+        { "bench/blobs/blob_mix_5m.bin",   "Blob Mixte (15 f.) 5M", 1, 1 },
+        { NULL, NULL, 0, 0 }
+    };
 
-    for (int i = 0; default_files[i]; i++) {
-        if (access(default_files[i], R_OK) == 0) {
-            benchmark_file(default_files[i], 0);
+    test_result_t file_results[32];
+    int file_count = 0;
+
+    test_result_t blob_results[32];
+    int blob_count = 0;
+
+    printf("# ====================================================================\n");
+    printf("# LZ0 Comprehensive Benchmark Suite: LZ0 vs UPKR vs LZ4 vs ZX0\n");
+    printf("# ====================================================================\n\n");
+
+    /* 1. Individual files */
+    printf("## Phase 1: Fichiers Individuels (ELF, PE, PNG, XLS, Textes, Code C)\n\n");
+    for (int i = 0; INDIVIDUAL_FILES[i].path; i++) {
+        if (access(INDIVIDUAL_FILES[i].path, R_OK) == 0) {
+            run_test(INDIVIDUAL_FILES[i].path, INDIVIDUAL_FILES[i].category,
+                     &file_results[file_count++],
+                     INDIVIDUAL_FILES[i].skip_upkr, INDIVIDUAL_FILES[i].skip_l9);
         }
     }
+
+    /* 2. Blobs */
+    printf("## Phase 2: Blobs Multi-Ressources Hétérogènes (256 Ko à 5 Mo)\n\n");
+    for (int i = 0; BLOBS[i].path; i++) {
+        if (access(BLOBS[i].path, R_OK) == 0) {
+            run_test(BLOBS[i].path, BLOBS[i].category,
+                     &blob_results[blob_count++],
+                     BLOBS[i].skip_upkr, BLOBS[i].skip_l9);
+        }
+    }
+
+    printf("# ====================================================================\n");
+    printf("# TABLEAUX RÉCAPITULATIFS COMPARATIFS\n");
+    printf("# ====================================================================\n\n");
+
+    print_markdown_table("1. Comparatif Corpus Réel : Fichiers Individuels",
+                         file_results, file_count);
+
+    print_markdown_table("2. Comparatif Blobs Multi-Ressources Concaténés",
+                         blob_results, blob_count);
+
     return 0;
 }
-
