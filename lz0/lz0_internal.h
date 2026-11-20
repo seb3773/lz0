@@ -39,6 +39,8 @@ typedef struct {
     uint32_t rle_end;
     int num_strides;
     uint32_t strides[8];
+    int n_mru;
+    uint32_t mru[8];
 } lz0_finder;
 
 typedef struct {

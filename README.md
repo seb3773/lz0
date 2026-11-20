@@ -232,7 +232,8 @@ All decoders adhere to strict safety guarantees:
 | **Suffix Array Builder** | SA-IS linear time $O(N)$ | SA-IS linear time $O(N)$ | Oracle-verified deterministic SA |
 | **SA Search Window** | Adaptive $\pm 4 / \pm 8 / \pm 16$ | Dense $1..128$ + geometric jumps up to 512 | Exponential multi-scale probing for large files |
 | **Candidate Cap** | 16 | 48 | Maximum candidates evaluated per position |
-| **Stride / Periodicity** | Multi-window (stride $\ge 2$) | Multi-window + Media strides | Autocorrelation for CSV, XLS, RGB24, RGBA32, PCM16, MP3 |
+| **Stride / Periodicity** | Multi-window (stride $\ge 2$) | Multi-window + Containers + Large Strides | Autocorrelation for CSV, XLS, RGB24, RGBA32, PCM16, MP3, TAR (512b), SQLite (4096b), and large pitches (2048..8192) |
+| **Bridge Matching** | - | 8-entry MRU offset cache | Bridges short matches ($L \ge 2$) into cheap 1-bit `MatchLast` repeat-offsets |
 | **Length-2 Filter** | Strict ($off \le 32$ or rep) | Strict ($off \le 32$ or rep) | Prevents inflation on pre-compressed data (PNG, JPG, MP3) |
 
 ---

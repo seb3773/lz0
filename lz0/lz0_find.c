@@ -581,6 +581,35 @@ static int lz0_detect_strides_win(const unsigned char *win, uint32_t win_sz,
     int n_out = n_existing;
     uint32_t max_p = (M / 2 < 1024) ? (M / 2) : 1024;
 
+    /* Levier 1: SQLite database page size detection */
+    if (win_sz >= 18 && memcmp(win, "SQLite format 3\0", 16) == 0 && n_out < max_strides) {
+        uint32_t page_sz = ((uint32_t)win[16] << 8) | (uint32_t)win[17];
+        if (page_sz == 1)
+            page_sz = 65536;
+        if (page_sz >= 512 && page_sz <= 65536) {
+            int exists = 0;
+            for (int k = 0; k < n_out; k++) {
+                if (strides[k] == page_sz) { exists = 1; break; }
+            }
+            if (!exists) {
+                strides[n_out++] = page_sz;
+            }
+        }
+    }
+
+    /* Levier 3: Check for TAR container magic (ustar) */
+    if (win_sz >= 512 && n_out < max_strides) {
+        if (memcmp(win + 257, "ustar", 5) == 0) {
+            int exists = 0;
+            for (int k = 0; k < n_out; k++) {
+                if (strides[k] == 512) { exists = 1; break; }
+            }
+            if (!exists) {
+                strides[n_out++] = 512;
+            }
+        }
+    }
+
     /* Check for MP3 CBR frame strides (e.g. 576, 417, 418, 626, 1044) */
     static const uint16_t mp3_candidates[] = {
         384, 417, 418, 576, 626, 627, 835, 836, 1044, 1045
@@ -662,6 +691,31 @@ static int lz0_detect_strides_win(const unsigned char *win, uint32_t win_sz,
         }
     }
 
+    /* Levier 1: Large stride candidates (database pages, uncompressed video pitches) */
+    if (win_sz >= 8192) {
+        static const uint32_t large_candidates[] = {2048, 4096, 5760, 7680, 8192};
+        for (int lc = 0; lc < 5; lc++) {
+            uint32_t p = large_candidates[lc];
+            if (win_sz >= p + 2048) {
+                uint32_t test_len = win_sz - p;
+                if (test_len > 32768)
+                    test_len = 32768;
+                size_t matches = 0, total = 0;
+                for (uint32_t i = p; i < p + test_len; i += 4) {
+                    if (win[i] == win[i - p])
+                        matches++;
+                    total++;
+                }
+                double rate = total ? (double)matches / (double)total : 0;
+                if (rate >= thresh && n_cands < 64) {
+                    cands[n_cands].p = p;
+                    cands[n_cands].rate = rate;
+                    n_cands++;
+                }
+            }
+        }
+    }
+
     /* Sort candidates by correlation rate descending to prioritize dominant stride */
     for (int i = 0; i < n_cands - 1; i++) {
         for (int j = i + 1; j < n_cands; j++) {
@@ -678,9 +732,19 @@ static int lz0_detect_strides_win(const unsigned char *win, uint32_t win_sz,
         int exists = 0;
         for (int k = 0; k < n_out; k++) {
             uint32_t s = strides[k];
-            if (s > 0 && (p == s || p % s == 0 || s % p == 0)) {
-                exists = 1;
-                break;
+            if (s > 0) {
+                if (p == s) {
+                    exists = 1;
+                    break;
+                }
+                if (p > s && (p % s == 0) && (p / s <= 8)) {
+                    exists = 1;
+                    break;
+                }
+                if (s > p && (s % p == 0) && (s / p <= 8)) {
+                    exists = 1;
+                    break;
+                }
             }
         }
         if (!exists) {
@@ -1173,6 +1237,25 @@ int lz0_find_last_len(lz0_finder *f, uint32_t pos, uint32_t last_offset) {
     return 0;
 }
 
+static void mru_add(lz0_finder *f, uint32_t off) {
+    if (off == 0)
+        return;
+    for (int i = 0; i < f->n_mru; i++) {
+        if (f->mru[i] == off) {
+            for (int j = i; j > 0; j--)
+                f->mru[j] = f->mru[j - 1];
+            f->mru[0] = off;
+            return;
+        }
+    }
+    int limit = f->n_mru < 8 ? f->n_mru : 7;
+    for (int j = limit; j > 0; j--)
+        f->mru[j] = f->mru[j - 1];
+    f->mru[0] = off;
+    if (f->n_mru < 8)
+        f->n_mru++;
+}
+
 int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
                      lz0_match *out, int *last_len) {
     int nout = 0;
@@ -1301,6 +1384,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
             continue;
         uint32_t off = stride;
         int step_mult = 1;
+        int max_linear_mult = (stride >= 512) ? 32 : 8;
         while (off <= pos) {
             uint32_t src = pos - off;
             if (in[src] == in[pos]) {
@@ -1318,7 +1402,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
                     }
                 }
             }
-            if (step_mult < 8) {
+            if (step_mult < max_linear_mult) {
                 step_mult++;
                 off = (uint32_t)step_mult * stride;
             } else if (step_mult < 1024) {
@@ -1326,6 +1410,29 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
                 off = (uint32_t)step_mult * stride;
             } else {
                 break;
+            }
+        }
+    }
+
+    /* Levier 2: Bridge matching via MRU cache of recent match offsets */
+    for (int m = 0; m < f->n_mru; m++) {
+        uint32_t off = f->mru[m];
+        if (off == 0 || off > pos)
+            continue;
+        uint32_t src = pos - off;
+        if (in[src] == in[pos]) {
+            int probe = best_len > 0 ? best_len : (minm - 1);
+            if (!(probe > 0 && probe < maxl && in[src + probe] != in[pos + probe])) {
+                int ml = lz0_matchlen(in + pos, in + src, maxl);
+                census_ml(cen, ml);
+                if (ml >= minm) {
+                    lz0_match match;
+                    match.offset = off;
+                    match.length = (uint32_t)ml;
+                    if (ml > best_len)
+                        best_len = ml;
+                    keep_candidate(out, &nout, f->max_candidates, match);
+                }
             }
         }
     }
@@ -1579,6 +1686,10 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
             if (out[i].length > cen->max_cand_len)
                 cen->max_cand_len = out[i].length;
         }
+    }
+    for (int i = 0; i < nout; i++) {
+        if (out[i].length >= 4 || (out[i].length >= 3 && out[i].offset <= 512))
+            mru_add(f, out[i].offset);
     }
     return nout;
 }
