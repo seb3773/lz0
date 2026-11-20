@@ -77,6 +77,19 @@ static int check_raw(const char *name, const unsigned char *in, size_t n,
                 bad = 1;
             free(d);
         }
+#elif (defined(__riscv) && __riscv_xlen == 64)
+        unsigned char *d = (unsigned char *)malloc(n ? n : 1);
+        if (!d)
+            bad = 1;
+        else {
+            int dd = lz0dec_riscv64(raw, (int)rsz, d, (int)n);
+            if (dd != (int)n || memcmp(d, in, n))
+                bad = 1;
+            int df = lz0dec_fast_riscv64(raw, (int)rsz, d, (int)n);
+            if (df != (int)n || memcmp(d, in, n))
+                bad = 1;
+            free(d);
+        }
 #endif
     }
     printf("%-16s n=%zu raw=%zu %s\n", name, n, rsz, bad ? "FAIL" : "ok");

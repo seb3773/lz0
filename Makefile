@@ -13,7 +13,7 @@ LZ0DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.s lz0/lz0dec_fa
 
 VERSION ?= 0.2.0
 
-.PHONY: all bench clean test smoke bounds diag lite32 state sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz lz0 lz0dec cli sanitize valgrind bench_all bench_ratio bench_dec bench_dec_arm64 bench_blobs test_arm64 arm64 windows dist dist_linux dist_arm64 dist_windows
+.PHONY: all bench clean test smoke bounds diag lite32 state sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz lz0 lz0dec cli sanitize valgrind bench_all bench_ratio bench_dec bench_dec_arm64 bench_dec_riscv64 bench_blobs test_arm64 arm64 test_riscv64 riscv64 windows dist dist_linux dist_arm64 dist_riscv64 dist_windows
 
 all: bench/lz0_bench bench/lz0_smoke bench/lz0_bounds bench/lz0_diag_rep bench/lz0_lite32 bench/lz0_diag_state bench/lz0_sdp32 bench/lz0_scale bench/lz0_prof bench/lz0_cmpfind bench/lz0_jumpsweep bench/lz0_pruneab bench/lz0_bits bench/lz0_final
 
@@ -47,6 +47,10 @@ bench_dec: bench/lz0_bench_dec
 bench_dec_arm64: bench/bench_dec.c $(LZ0_SRC) $(ARM64_DEC_SRC)
 	$(ARM64_CC) $(ARM64_CFLAGS) -o bench/lz0_bench_dec_arm64 bench/bench_dec.c $(LZ0_SRC) $(ARM64_DEC_SRC)
 	$(ARM64_EMU) ./bench/lz0_bench_dec_arm64
+
+bench_dec_riscv64: bench/bench_dec.c $(LZ0_SRC) $(RISCV64_DEC_SRC)
+	$(RISCV64_CC) $(RISCV64_CFLAGS) -o bench/lz0_bench_dec_riscv64 bench/bench_dec.c $(LZ0_SRC) $(RISCV64_DEC_SRC)
+	$(RISCV64_EMU) ./bench/lz0_bench_dec_riscv64
 
 bench/lz0_smoke: bench/smoke.c $(LZ0_SRC)
 	$(CC) $(CFLAGS) -o $@ bench/smoke.c $(LZ0_SRC)
@@ -170,6 +174,14 @@ bin/lz0dec_arm64: lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_arm64.s lz0/lz0de
 	mkdir -p bin
 	$(ARM64_CC) $(ARM64_CFLAGS) -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_arm64.s lz0/lz0dec_fast_arm64.s
 
+bin/lz0_riscv64: lz0/lz0_cli.c $(LZ0_SRC) $(RISCV64_DEC_SRC)
+	mkdir -p bin
+	$(RISCV64_CC) $(RISCV64_CFLAGS) -s -o $@ lz0/lz0_cli.c $(LZ0_SRC) $(RISCV64_DEC_SRC)
+
+bin/lz0dec_riscv64: lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_riscv64.s lz0/lz0dec_fast_riscv64.s
+	mkdir -p bin
+	$(RISCV64_CC) $(RISCV64_CFLAGS) -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_riscv64.s lz0/lz0dec_fast_riscv64.s
+
 MINGW_CC = x86_64-w64-mingw32-gcc
 
 bin/lz0.exe: lz0/lz0_cli.c $(LZ0_SRC) lz0/lz0dec_min.c
@@ -198,6 +210,15 @@ dist_arm64: bin/lz0_arm64 bin/lz0dec_arm64
 	tar -czvf dist/lz0-v$(VERSION)-linux-arm64.tar.gz -C build/dist lz0-v$(VERSION)-linux-arm64
 	rm -rf build/dist/lz0-v$(VERSION)-linux-arm64
 
+dist_riscv64: bin/lz0_riscv64 bin/lz0dec_riscv64
+	mkdir -p build/dist/lz0-v$(VERSION)-linux-riscv64 dist
+	cp bin/lz0_riscv64 build/dist/lz0-v$(VERSION)-linux-riscv64/lz0
+	cp bin/lz0dec_riscv64 build/dist/lz0-v$(VERSION)-linux-riscv64/lz0dec
+	cp README.md LICENSE build/dist/lz0-v$(VERSION)-linux-riscv64/
+	cp -r docs build/dist/lz0-v$(VERSION)-linux-riscv64/
+	tar -czvf dist/lz0-v$(VERSION)-linux-riscv64.tar.gz -C build/dist lz0-v$(VERSION)-linux-riscv64
+	rm -rf build/dist/lz0-v$(VERSION)-linux-riscv64
+
 dist_windows: windows
 	mkdir -p build/dist/lz0-v$(VERSION)-windows-x86_64 dist
 	cp bin/lz0.exe bin/lz0dec.exe README.md LICENSE build/dist/lz0-v$(VERSION)-windows-x86_64/
@@ -205,7 +226,7 @@ dist_windows: windows
 	cd build/dist && zip -r ../../dist/lz0-v$(VERSION)-windows-x86_64.zip lz0-v$(VERSION)-windows-x86_64
 	rm -rf build/dist/lz0-v$(VERSION)-windows-x86_64
 
-dist: dist_linux dist_arm64 dist_windows
+dist: dist_linux dist_arm64 dist_riscv64 dist_windows
 
 cli: bin/lz0
 	./bin/lz0 c tests/vectors/literals.bin /tmp/lz0_cli.lz0
@@ -278,7 +299,26 @@ test_arm64: lz0/lz0dec_arm64.s lz0/lz0dec_fast_arm64.s
 
 arm64: test_arm64
 
+RISCV64_CC ?= riscv64-linux-gnu-gcc
+RISCV64_EMU ?= qemu-riscv64-static
+RISCV64_CFLAGS = -O3 -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Izx0_compressor -Izx0_decompressor -Ilz0 -static
+RISCV64_DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_riscv64.s lz0/lz0dec_fast_riscv64.s
+
+test_riscv64: lz0/lz0dec_riscv64.s lz0/lz0dec_fast_riscv64.s
+	@echo "=== Cross-compiling and running RISC-V 64 tests under QEMU ==="
+	$(RISCV64_CC) $(RISCV64_CFLAGS) -o tests/test_vectors_riscv64 tests/test_vectors.c $(LZ0_SRC) $(RISCV64_DEC_SRC)
+	$(RISCV64_EMU) ./tests/test_vectors_riscv64
+	$(RISCV64_CC) $(RISCV64_CFLAGS) -o tests/test_boundary_riscv64 tests/test_boundary.c $(LZ0_SRC) $(RISCV64_DEC_SRC)
+	$(RISCV64_EMU) ./tests/test_boundary_riscv64
+	$(RISCV64_CC) $(RISCV64_CFLAGS) -o tests/test_malformed_riscv64 tests/test_malformed.c $(LZ0_SRC) $(RISCV64_DEC_SRC)
+	$(RISCV64_EMU) ./tests/test_malformed_riscv64
+	$(RISCV64_CC) $(RISCV64_CFLAGS) -o tests/test_fuzz_riscv64 tests/test_fuzz.c $(LZ0_SRC) $(RISCV64_DEC_SRC)
+	$(RISCV64_EMU) ./tests/test_fuzz_riscv64
+	@echo "All RISC-V 64 tests passed cleanly under QEMU!"
+
+riscv64: test_riscv64
+
 clean:
 	rm -f bench/lz0_* bench/dump_rep bench/debug_a3 bench/count_bench bench/scatter_bench
-	rm -f bin/lz0* tests/test_vectors tests/test_boundary tests/test_malformed tests/test_fuzz tests/*_arm64
+	rm -f bin/lz0* tests/test_vectors tests/test_boundary tests/test_malformed tests/test_fuzz tests/*_arm64 tests/*_riscv64
 	rm -rf dist build

@@ -56,9 +56,10 @@ Conformément à l'**Approche A**, le flux compressé reste **un seul flux LZ0 s
 
 Commandes de reproduction :
 ```bash
-make bench_all        # Comparatif global ratios & débits
-make bench_dec        # Micro-benchmarks débits x86-64
-make bench_dec_arm64  # Micro-benchmarks débits AArch64 (QEMU)
+make bench_all          # Comparatif global ratios & débits
+make bench_dec          # Micro-benchmarks débits x86-64
+make bench_dec_arm64    # Micro-benchmarks débits AArch64 (QEMU)
+make bench_dec_riscv64  # Micro-benchmarks débits RISC-V 64 (QEMU)
 ```
 
 ### Débit Décompression x86-64 Natif
@@ -87,6 +88,17 @@ make bench_dec_arm64  # Micro-benchmarks débits AArch64 (QEMU)
 | `kennedy.xls` | 53.6 MB/s | 125.8 MB/s | 121.8 MB/s | **377.4 MB/s** | **+605%** |
 | `dickens_1m.txt` | 36.4 MB/s | 72.6 MB/s | 35.6 MB/s | **170.1 MB/s** | **+368%** |
 | `bash_x86_64.bin` | 30.8 MB/s | 61.3 MB/s | 45.2 MB/s | **143.7 MB/s** | **+367%** |
+
+### Débit Décompression RISC-V 64 / RV64GC (QEMU)
+
+| Fichier | C standard (`lz0_decompress_to`) | C minimal (`lz0dec_min`) | ASM Compact (`lz0dec_riscv64`) | ASM FAST (`lz0dec_fast_riscv64`) | Facteur FAST vs C |
+|---|---:|---:|---:|---:|---:|
+| `fields.c` | 37.1 MB/s | 120.5 MB/s | 176.1 MB/s | **178.4 MB/s** | **+381%** |
+| `alice29.txt` | 25.2 MB/s | 89.6 MB/s | 119.0 MB/s | **121.2 MB/s** | **+381%** |
+| `plrabn12.txt` | 21.6 MB/s | 82.4 MB/s | 107.5 MB/s | **108.6 MB/s** | **+403%** |
+| `kennedy.xls` | 50.1 MB/s | 200.1 MB/s | 285.6 MB/s | **295.9 MB/s** | **+490%** |
+| `dickens_1m.txt` | 24.2 MB/s | 88.9 MB/s | 115.1 MB/s | **117.9 MB/s** | **+387%** |
+| `bash_x86_64.bin` | 23.5 MB/s | 86.6 MB/s | 113.3 MB/s | **112.4 MB/s** | **+378%** |
 
 ---
 

@@ -17,6 +17,7 @@ tests/test_boundary
 tests/test_malformed
 tests/test_fuzz
 tests/*_arm64
+tests/*_riscv64
 
 # Benchmark binaries
 bench/lz0_*

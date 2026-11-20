@@ -54,7 +54,7 @@ static void bench_one(const char *path) {
 
     // Number of iterations based on size
     int iters;
-#if defined(__aarch64__) || defined(_M_ARM64)
+#if defined(__aarch64__) || defined(_M_ARM64) || (defined(__riscv) && __riscv_xlen == 64)
     // Adjusted iteration counts for QEMU user-mode emulation
     if (in_sz < 32 * 1024) iters = 200;
     else if (in_sz < 256 * 1024) iters = 50;
@@ -76,6 +76,8 @@ static void bench_one(const char *path) {
         lz0dec_x86_64(comp, (int)csz, out, (int)in_sz);
 #elif defined(__aarch64__) || defined(_M_ARM64)
         lz0dec_arm64(comp, (int)csz, out, (int)in_sz);
+#elif (defined(__riscv) && __riscv_xlen == 64)
+        lz0dec_riscv64(comp, (int)csz, out, (int)in_sz);
 #endif
     }
 
@@ -143,6 +145,27 @@ static void bench_one(const char *path) {
         double elapsed = (now_ns() - t0) / iters;
         if (elapsed < best_fast_ns) best_fast_ns = elapsed;
     }
+#elif (defined(__riscv) && __riscv_xlen == 64)
+    // Benchmark ASM Compact: lz0dec_riscv64
+    double best_asm_ns = 1e18;
+    for (int r = 0; r < 5; r++) {
+        double t0 = now_ns();
+        for (int i = 0; i < iters; i++) {
+            lz0dec_riscv64(comp, (int)csz, out, (int)in_sz);
+        }
+        double elapsed = (now_ns() - t0) / iters;
+        if (elapsed < best_asm_ns) best_asm_ns = elapsed;
+    }
+    // Benchmark ASM Fast: lz0dec_fast_riscv64
+    double best_fast_ns = 1e18;
+    for (int r = 0; r < 5; r++) {
+        double t0 = now_ns();
+        for (int i = 0; i < iters; i++) {
+            lz0dec_fast_riscv64(comp, (int)csz, out, (int)in_sz);
+        }
+        double elapsed = (now_ns() - t0) / iters;
+        if (elapsed < best_fast_ns) best_fast_ns = elapsed;
+    }
 #else
     double best_asm_ns = 0;
     double best_fast_ns = 0;
@@ -173,6 +196,9 @@ int main(int argc, char **argv) {
 #if defined(__aarch64__) || defined(_M_ARM64)
     printf("# Comparatif Décompression ARM64 (AArch64) : C vs C min vs ASM Compact vs ASM FAST\n\n");
     printf("| Fichier (Taille) | C standard | C min (`lz0dec_min`) | ASM Compact (`lz0dec_arm64`) | ASM FAST (`lz0dec_fast_arm64`) | Speedup FAST vs C |\n");
+#elif (defined(__riscv) && __riscv_xlen == 64)
+    printf("# Comparatif Décompression RISC-V 64 : C vs C min vs ASM Compact vs ASM FAST\n\n");
+    printf("| Fichier (Taille) | C standard | C min (`lz0dec_min`) | ASM Compact (`lz0dec_riscv64`) | ASM FAST (`lz0dec_fast_riscv64`) | Speedup FAST vs C |\n");
 #else
     printf("# Comparatif Décompression x86-64 : C vs C min vs ASM Compact vs ASM FAST\n\n");
     printf("| Fichier (Taille) | C standard | C min (`lz0dec_min`) | ASM Compact (`lz0dec_x86_64`) | ASM FAST (`lz0dec_fast_x86_64`) | Speedup FAST vs C |\n");

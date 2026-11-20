@@ -22,6 +22,11 @@ static int expect_fail(const char *name, const unsigned char *raw, int rsz, int 
     int df = lz0dec_fast_arm64(raw, rsz, buf, cap);
     int ok = (a < 0 && b < 0 && c < 0 && d < 0 && df < 0);
     printf("%-20s lib=%d ref=%d min=%d arm64=%d fast=%d %s\n", name, a, b, c, d, df, ok ? "ok" : "FAIL");
+#elif (defined(__riscv) && __riscv_xlen == 64)
+    int d = lz0dec_riscv64(raw, rsz, buf, cap);
+    int df = lz0dec_fast_riscv64(raw, rsz, buf, cap);
+    int ok = (a < 0 && b < 0 && c < 0 && d < 0 && df < 0);
+    printf("%-20s lib=%d ref=%d min=%d riscv64=%d fast=%d %s\n", name, a, b, c, d, df, ok ? "ok" : "FAIL");
 #else
     int ok = (a < 0 && b < 0 && c < 0);
     printf("%-20s lib=%d ref=%d min=%d %s\n", name, a, b, c, ok ? "ok" : "FAIL");

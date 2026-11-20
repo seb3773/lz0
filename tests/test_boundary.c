@@ -48,6 +48,19 @@ static int decode_all(const char *name, const unsigned char *in, uint32_t n,
                 bad = 1;
             free(d);
         }
+#elif (defined(__riscv) && __riscv_xlen == 64)
+        unsigned char *d = (unsigned char *)malloc((size_t)n + 8);
+        if (!d)
+            bad = 1;
+        else {
+            int dd = lz0dec_riscv64(comp, (int)csz, d, (int)n);
+            if (dd != (int)n || memcmp(d, in, n))
+                bad = 1;
+            int df = lz0dec_fast_riscv64(comp, (int)csz, d, (int)n);
+            if (df != (int)n || memcmp(d, in, n))
+                bad = 1;
+            free(d);
+        }
 #endif
     }
     printf("%-16s n=%u csz=%zu %s\n", name, n, csz, bad ? "FAIL" : "ok");

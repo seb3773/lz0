@@ -326,10 +326,23 @@ Measured with `make bench_dec` (x86-64 native) and `make bench_dec_arm64` (AArch
 | `dickens_1m.txt` | 36.4 MB/s | 72.6 MB/s | 35.6 MB/s | **170.1 MB/s** | **+367.6%** |
 | `bash_x86_64.bin` | 30.8 MB/s | 61.3 MB/s | 45.2 MB/s | **143.7 MB/s** | **+366.6%** |
 
+#### RISC-V 64 (RV64GC) Decompression (under QEMU)
+
+| File | C standard (`lz0_decompress_to`) | C minimal (`lz0dec_min`) | ASM Compact (`lz0dec_riscv64`) | ASM FAST (`lz0dec_fast_riscv64`) | Speedup FAST vs C |
+|---|---:|---:|---:|---:|---:|
+| `fields.c` | 37.1 MB/s | 120.5 MB/s | 176.1 MB/s | **178.4 MB/s** | **+380.5%** |
+| `cp.html` | 32.1 MB/s | 103.7 MB/s | 140.4 MB/s | **141.7 MB/s** | **+341.9%** |
+| `alice29.txt` | 25.2 MB/s | 89.6 MB/s | 119.0 MB/s | **121.2 MB/s** | **+380.6%** |
+| `plrabn12.txt` | 21.6 MB/s | 82.4 MB/s | 107.5 MB/s | **108.6 MB/s** | **+402.5%** |
+| `kennedy.xls` | 50.1 MB/s | 200.1 MB/s | 285.6 MB/s | **295.9 MB/s** | **+490.0%** |
+| `dickens_1m.txt` | 24.2 MB/s | 88.9 MB/s | 115.1 MB/s | **117.9 MB/s** | **+386.6%** |
+| `bash_x86_64.bin` | 23.5 MB/s | 86.6 MB/s | 113.3 MB/s | **112.4 MB/s** | **+378.5%** |
+
 > [!NOTE]
 > **Key Architectural Takeaways on Decompression Speedup**:
 > * **On x86-64**: Decompression throughput doubles or triples on text and source code (jumping from ~200 MB/s to **520 – 840 MB/s**), and reaches **1,330 MB/s (1.33 GB/s)** on structured datasets (`kennedy.xls`). The speedup stems directly from eliminating branch misprediction penalties on Elias gamma bit-sequences via 64-bit window decoding, and deploying 16-byte SSE2 wildcopies.
 > * **On AArch64 / ARM64**: Pure leaf function structure (0 bytes allocated on stack, 0 subroutine calls) combined with branch-free Elias gamma decoding drastically reduces dynamic instruction count, translating to a **5× to 7× speedup** over the standard C decoder.
+> * **On RISC-V 64 (RV64GC)**: Pure leaf function structure (0 bytes stack frame, 0 calls, 100% in registers `a0..a7` and `t0..t6`), combined with 64-bit wildcopies (`ld`/`sd`) and arithmetic multiplication broadcast (`mul` by `0x0101010101010101`) for 1-byte runs, delivering a **4.5× to 5.9× speedup (+340% to +490%)** over standard C.
 
 ---
 
@@ -371,7 +384,10 @@ make bench_all   # Multi-compressor benchmark (LZ0 vs ZX0 vs UPKR vs LZ4)
 make bench_dec   # Decompression throughput comparison (C vs ASM)
 
 # Cross-platform tests
-make test_arm64  # Cross-compile and test AArch64 ASM under QEMU
+make test_arm64    # Cross-compile and test AArch64 ASM under QEMU
+make test_riscv64  # Cross-compile and test RISC-V 64 (RV64GC) ASM under QEMU
+make bench_dec_riscv64 # Benchmark RISC-V 64 decoders under QEMU
+make dist_riscv64  # Build official release package for linux-riscv64
 ```
 
 ### 9.2 Command-Line Usage
