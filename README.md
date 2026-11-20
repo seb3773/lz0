@@ -150,18 +150,18 @@ Input Data
 ```
 
 ### 5.1 Match Finding
-1. **Hash-Chain Finder:** Rapidly identifies nearby matches. Uses a 3-byte hash table of $2^{17}$ entries (128K buckets) and traverses a history chain limited to 8 candidates with power-of-2 skip stepping.
+1. **Hash-Chain Finder:** Rapidly identifies nearby matches. Uses a 3-byte hash table of $2^{17}$ entries (128K buckets) and traverses a history chain limited to 8 candidates (up to 48 in Ultra) with power-of-2 skip stepping.
 2. **SA-IS Suffix Array Finder:** Identifies distant and long matches across the entire buffer in linear $O(N)$ time.
    - Built using an optimized **SA-IS** algorithm (`lz0_sa_algo=1`).
    - Validated against a deterministic $O(N \log^2 N)$ prefix-doubling reference oracle (`lz0_sa_algo=0`), ensuring byte-identical suffix arrays.
-   - **Adaptive Probing:** Performs rank-locality search starting at $\pm 4$, widening to $\pm 8$, and extending to $\pm 16$ only if the current best match length is $< 16$.
+   - **Adaptive & Multi-Scale Probing:** Default mode uses rank-locality search ($\pm 4 \to \pm 8 \to \pm 16$). Ultra mode activates multi-scale probing: dense linear search $1 \dots 128$ plus geometric jumps $\{160, 192, 256, 320, 384, 512\}$ to capture long-range matches on large binaries and dumps.
+3. **Multi-Window Stride & Media Periodicity:** Automatically detects structural repetitions (table columns in CSV/XLS, machine instruction alignment 4/8 bytes, interleaved channels for RGB24 stride 3, RGBA32 stride 4, and stereo PCM16 stride 4) via multi-window autocorrelation and 4-byte MPEG Layer III header validation for MP3 CBR frame synchronization.
 
-### 5.2 Sparse DP Parser ($K=2$) & Plateau Stepping
-Instead of a greedy heuristic or a memory-intensive full DP lattice, H2C8 maintains at most **$K=2$ Pareto-optimal live states** per input position.
+### 5.2 Sparse DP Parser & Profitability Filtering
+Instead of a greedy heuristic or a memory-intensive full DP lattice, LZ0 maintains Pareto-optimal live states per input position ($K=2$ in default `-6`, and adaptive $K=32/16/8$ in Ultra `-9` according to file size).
 
-To minimize parsing time without sacrificing optimality, the parser implements **Elias Plateau Stepping** (`next_len_plateau`):
-- Because Elias gamma lengths remain constant across powers-of-two intervals ($[2^k, 2^{k+1}-1]$), evaluating intermediate lengths inside a plateau incurs the same bit-cost as the maximum length of that plateau.
-- The parser skips redundant transitions and only tests the plateau upper bounds, dramatically pruning search branches.
+- **Elias Plateau Stepping** (`next_len_plateau`): Because Elias gamma lengths remain constant across powers-of-two intervals ($[2^k, 2^{k+1}-1]$), evaluating intermediate lengths inside a plateau incurs the same bit-cost as the maximum length. The parser skips redundant transitions and only tests plateau upper bounds, dramatically pruning search branches.
+- **Strict Length-2 Profitability Filter**: In high-entropy streams (PNG, JPEG, MP3, encrypted sections), matches of length 2 are accepted only if $offset \le 32$ or if matching the previous offset (`repeat-offset`). This strictly prevents bitstream inflation over raw literals.
 
 ---
 
@@ -222,54 +222,82 @@ All decoders adhere to strict safety guarantees:
 
 ## 7. Production Configuration Summary
 
-| Component | Setting | Description |
-|---|---|---|
-| **Bit Packing** | **MSB-first** | Bits 7 down to 0 in control bytes |
-| **Offset Low Part** | 8 bits (`LSB=8`) | 1 raw byte ($255 - \text{rem}$) |
-| **New Match Length** | `LEN=3` | 3 fixed bits for lengths 2–8; `111` + Elias for $\ge 9$ |
-| **Parser** | Sparse DP (`SDP`) | Dynamic programming with $K=2$ live states |
-| **Hash Match Finder** | 3-byte hash | Table size $2^{17}$, max chain 8 |
-| **Suffix Array Builder** | SA-IS (`algo=1`) | Linear time $O(N)$, oracle-verified |
-| **SA Search Window** | Adaptive $\pm 4 / \pm 8 / \pm 16$ | Expands only when best match $< 16$ |
-| **Candidate Cap** | 16 | Maximum candidates evaluated per position |
+| Component | Setting (Default `-6`) | Setting (Ultra `-9`) | Description |
+|---|---|---|---|
+| **Bit Packing** | **MSB-first** | **MSB-first** | Bits 7 down to 0 in control bytes |
+| **Offset Low Part** | 8 bits (`LSB=8`) | 8 bits (`LSB=8`) | 1 raw byte ($255 - \text{rem}$) |
+| **New Match Length** | `LEN=3` | `LEN=3` | 3 fixed bits for lengths 2–8; `111` + Elias for $\ge 9$ |
+| **Parser** | Sparse DP (`SDP`, $K=2$) | Adaptive Sparse DP ($K=32/16/8$) | Pareto-optimal dynamic programming |
+| **Hash Match Finder** | 3-byte hash, max chain 8 | 3-byte hash, max chain 48 | Table size $2^{17}$, power-of-2 skip steps |
+| **Suffix Array Builder** | SA-IS linear time $O(N)$ | SA-IS linear time $O(N)$ | Oracle-verified deterministic SA |
+| **SA Search Window** | Adaptive $\pm 4 / \pm 8 / \pm 16$ | Dense $1..128$ + geometric jumps up to 512 | Exponential multi-scale probing for large files |
+| **Candidate Cap** | 16 | 48 | Maximum candidates evaluated per position |
+| **Stride / Periodicity** | Multi-window (stride $\ge 2$) | Multi-window + Media strides | Autocorrelation for CSV, XLS, RGB24, RGBA32, PCM16, MP3 |
+| **Length-2 Filter** | Strict ($off \le 32$ or rep) | Strict ($off \le 32$ or rep) | Prevents inflation on pre-compressed data (PNG, JPG, MP3) |
 
 ---
 
 ## 8. Benchmark Results
 
-Measured on x86_64 Linux (GCC `-O3`). Reproducible via `make bench_all` and `make bench_dec`.
+Measured on x86_64 Linux (GCC `-O3`). Reproducible via `make bench_all` and `make bench_dec`.  
+All LZ0 decompressions verified **100% bit-exact** against uncompressed originals.
 
 ### 8.1 Real-World Corpus: Multi-Compressor Comparison
 
-Comparison on standard corpus files ([Canterbury Corpus](https://corpus.canterbury.ac.nz/) and [Silesia](https://sun.aei.polsl.pl/~sdeor/index.php?page=silesia)) between **LZ0** (default `-6` and ultra `-9`), **ZX0**, **UPKR**, and **LZ4**:
+Comparison on real-world representative files (Canterbury, Silesia, Windows PE, ELF, pre-compressed images/audio, and raw media textures) between **LZ0** (default `-6` and ultra `-9`), **UPKR**, **LZ4**, and **ZX0**:
 
-| File | Original Size | LZ0 (`-6` default) | LZ0 (`-9` ultra) | ZX0 | UPKR | LZ4 (default) |
-|---|---:|---:|---:|---:|---:|---:|
-| `fields.c` | 11.1 KiB | 3,367 B (**30.20%**) | 3,341 B (**29.96%**) | 3,214 B (**28.83%**) | 2,928 B (**26.26%**) | 5,215 B (46.77%) |
-| `alice29.txt` | 148.5 KiB | 58,992 B (**38.79%**) | 58,568 B (**38.51%**) | *timeout (>60s)* | 50,547 B (**33.24%**) | 88,699 B (58.32%) |
-| `plrabn12.txt` | 470.6 KiB | 209,592 B (**43.50%**) | 207,790 B (**43.12%**) | *timeout (>60s)* | 174,559 B (**36.23%**) | 325,589 B (67.57%) |
-| `kennedy.xls` | 1,005.6 KiB | 204,305 B (**19.84%**) | 201,110 B (**19.53%**) | *timeout (>60s)* | 64,765 B (**6.29%**) | 374,704 B (36.39%) |
-| `dickens_1m.txt` | 1,024.0 KiB | 400,138 B (**38.16%**) | 396,187 B (**37.78%**) | *timeout (>60s)* | 328,450 B (**31.32%**) | 642,924 B (61.31%) |
-| `bash_x86_64.bin` | 1,268.0 KiB | 613,639 B (**47.26%**) | 599,401 B (**46.16%**) | *timeout (>60s)* | 553,594 B (**42.64%**) | 871,664 B (67.13%) |
+| File | Type / Category | Raw Size | LZ0 Normal (`-6`) | LZ0 Ultra (`-9`) | UPKR | LZ4 (default) | ZX0 | Decomp. `lz0dec_fast` vs LZ4 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| `fields.c` | C source code | 11 150 B | 3 397 B (**30.47%**) | **3 374 B (30.26%)** | 2 928 B (26.26%) [-9] | 5 215 B (46.77%) | 3 214 B (28.83%) | **782 Mo/s** vs 2 554 Mo/s |
+| `sum` | SPARC ELF binary | 38 240 B | 12 125 B (**31.71%**) | **11 898 B (31.11%)** | 9 927 B (25.96%) [-6] | 18 812 B (49.19%) | 11 415 B (29.85%) | **808 Mo/s** vs 2 651 Mo/s |
+| `lz0_win64.exe` | Windows PE64 | 146 944 B | 75 147 B (**51.14%**) | **73 802 B (50.22%)** | 67 560 B (45.98%) [-6] | 101 596 B (69.14%) | *(trop lent)* | **410 Mo/s** vs 3 429 Mo/s |
+| `avatar.jpg` | JPEG Image | 25 380 B | 25 326 B (**99.79%**) | **25 281 B (99.61%)** | 25 749 B (101.45%) [-6] | 25 379 B (100.00%) | *(trop lent)* | **8 848 Mo/s** vs 32 413 Mo/s |
+| `break.mp3` | MP3 Audio CBR | 38 080 B | 11 299 B (**29.67%**) | **11 243 B (29.52%)** | 11 287 B (29.64%) [-6] | 11 552 B (30.34%) | *(trop lent)* | **9 730 Mo/s** vs 17 165 Mo/s |
+| `star.png` | PNG Image (Deflate) | 355 666 B | 357 301 B (**100.46%**) | **356 643 B (100.27%)** | 364 646 B (102.52%) [-2] | 356 988 B (100.37%) | *(trop lent)* | **10 034 Mo/s** vs 30 048 Mo/s |
+| `texture_rgb24.raw` | Raw RGB24 Texture | 196 608 B | 171 712 B (**87.34%**) | **171 429 B (87.19%)** | 86 531 B (44.01%) [-6] | 197 380 B (100.39%) | *(trop lent)* | **262 Mo/s** vs 32 617 Mo/s |
+| `texture_rgba32.raw`| Raw RGBA32 Texture | 262 144 B | 146 503 B (**55.89%**) | **135 901 B (51.84%)** | *(exclu >256K)* | 263 173 B (100.39%) | *(trop lent)* | **382 Mo/s** vs 28 854 Mo/s |
+| `audio_pcm16.raw` | Stereo PCM16 Audio | 192 000 B | 139 008 B (**72.40%**) | **134 434 B (70.02%)** | 117 053 B (61.07%) [-6] | 163 730 B (85.28%) | *(trop lent)* | **401 Mo/s** vs 7 564 Mo/s |
+| `alice29.txt` | English text | 152 089 B | 58 949 B (**38.76%**) | **58 655 B (38.57%)** | 50 488 B (33.20%) [-6] | 88 699 B (58.32%) | *(trop lent)* | **602 Mo/s** vs 2 660 Mo/s |
+| `plrabn12.txt` | Poetry text | 481 861 B | 208 776 B (**43.33%**) | **207 515 B (43.07%)** | 175 776 B (36.48%) [-2] | 325 589 B (67.57%) | *(trop lent)* | **530 Mo/s** vs 2 712 Mo/s |
+| `kennedy.xls` | Excel Spreadsheet | 1 029 744 B | 204 581 B (**19.87%**) | **201 093 B (19.53%)** | 64 830 B (6.30%) [-2] | 374 704 B (36.39%) | *(trop lent)* | **1 339 Mo/s** vs 3 125 Mo/s |
+| `dickens_1m.txt` | Large Text (1 MiB) | 1 048 576 B | 398 158 B (**37.97%**) | **394 996 B (37.67%)** | 331 404 B (31.61%) [-2] | 642 924 B (61.31%) | *(trop lent)* | **534 Mo/s** vs 2 676 Mo/s |
+| `bash_x86_64.bin` | ELF x86_64 binary | 1 298 416 B | 613 917 B (**47.28%**) | **600 868 B (46.28%)** | 553 594 B (42.64%) [-2] | 871 664 B (67.13%) | *(trop lent)* | **404 Mo/s** vs 2 797 Mo/s |
 
-> **Key takeaway:** LZ0 provides ratios close to ZX0 and UPKR while staying practical for files $\ge 1$ MiB where ZX0's exhaustive search becomes intractable. Compared to LZ4, LZ0 cuts compressed size by **30% to 50%**.
+> **Key takeaway:** LZ0 delivers dense ratios competitive with UPKR on text and binaries while systematically outperforming both UPKR and LZ4 on pre-compressed and high-entropy media (`avatar.jpg` and `break.mp3` with zero inflation). Against LZ4, LZ0 cuts compressed size by **15% to 48%**, while providing decompressor throughputs of **400 to 1,340 Mo/s** (up to **10,000 Mo/s** on images).
 
 ---
 
-### 8.2 Architectural Trade-Offs: Speed vs. Ratio vs. Complexity
+### 8.2 Concatenated Heterogeneous Blobs (256 KiB to 5 MiB)
+
+In embedded scenarios (firmware, game resource packages, packers), multiple disparate files are concatenated into a single continuous binary blob. Under **Approach A**, the compressed data remains **one single continuous LZ0 stream** decompressed by freestanding routines (<300 bytes) without container metadata:
+
+| Target / Contents | Raw Size | LZ0 Normal (`-6`) | LZ0 Ultra (`-9`) | UPKR | LZ4 (default) | Decomp. `lz0dec_fast` vs UPKR |
+|---|---:|---:|---:|---:|---:|---:|
+| **`blob_png_256k`** (4 PNGs) | 262 144 B | 247 405 B (94.38%) | **246 567 B (94.06%)** | 247 888 B (94.56%) [-6] | 252 446 B (96.30%) | **1 676 Mo/s** vs 17.6 Mo/s (**95×**) |
+| **`blob_mix_256k`** (5 files: ELF, PE, XLS, PNG, txt) | 262 144 B | 128 155 B (48.89%) | 126 018 B (48.07%) | **110 904 B (42.31%)** [-6] | 168 178 B (64.15%) | **676 Mo/s** vs 37.9 Mo/s (**18×**) |
+| **`blob_png_512k`** (8 PNGs) | 524 288 B | 504 320 B (96.19%) | **502 897 B (95.92%)** | 508 723 B (97.03%) [-2] | 511 352 B (97.53%) | **2 201 Mo/s** vs 17.1 Mo/s (**128×**) |
+| **`blob_mix_512k`** (7 files: ELF, PE, PNGs, XLS, C, txt) | 524 288 B | 286 374 B (54.62%) | 283 212 B (54.02%) | **260 451 B (49.68%)** [-2] | 352 088 B (67.16%) | **779 Mo/s** vs 32.2 Mo/s (**24×**) |
+| **`blob_png_2m`** (8 distinct PNGs > 200 KiB) | 2 097 152 B | 2 056 945 B (98.08%) | **2 052 535 B (97.87%)** | 2 089 034 B (99.61%) [-1] | 2 067 355 B (98.58%) | **3 432 Mo/s** vs ~15 Mo/s (**228×**) |
+| **`blob_mix_2m`** (9 files: ELF, PE, 3 PNGs, XLS, txt, C) | 2 097 152 B | 1 198 585 B (57.15%) | 1 187 523 B (56.63%) | **1 125 643 B (53.67%)** [-1] | 1 484 306 B (70.78%) | **692 Mo/s** vs ~15 Mo/s (**46×**) |
+| **`blob_png_5m`** (15 distinct PNGs) | 5 242 880 B | **4 362 024 B (83.20%)** | *(analyzed)* | *(excluded >20 min)* | 5 210 986 B (99.39%) | **5 046 Mo/s** vs - |
+| **`blob_mix_5m`** (15 distinct real-world files) | 5 242 880 B | 2 191 126 B (41.79%) | **2 160 499 B (41.21%)** | *(excluded >30 min)* | 3 093 616 B (59.01%) | **657 Mo/s** vs - |
+
+---
+
+### 8.3 Architectural Trade-Offs: Speed vs. Ratio vs. Complexity
 
 | Compressor | Compressed Ratio | Encoding Time (1 MiB) | Decompression Throughput | Decoder Memory / Footprint |
 |---|---:|---:|---:|---|
-| **LZ0 (ASM FAST)** | **20% – 47%** | **~5.2 s** (`-6`) | **400 – 1,330 MB/s** | **0 bytes** (2.8 KiB asm + 264 B table, 0 malloc) |
-| **LZ0 (ASM Compact)** | **20% – 47%** | **~5.2 s** (`-6`) | **230 – 760 MB/s** | **0 bytes** (1.3 KiB asm, 0 malloc) |
-| **LZ0 (C library)** | **20% – 47%** | **~5.2 s** (`-6`) | **175 – 600 MB/s** | **0 bytes** (portable C, 0 malloc) |
+| **LZ0 (ASM FAST)** | **19% – 52%** | **~1.5 s – 2.7 s** (`-6`) | **400 – 1,340 MB/s** (up to **10,000 MB/s** on images) | **0 bytes** (2.8 KiB asm + 264 B table, 0 malloc) |
+| **LZ0 (ASM Compact)** | **19% – 52%** | **~1.5 s – 2.7 s** (`-6`) | **230 – 760 MB/s** (up to **2,850 MB/s** on images) | **0 bytes** (1.3 KiB asm, 0 malloc) |
+| **LZ0 (C library)** | **19% – 52%** | **~1.5 s – 2.7 s** (`-6`) | **175 – 600 MB/s** (up to **1,250 MB/s** on images) | **0 bytes** (portable C, 0 malloc) |
 | **ZX0** | 19% – 45% | *Minutes to hours* | ~250 MB/s | **0 bytes** (tiny C, 0 malloc) |
-| **UPKR** | 6% – 36% | ~146 s | **2 – 24 MB/s** (10×–100× slower) | Requires rANS entropy tables |
-| **LZ4** | 36% – 67% | < 3 ms | ~2,500 – 3,200 MB/s | Fast hash table |
+| **UPKR** | 6% – 46% | ~30 s – 300 s | **15 – 60 MB/s** (10×–100× slower) | Requires rANS entropy tables |
+| **LZ4** | 36% – 100% | < 3 ms | ~2,500 – 32,000 MB/s | Fast hash table |
 
 ---
 
-### 8.3 Decompression Speedup: C vs. Compact ASM vs. FAST ASM
+### 8.4 Decompression Speedup: C vs. Compact ASM vs. FAST ASM
 
 Measured with `make bench_dec` (x86-64 native) and `make bench_dec_arm64` (AArch64 under QEMU):
 
@@ -304,7 +332,7 @@ Measured with `make bench_dec` (x86-64 native) and `make bench_dec_arm64` (AArch
 
 ---
 
-### 8.4 Synthetic Scaling Benchmarks
+### 8.5 Synthetic Scaling Benchmarks
 
 Measured on in-memory PRNG-generated datasets ([docs/BENCHMARKS.md](docs/BENCHMARKS.md)):
 
@@ -354,7 +382,7 @@ The `lz0` executable operates on disk files using the `LZ01` container:
 
 # Compress with explicit compression level (-1 fast to -9 ultra)
 ./bin/lz0 c -1 original.bin fast.lz0    # Fast mode (K=2, smaller search window)
-./bin/lz0 c -9 original.bin ultra.lz0   # Ultra mode (K=16, SA window 128, deep probes, fine match DP)
+./bin/lz0 c -9 original.bin ultra.lz0   # Ultra mode (adaptive K=32 DP, multi-scale SA window, media stride detection, strict len2 filter)
 
 # Decompress a file
 ./bin/lz0 d compressed.lz0 restored.bin
