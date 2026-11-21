@@ -30,6 +30,7 @@ typedef struct {
     int score_k;
     int max_states;
     int jump_levels;
+    int bt_depth;
 } lz0_config;
 
 typedef struct {

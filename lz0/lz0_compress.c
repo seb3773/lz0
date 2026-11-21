@@ -12,6 +12,7 @@ void lz0_config_default(lz0_config *cfg, lz0_parse_t parser) {
     cfg->score_k = 8;
     cfg->max_states = 2;
     cfg->jump_levels = 0;
+    cfg->bt_depth = 0;
 }
 
 void lz0_config_level(lz0_config *cfg, int level) {
@@ -29,6 +30,7 @@ void lz0_config_level(lz0_config *cfg, int level) {
         cfg->score_k = 8;
         cfg->max_states = 2;
         cfg->jump_levels = 0;
+        cfg->bt_depth = 0;
         lz0_sa_win = 8;
         lz0_sa_adapt = 1;
         lz0_sdp_fine_matches = 0;
@@ -43,6 +45,7 @@ void lz0_config_level(lz0_config *cfg, int level) {
         cfg->score_k = 8;
         cfg->max_states = 2;
         cfg->jump_levels = 0;
+        cfg->bt_depth = 0;
         lz0_sa_win = 16;
         lz0_sa_adapt = 1;
         lz0_sdp_fine_matches = 0;
@@ -57,6 +60,7 @@ void lz0_config_level(lz0_config *cfg, int level) {
         cfg->score_k = 8;
         cfg->max_states = 8;
         cfg->jump_levels = 0;
+        cfg->bt_depth = 0;
         lz0_sa_win = 64;
         lz0_sa_adapt = 1;
         lz0_sdp_fine_matches = 1;
@@ -71,12 +75,14 @@ void lz0_config_level(lz0_config *cfg, int level) {
         cfg->score_k = 8;
         cfg->max_states = 32;
         cfg->jump_levels = 0;
+        cfg->bt_depth = 32;
         lz0_sa_win = 128;
         lz0_sa_multiscale = 1;
         lz0_sa_adapt = 0;
         lz0_sdp_fine_matches = 1;
         lz0_deep_probe = 4;
         lz0_hash4_probe = 1;
+        lz0_len2_max_off = 512;
     }
 }
 
@@ -102,6 +108,7 @@ void lz0_h2c8_apply(void) {
     lz0_len_code = 3;
     lz0_sa_algo = 1;
     lz0_sdp_census_out = NULL;
+    lz0_len2_max_off = 32;
 }
 
 #if defined(_WIN32)

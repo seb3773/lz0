@@ -156,12 +156,14 @@ Input Data
    - Validated against a deterministic $O(N \log^2 N)$ prefix-doubling reference oracle (`lz0_sa_algo=0`), ensuring byte-identical suffix arrays.
    - **Adaptive & Multi-Scale Probing:** Default mode uses rank-locality search ($\pm 4 \to \pm 8 \to \pm 16$). Ultra mode activates multi-scale probing: dense linear search $1 \dots 128$ plus geometric jumps $\{160, 192, 256, 320, 384, 512\}$ to capture long-range matches on large binaries and dumps.
 3. **Multi-Window Stride & Media Periodicity:** Automatically detects structural repetitions (table columns in CSV/XLS, machine instruction alignment 4/8 bytes, interleaved channels for RGB24 stride 3, RGBA32 stride 4, and stereo PCM16 stride 4) via multi-window autocorrelation and 4-byte MPEG Layer III header validation for MP3 CBR frame synchronization.
+4. **Binary Tree Match Finder (Ultra `-9`):** Maintains a lexicographically ordered binary search tree per 3-byte hash bucket. Rooted at the most recent position, the search path visits strictly older occurrences to produce the true nearest Pareto-optimal match per length, capturing optimal candidates on structured text, source code, and binaries.
 
 ### 5.2 Sparse DP Parser & Profitability Filtering
 Instead of a greedy heuristic or a memory-intensive full DP lattice, LZ0 maintains Pareto-optimal live states per input position ($K=2$ in default `-6`, and adaptive $K=32/16/8$ in Ultra `-9` according to file size).
 
+- **Pareto New-Match Pruning (NEWBEST):** Because `MatchNew` bit-cost is invariant to the source state, emitting new matches from every live state produces strictly dominated states that are immediately discarded by relaxation. The parser emits `MatchNew` only from the lowest-cost Pareto state at each position (and the secondary state if matching the previous offset), halving SDP parsing time while preserving identical optimal compression paths.
 - **Elias Plateau Stepping** (`next_len_plateau`): Because Elias gamma lengths remain constant across powers-of-two intervals ($[2^k, 2^{k+1}-1]$), evaluating intermediate lengths inside a plateau incurs the same bit-cost as the maximum length. The parser skips redundant transitions and only tests plateau upper bounds, dramatically pruning search branches.
-- **Strict Length-2 Profitability Filter**: In high-entropy streams (PNG, JPEG, MP3, encrypted sections), matches of length 2 are accepted only if $offset \le 32$ or if matching the previous offset (`repeat-offset`). This strictly prevents bitstream inflation over raw literals.
+- **Stride-Aware Length-2 Profitability Filter**: In high-entropy streams (PNG, JPEG, MP3, encrypted sections), matches of length 2 are accepted only if $offset \le 32$ (default) or $offset \le 512$ (Ultra), or if matching a detected structural stride or its harmonic multiples up to $8\times$. This unlocks massive multi-kilobyte gains on textures and structured media while strictly preventing bitstream inflation on high-entropy streams and audio.
 
 ---
 

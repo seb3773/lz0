@@ -58,7 +58,7 @@ After that omitted bit, every later decision bit is present in the stream.
 
 Literal payload bytes and the offset LSB byte are stored as whole bytes in stream order. They are not bit-packed.
 
-When a whole byte must be read (literal byte or LSB byte), the decoder consumes the next source byte. Subsequent bits come from a new control byte. For LSB=8 there is no "reuse the LSB of the offset byte as the next bit" backtrack.
+When a whole byte must be read (literal byte or LSB byte), the decoder consumes the next byte directly from the stream. The active control byte and its current bit position (mask) are preserved across byte reads: subsequent control bits continue to be drawn from the current control byte until its 8 bits are exhausted, at which point the next control byte is read from the stream. For LSB=8 there is no "reuse the LSB of the offset byte as the next bit" backtrack.
 
 ### End of stream
 

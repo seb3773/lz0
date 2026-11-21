@@ -41,6 +41,12 @@ typedef struct {
     uint32_t strides[8];
     int n_mru;
     uint32_t mru[8];
+    uint32_t *bt_son;
+    uint32_t *bt_head;
+    uint32_t *bt_head2;
+    uint32_t bt_next;
+    int bt_depth;
+    int bt_hbits;
 } lz0_finder;
 
 typedef struct {
@@ -100,6 +106,7 @@ extern int lz0_sa_count_mode;
 extern int lz0_sa_algo;
 extern int lz0_sdp_fine_matches;
 extern int lz0_len2_max_off;
+int lz0_is_len2_allowed(const lz0_finder *f, uint32_t off);
 extern int lz0_sa_multiscale;
 extern double lz0_sa_build_ms;
 

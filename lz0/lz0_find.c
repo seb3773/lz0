@@ -672,7 +672,7 @@ static int lz0_detect_strides_win(const unsigned char *win, uint32_t win_sz,
         uint32_t p;
         double rate;
     } cand_p_t;
-    cand_p_t cands[64];
+    cand_p_t cands[1024];
     int n_cands = 0;
 
     for (uint32_t p = 2; p <= max_p; p++) {
@@ -684,7 +684,7 @@ static int lz0_detect_strides_win(const unsigned char *win, uint32_t win_sz,
             total++;
         }
         double rate = total ? (double)matches / (double)total : 0;
-        if (rate >= thresh && n_cands < 64) {
+        if (rate >= thresh && n_cands < 1024) {
             cands[n_cands].p = p;
             cands[n_cands].rate = rate;
             n_cands++;
@@ -707,7 +707,7 @@ static int lz0_detect_strides_win(const unsigned char *win, uint32_t win_sz,
                     total++;
                 }
                 double rate = total ? (double)matches / (double)total : 0;
-                if (rate >= thresh && n_cands < 64) {
+                if (rate >= thresh && n_cands < 1024) {
                     cands[n_cands].p = p;
                     cands[n_cands].rate = rate;
                     n_cands++;
@@ -863,6 +863,23 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
         if (lz0_sdp_census_out)
             lz0_sdp_census_out->ms_sa_build = lz0_sa_build_ms;
     }
+    if (cfg->bt_depth > 0) {
+        f->bt_depth = cfg->bt_depth;
+        int hb = 16;
+        while (hb < 22 && (1u << hb) < n)
+            hb++;
+        f->bt_hbits = hb;
+        f->bt_son = (uint32_t *)malloc((size_t)n * 2u * sizeof(uint32_t));
+        f->bt_head = (uint32_t *)malloc(((size_t)1 << hb) * sizeof(uint32_t));
+        f->bt_head2 = (uint32_t *)malloc((size_t)65536 * sizeof(uint32_t));
+        if (!f->bt_son || !f->bt_head || !f->bt_head2) {
+            lz0_finder_free(f);
+            return -1;
+        }
+        memset(f->bt_head, 0xff, ((size_t)1 << hb) * sizeof(uint32_t));
+        memset(f->bt_head2, 0xff, (size_t)65536 * sizeof(uint32_t));
+        f->bt_next = 0;
+    }
     f->num_strides = 0;
     if (cfg->max_candidates >= 16) {
         f->num_strides = lz0_detect_strides(in, n, f->strides, lz0_legacy_single_window_scan ? 4 : 8);
@@ -871,6 +888,12 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
 }
 
 void lz0_finder_free(lz0_finder *f) {
+    free(f->bt_son);
+    free(f->bt_head);
+    free(f->bt_head2);
+    f->bt_son = NULL;
+    f->bt_head = NULL;
+    f->bt_head2 = NULL;
     free(f->prev);
     free(f->head);
     free(f->head3);
@@ -889,6 +912,8 @@ void lz0_finder_free(lz0_finder *f) {
     f->lcp = NULL;
 }
 
+static int bt_update(lz0_finder *f, uint32_t pos, lz0_match *out, int maxout);
+
 static inline uint32_t hash_at(lz0_finder *f, uint32_t i) {
     if ((lz0_chain_prune == 3 || lz0_chain_prune == 4) && i + 3 < f->n)
         return hash4(f->in + i);
@@ -900,6 +925,10 @@ static inline uint32_t hash_at(lz0_finder *f, uint32_t i) {
 }
 
 void lz0_finder_insert_upto(lz0_finder *f, uint32_t pos) {
+    if (f->bt_son) {
+        while (f->bt_next < pos)
+            bt_update(f, f->bt_next++, NULL, 0);
+    }
     if (!f->head || !f->prev)
         return;
     uint32_t i = f->last_insert;
@@ -998,16 +1027,31 @@ static inline int match_score(lz0_match m) {
 
 int lz0_len2_max_off = 32;
 
-static inline int is_valid_candidate(uint32_t len, uint32_t off) {
+int lz0_is_len2_allowed(const lz0_finder *f, uint32_t off) {
+    if (lz0_len2_max_off <= 0)
+        return 1;
+    if (off <= (uint32_t)lz0_len2_max_off)
+        return 1;
+    if (f && f->num_strides > 0) {
+        for (int i = 0; i < f->num_strides; i++) {
+            uint32_t s = f->strides[i];
+            if (s > 0 && (off == s || (off > s && off % s == 0 && off / s <= 8)))
+                return 1;
+        }
+    }
+    return 0;
+}
+
+static inline int is_valid_candidate(const lz0_finder *f, uint32_t len, uint32_t off) {
     if (len < 2 || off == 0)
         return 0;
-    if (len == 2 && lz0_len2_max_off > 0 && off > (uint32_t)lz0_len2_max_off)
+    if (len == 2 && !lz0_is_len2_allowed(f, off))
         return 0;
     return 1;
 }
 
-static int keep_candidate(lz0_match *out, int *n, int max_c, lz0_match m) {
-    if (!is_valid_candidate(m.length, m.offset))
+static int keep_candidate(const lz0_finder *f, lz0_match *out, int *n, int max_c, lz0_match m) {
+    if (!is_valid_candidate(f, m.length, m.offset))
         return 0;
     if (already_has_offset(out, *n, m.offset)) {
         for (int i = 0; i < *n; i++) {
@@ -1067,7 +1111,7 @@ static int sa_probe_side(lz0_finder *f, uint32_t pos, uint32_t src, int known,
             *best_len = ml;
         if (cen) {
             int had = already_has_offset(out, *nout, m.offset);
-            int kept = keep_candidate(out, nout, f->max_candidates, m);
+            int kept = keep_candidate(f, out, nout, f->max_candidates, m);
             if (had)
                 cen->n_sa_dup++;
             else if (kept)
@@ -1075,7 +1119,7 @@ static int sa_probe_side(lz0_finder *f, uint32_t pos, uint32_t src, int known,
             else
                 cen->n_sa_new_drop++;
         } else {
-            keep_candidate(out, nout, f->max_candidates, m);
+            keep_candidate(f, out, nout, f->max_candidates, m);
         }
     }
     return ml;
@@ -1256,6 +1300,93 @@ static void mru_add(lz0_finder *f, uint32_t off) {
         f->n_mru++;
 }
 
+/* Binary-tree match finder. The tree for each 3-byte hash bucket is ordered
+ * lexicographically and rooted at the most recent position. The search path
+ * visits strictly older positions, yielding the offset/length Pareto frontier. */
+static inline uint32_t bt_hash(const lz0_finder *f, const unsigned char *p) {
+    uint32_t v = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
+    return (v * 2654435761u) >> (32 - f->bt_hbits);
+}
+
+static int bt_update(lz0_finder *f, uint32_t pos, lz0_match *out, int maxout) {
+    const unsigned char *in = f->in;
+    uint32_t n = f->n;
+    int nout = 0;
+    if (pos + 1 < n) {
+        uint32_t h2 = ((uint32_t)in[pos] << 8) | in[pos + 1];
+        uint32_t c2 = f->bt_head2[h2];
+        f->bt_head2[h2] = pos;
+        if (out && c2 != LZ0_CHAIN_NIL && maxout > 0) {
+            int ml = lz0_matchlen(in + pos, in + c2, (int)(n - pos));
+            if (ml >= 2 && (ml > 2 || lz0_is_len2_allowed(f, pos - c2))) {
+                out[nout].offset = pos - c2;
+                out[nout].length = (uint32_t)ml;
+                nout++;
+            }
+        }
+    }
+    if (pos + 2 >= n) {
+        f->bt_son[2 * pos] = f->bt_son[2 * pos + 1] = LZ0_CHAIN_NIL;
+        return nout;
+    }
+    uint32_t h = bt_hash(f, in + pos);
+    uint32_t cur = f->bt_head[h];
+    f->bt_head[h] = pos;
+    uint32_t *p0 = &f->bt_son[2 * pos + 1];
+    uint32_t *p1 = &f->bt_son[2 * pos];
+    int len0 = 0, len1 = 0;
+    int best = nout ? (int)out[0].length : 1;
+    int maxl = (int)(n - pos);
+    int depth = f->bt_depth;
+    for (;;) {
+        if (cur == LZ0_CHAIN_NIL || depth-- <= 0) {
+            *p0 = *p1 = LZ0_CHAIN_NIL;
+            break;
+        }
+        int len = len0 < len1 ? len0 : len1;
+        if (len < maxl && in[cur + len] == in[pos + len]) {
+            len++;
+            len += lz0_matchlen(in + pos + len, in + cur + len, maxl - len);
+        }
+        if (len > best) {
+            best = len;
+            if (out && nout < maxout) {
+                if (len > 2 || lz0_is_len2_allowed(f, pos - cur)) {
+                    if (nout && out[nout - 1].offset == pos - cur)
+                        out[nout - 1].length = (uint32_t)len;
+                    else {
+                        out[nout].offset = pos - cur;
+                        out[nout].length = (uint32_t)len;
+                        nout++;
+                    }
+                }
+            }
+            if (len >= maxl) {
+                *p1 = f->bt_son[2 * cur];
+                *p0 = f->bt_son[2 * cur + 1];
+                break;
+            }
+        }
+        if (len >= maxl) {
+            *p1 = f->bt_son[2 * cur];
+            *p0 = f->bt_son[2 * cur + 1];
+            break;
+        }
+        if (in[cur + len] < in[pos + len]) {
+            *p1 = cur;
+            p1 = &f->bt_son[2 * cur + 1];
+            cur = *p1;
+            len1 = len;
+        } else {
+            *p0 = cur;
+            p0 = &f->bt_son[2 * cur];
+            cur = *p0;
+            len0 = len;
+        }
+    }
+    return nout;
+}
+
 int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
                      lz0_match *out, int *last_len) {
     int nout = 0;
@@ -1303,7 +1434,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
         lz0_match m;
         m.offset = 1;
         m.length = (uint32_t)rlen;
-        keep_candidate(out, &nout, f->max_candidates, m);
+        keep_candidate(f, out, &nout, f->max_candidates, m);
         return nout;
     }
 
@@ -1336,7 +1467,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
                     m.length = (uint32_t)ml;
                     if (ml > best_len)
                         best_len = ml;
-                    keep_candidate(out, &nout, f->max_candidates, m);
+                    keep_candidate(f, out, &nout, f->max_candidates, m);
                 }
             }
         }
@@ -1370,7 +1501,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
                         m.length = (uint32_t)ml;
                         if (ml > best_len)
                             best_len = ml;
-                        keep_candidate(out, &nout, f->max_candidates, m);
+                        keep_candidate(f, out, &nout, f->max_candidates, m);
                     }
                 }
             }
@@ -1398,7 +1529,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
                         m.length = (uint32_t)ml;
                         if (ml > best_len)
                             best_len = ml;
-                        keep_candidate(out, &nout, f->max_candidates, m);
+                        keep_candidate(f, out, &nout, f->max_candidates, m);
                     }
                 }
             }
@@ -1431,7 +1562,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
                     match.length = (uint32_t)ml;
                     if (ml > best_len)
                         best_len = ml;
-                    keep_candidate(out, &nout, f->max_candidates, match);
+                    keep_candidate(f, out, &nout, f->max_candidates, match);
                 }
             }
         }
@@ -1455,7 +1586,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
                         m.length = (uint32_t)ml;
                         if (ml > best_len)
                             best_len = ml;
-                        keep_candidate(out, &nout, f->max_candidates, m);
+                        keep_candidate(f, out, &nout, f->max_candidates, m);
                     }
                 }
             }
@@ -1534,7 +1665,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
                     m.length = (uint32_t)ml;
                     if (ml > best_len)
                         best_len = ml;
-                    keep_candidate(out, &nout, f->max_candidates, m);
+                    keep_candidate(f, out, &nout, f->max_candidates, m);
                     if (best_len >= 65536 && nout >= 2)
                         break;
                 }
@@ -1633,7 +1764,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
                                 m.length = (uint32_t)ml;
                                 if (ml > best_len)
                                     best_len = ml;
-                                keep_candidate(out, &nout, f->max_candidates, m);
+                                keep_candidate(f, out, &nout, f->max_candidates, m);
                             }
                         }
                     }
@@ -1663,7 +1794,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
                             m.length = (uint32_t)ml;
                             if (ml > best_len)
                                 best_len = ml;
-                            keep_candidate(out, &nout, f->max_candidates, m);
+                            keep_candidate(f, out, &nout, f->max_candidates, m);
                         }
                     }
                 }
@@ -1690,6 +1821,30 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
     for (int i = 0; i < nout; i++) {
         if (out[i].length >= 4 || (out[i].length >= 3 && out[i].offset <= 512))
             mru_add(f, out[i].offset);
+    }
+    if (f->bt_son) {
+        while (f->bt_next < pos)
+            bt_update(f, f->bt_next++, NULL, 0);
+        if (f->bt_next == pos) {
+            lz0_match bm[64];
+            int nb = bt_update(f, pos, bm, 64);
+            f->bt_next = pos + 1;
+            for (int k = 0; k < nb; k++) {
+                int dup = -1;
+                for (int j = 0; j < nout; j++) {
+                    if (out[j].offset == bm[k].offset) {
+                        dup = j;
+                        break;
+                    }
+                }
+                if (dup >= 0) {
+                    if (bm[k].length > out[dup].length)
+                        out[dup].length = bm[k].length;
+                } else if (nout < 64) {
+                    out[nout++] = bm[k];
+                }
+            }
+        }
     }
     return nout;
 }

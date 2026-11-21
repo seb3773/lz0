@@ -128,7 +128,7 @@ static void best_match_at(lz0_finder *f, uint32_t i, uint32_t last_off, int allo
         if (off == last_off)
             continue;
         int start = 2;
-        if (start == 2 && lz0_len2_max_off > 0 && off > (uint32_t)lz0_len2_max_off)
+        if (start == 2 && !lz0_is_len2_allowed(f, off))
             start = 3;
         while (start <= L) {
             int end = lz0_next_plateau_new(start, L);
@@ -261,7 +261,7 @@ static void options_at(lz0_finder *f, uint32_t i, uint32_t last_off, int allow_l
         if (L < 2 || off == 0 || off == last_off)
             continue;
         int start = 2;
-        if (start == 2 && lz0_len2_max_off > 0 && off > (uint32_t)lz0_len2_max_off)
+        if (start == 2 && !lz0_is_len2_allowed(f, off))
             start = 3;
         while (start <= L) {
             int end = lz0_next_plateau_new(start, L);
@@ -468,7 +468,7 @@ static int lite_match_edges(lz0_finder *f, uint32_t pos, uint32_t last_off, int 
             if (L < 2 || off == 0 || off == last_off)
                 continue;
             int start = 2;
-            if (start == 2 && lz0_len2_max_off > 0 && off > (uint32_t)lz0_len2_max_off)
+            if (start == 2 && !lz0_is_len2_allowed(f, off))
                 start = 3;
             while (start <= L) {
                 int end = lz0_next_plateau_new(start, L);
@@ -861,10 +861,10 @@ static void h2_best_plateau_last(int L, uint32_t last_off, int k, fbr_t *out) {
     }
 }
 
-static void h2_best_plateau_new(int L, uint32_t off, int k, fbr_t *out) {
+static void h2_best_plateau_new(const lz0_finder *f, int L, uint32_t off, int k, fbr_t *out) {
     out->kind = -1;
     int start = 2;
-    if (start == 2 && lz0_len2_max_off > 0 && off > (uint32_t)lz0_len2_max_off)
+    if (start == 2 && !lz0_is_len2_allowed(f, off))
         start = 3;
     while (start <= L) {
         int end = lz0_next_plateau_new(start, L);
@@ -927,7 +927,7 @@ static int h2_collect(lz0_finder *f, uint32_t pos, uint32_t last_off, int can_la
             if (L < 2 || off == 0 || off == last_off)
                 continue;
             fbr_t nw;
-            h2_best_plateau_new(L, off, k, &nw);
+            h2_best_plateau_new(f, L, off, k, &nw);
             if (nw.kind >= 0)
                 fbr_add(br, &nb, cap, nw.kind, nw.len, nw.offset, nw.cost);
             nnew++;
@@ -1111,7 +1111,7 @@ int lz0_parse_dp(lz0_finder *f, lz0_toklist *tl) {
                     if (L < 2 || off == 0 || off == am[i].last_off)
                         continue;
                     int st = 2;
-                    if (st == 2 && lz0_len2_max_off > 0 && off > (uint32_t)lz0_len2_max_off)
+                    if (st == 2 && !lz0_is_len2_allowed(f, off))
                         st = 3;
                     while (st <= L) {
                         int end = lz0_next_plateau_new(st, L);
@@ -1154,7 +1154,7 @@ int lz0_parse_dp(lz0_finder *f, lz0_toklist *tl) {
                 if (L < 2 || off == 0 || off == al[i].last_off)
                     continue;
                 int st = 2;
-                if (st == 2 && lz0_len2_max_off > 0 && off > (uint32_t)lz0_len2_max_off)
+                if (st == 2 && !lz0_is_len2_allowed(f, off))
                     st = 3;
                 while (st <= L) {
                     int end = lz0_next_plateau_new(st, L);
@@ -1362,10 +1362,12 @@ static inline void sdp_emit_one_new2(sdp_st *st, uint8_t *ns, uint32_t i, int en
         cen->n_trans_new++;
 }
 
-static void sdp_emit_new2(sdp_st *st, uint8_t *ns, uint32_t i, int L, uint32_t off,
+static void sdp_emit_new2(const lz0_finder *f, sdp_st *st, uint8_t *ns, uint32_t i, int L, uint32_t off,
                           int cost, uint8_t slot) {
     lz0_sdp_census *cen = lz0_sdp_census_out;
     if (L < 2)
+        return;
+    if (L == 2 && !lz0_is_len2_allowed(f, off))
         return;
     if (lz0_len_code == 3 && lz0_offset_lsb_bits == 8) {
         int cbase = cost + 10 + sdp_elias_bits((((int)off - 1) >> 8) + 1);
@@ -1405,7 +1407,7 @@ static void sdp_emit_new2(sdp_st *st, uint8_t *ns, uint32_t i, int L, uint32_t o
         return;
     }
     int start = 2;
-    if (start == 2 && lz0_len2_max_off > 0 && off > (uint32_t)lz0_len2_max_off)
+    if (start == 2 && !lz0_is_len2_allowed(f, off))
         start = 3;
     while (start <= L) {
         int end = lz0_next_plateau_new(start, L);
@@ -1446,12 +1448,12 @@ static void sdp_emit_last(sdp_st *st, uint8_t *ns, int K, uint32_t i, int L,
     }
 }
 
-static void sdp_emit_new(sdp_st *st, uint8_t *ns, int K, uint32_t i, int L,
+static void sdp_emit_new(const lz0_finder *f, sdp_st *st, uint8_t *ns, int K, uint32_t i, int L,
                          uint32_t off, int cost, uint8_t slot, lz0_sdp_census *cen) {
     if (lz0_sdp_fine_matches) {
         int max_fine = L < 8 ? L : 8;
         for (int l = 2; l <= max_fine; l++) {
-            if (l == 2 && lz0_len2_max_off > 0 && off > (uint32_t)lz0_len2_max_off)
+            if (l == 2 && !lz0_is_len2_allowed(f, off))
                 continue;
             sdp_relax(st + (size_t)(i + (uint32_t)l) * (size_t)K, &ns[i + (uint32_t)l], K,
                       off, 0, cost + lz0_cost_new((int)off, l), i, slot, (uint32_t)l, off,
@@ -1468,7 +1470,7 @@ static void sdp_emit_new(sdp_st *st, uint8_t *ns, int K, uint32_t i, int L,
         return;
     }
     int start = 2;
-    if (start == 2 && lz0_len2_max_off > 0 && off > (uint32_t)lz0_len2_max_off)
+    if (start == 2 && !lz0_is_len2_allowed(f, off))
         start = 3;
     while (start <= L) {
         int end = lz0_next_plateau_new(start, L);
@@ -1583,25 +1585,38 @@ static int lz0_parse_sdp_k2(lz0_finder *f, lz0_toklist *tl) {
                     ms_last += sdp_now_ms() - tl2;
                 }
             }
-            double tn0 = timed ? sdp_now_ms() : 0;
-            if (i > 0) {
-                for (int k = 0; k < nc; k++) {
-                    int L = (int)cands[k].length;
-                    uint32_t off = cands[k].offset;
-                    if (L < 2 || off == 0 || off == last_off) {
-                        if (cen)
-                            cen->n_skip_off++;
-                        continue;
-                    }
-                    if (cen)
-                        cen->n_emit_new++;
-                    sdp_emit_new2(st, ns, i, L, off, cost, slot);
-                }
-            }
-            if (timed) {
+            if (timed)
                 ms_lit += tl1 - tl0;
-                ms_new += sdp_now_ms() - tn0;
+        }
+        if (i > 0) {
+            double tn0 = timed ? sdp_now_ms() : 0;
+            int b = 0;
+            if (nsi > 1 && row[1].cost < row[0].cost)
+                b = 1;
+            int b2 = -1;
+            for (int s2 = 0; s2 < nsi; s2++) {
+                if (row[s2].last_off != row[b].last_off && (b2 < 0 || row[s2].cost < row[b2].cost))
+                    b2 = s2;
             }
+            for (int k = 0; k < nc; k++) {
+                int L = (int)cands[k].length;
+                uint32_t off = cands[k].offset;
+                if (L < 2 || off == 0)
+                    continue;
+                if (L == 2 && !lz0_is_len2_allowed(f, off))
+                    continue;
+                int src = b;
+                if (off == row[b].last_off) {
+                    if (b2 < 0)
+                        continue;
+                    src = b2;
+                }
+                if (cen)
+                    cen->n_emit_new++;
+                sdp_emit_new2(f, st, ns, i, L, off, row[src].cost, (uint8_t)src);
+            }
+            if (timed)
+                ms_new += sdp_now_ms() - tn0;
         }
         if (timed) {
             ms_insert += t1 - t0;
@@ -1698,14 +1713,32 @@ int lz0_parse_sdp(lz0_finder *f, lz0_toklist *tl) {
                 if (L >= 1)
                     sdp_emit_last(st, ns, K, i, L, last_off, cost, slot, cen);
             }
-            if (i > 0) {
-                for (int k = 0; k < nc; k++) {
-                    int L = (int)cands[k].length;
-                    uint32_t off = cands[k].offset;
-                    if (L < 2 || off == 0 || off == last_off)
+        }
+        if (i > 0) {
+            int b = 0;
+            for (int s2 = 1; s2 < nsi; s2++) {
+                if (row[s2].cost < row[b].cost)
+                    b = s2;
+            }
+            int b2 = -1;
+            for (int s2 = 0; s2 < nsi; s2++) {
+                if (row[s2].last_off != row[b].last_off && (b2 < 0 || row[s2].cost < row[b2].cost))
+                    b2 = s2;
+            }
+            for (int k = 0; k < nc; k++) {
+                int L = (int)cands[k].length;
+                uint32_t off = cands[k].offset;
+                if (L < 2 || off == 0)
+                    continue;
+                if (L == 2 && !lz0_is_len2_allowed(f, off))
+                    continue;
+                int src = b;
+                if (off == row[b].last_off) {
+                    if (b2 < 0)
                         continue;
-                    sdp_emit_new(st, ns, K, i, L, off, cost, slot, cen);
+                    src = b2;
                 }
+                sdp_emit_new(f, st, ns, K, i, L, off, row[src].cost, (uint8_t)src, cen);
             }
         }
         if (cen) {
