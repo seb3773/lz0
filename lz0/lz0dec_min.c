@@ -37,13 +37,12 @@ int lz0dec_min(const unsigned char *in, int in_size,
                 FAIL;
             L = (L << 1) | p;
         }
-        if (L < 1 || pos > out_max - L)
+        /* one input bounds check per literal run, not one per byte */
+        if (L < 1 || pos > out_max - L || end - src < L)
             FAIL;
-        for (i = 0; i < L; i++) {
-            if (src >= end)
-                FAIL;
+        out[pos++] = *src++;
+        for (i = 1; i < L; i++)
             out[pos++] = *src++;
-        }
         /* decision bit */
         mask >>= 1;
         if (!mask) {

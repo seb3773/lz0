@@ -21,8 +21,9 @@
 #   a2 : out_start (base output pointer)
 #   a3 : out_end (out + out_max)
 #   a4 : out_ptr (output write pointer)
-#   a5 : bit_val (current control byte)
-#   a6 : bit_mask (current bit position mask: 128..1)
+#   a5 : sentinel bit reader: current bit at bit 63, unread bits below,
+#        then a 1 marker; a5 == a6 after SLLI means the byte is used up
+#   a6 : constant 1 << 63
 #   a7 : last_offset (initialized to 1)
 #   t0..t6 : temporaries (scratch, length, copy pointers)
 
@@ -45,8 +46,9 @@ lz0dec_fast_riscv64:
     # a2 = out_start
 
     li a7, 1                # a7 = last_offset = 1
-    li a5, 0                # a5 = bit_val = 0
-    li a6, 0                # a6 = bit_mask = 0
+    li a6, 1
+    slli a6, a6, 63         # a6 = 1 << 63 (empty-reader marker)
+    srli a5, a6, 1          # a5 = empty sentinel reader (first SLLI -> marker)
 
     # First token is ALWAYS a LiteralRun
     j .Ldo_literal
@@ -54,27 +56,29 @@ lz0dec_fast_riscv64:
     .p2align 3
 .Lmain_loop_after_literal:
     # Decision bit after LiteralRun: 0 -> MatchLast, 1 -> enter new_loop
-    srli a6, a6, 1
-    bnez a6, 1f
+    slli a5, a5, 1
+    bne a5, a6, 1f
     bgeu a0, a1, .Lfail
     lbu a5, 0(a0)
     addi a0, a0, 1
-    li a6, 128
+    slli a5, a5, 1
+    ori a5, a5, 1
+    slli a5, a5, 55
 1:
-    and t0, a5, a6
-    bnez t0, .Lenter_new_loop
+    bltz a5, .Lenter_new_loop
 
 .Ldo_match_last:
     # Fast-path Elias == 1: bit 1 means length 1
-    srli a6, a6, 1
-    bnez a6, 1f
+    slli a5, a5, 1
+    bne a5, a6, 1f
     bgeu a0, a1, .Lfail
     lbu a5, 0(a0)
     addi a0, a0, 1
-    li a6, 128
+    slli a5, a5, 1
+    ori a5, a5, 1
+    slli a5, a5, 55
 1:
-    and t0, a5, a6
-    beqz t0, .Lml_full_elias
+    bgez a5, .Lml_full_elias
     li t2, 1                # t2 = length = 1
     j .Lmatch_last_have_len
 
@@ -85,28 +89,30 @@ lz0dec_fast_riscv64:
     bnez t0, .Lfail
 
     # Payload bit
-    srli a6, a6, 1
-    bnez a6, 2f
+    slli a5, a5, 1
+    bne a5, a6, 2f
     bgeu a0, a1, .Lfail
     lbu a5, 0(a0)
     addi a0, a0, 1
-    li a6, 128
+    slli a5, a5, 1
+    ori a5, a5, 1
+    slli a5, a5, 55
 2:
-    and t0, a5, a6
-    snez t0, t0
+    srli t0, a5, 63
     slli t2, t2, 1
     add t2, t2, t0
 
     # Control bit
-    srli a6, a6, 1
-    bnez a6, 3f
+    slli a5, a5, 1
+    bne a5, a6, 3f
     bgeu a0, a1, .Lfail
     lbu a5, 0(a0)
     addi a0, a0, 1
-    li a6, 128
+    slli a5, a5, 1
+    ori a5, a5, 1
+    slli a5, a5, 55
 3:
-    and t0, a5, a6
-    beqz t0, .Lml_elias_loop
+    bgez a5, .Lml_elias_loop
 
 .Lmatch_last_have_len:
     # Validate last_offset >= 1
@@ -125,17 +131,24 @@ lz0dec_fast_riscv64:
     .p2align 3
 .Ldo_literal:
     # Fast-path Elias == 1
-    srli a6, a6, 1
-    bnez a6, 1f
+    slli a5, a5, 1
+    bne a5, a6, 1f
     bgeu a0, a1, .Lfail
     lbu a5, 0(a0)
     addi a0, a0, 1
-    li a6, 128
+    slli a5, a5, 1
+    ori a5, a5, 1
+    slli a5, a5, 55
 1:
-    and t0, a5, a6
-    beqz t0, .Llit_full_elias
-    li t2, 1                # t2 = length = 1
-    j .Llit_have_len
+    bgez a5, .Llit_full_elias
+    # single-byte literal (most frequent run length): direct copy
+    bgeu a4, a3, .Lfail
+    bgeu a0, a1, .Lfail
+    lbu t0, 0(a0)
+    sb t0, 0(a4)
+    addi a0, a0, 1
+    addi a4, a4, 1
+    j .Lmain_loop_after_literal
 
 .Llit_full_elias:
     li t2, 1
@@ -144,28 +157,30 @@ lz0dec_fast_riscv64:
     bnez t0, .Lfail
 
     # Payload bit
-    srli a6, a6, 1
-    bnez a6, 2f
+    slli a5, a5, 1
+    bne a5, a6, 2f
     bgeu a0, a1, .Lfail
     lbu a5, 0(a0)
     addi a0, a0, 1
-    li a6, 128
+    slli a5, a5, 1
+    ori a5, a5, 1
+    slli a5, a5, 55
 2:
-    and t0, a5, a6
-    snez t0, t0
+    srli t0, a5, 63
     slli t2, t2, 1
     add t2, t2, t0
 
     # Control bit
-    srli a6, a6, 1
-    bnez a6, 3f
+    slli a5, a5, 1
+    bne a5, a6, 3f
     bgeu a0, a1, .Lfail
     lbu a5, 0(a0)
     addi a0, a0, 1
-    li a6, 128
+    slli a5, a5, 1
+    ori a5, a5, 1
+    slli a5, a5, 55
 3:
-    and t0, a5, a6
-    beqz t0, .Llit_elias_loop
+    bgez a5, .Llit_elias_loop
 
 .Llit_have_len:
     # Check out_ptr + L <= out_end
@@ -252,44 +267,48 @@ lz0dec_fast_riscv64:
     .p2align 3
 .Lenter_new_loop:
     # Read 1 bit: 0 -> EOF, 1 -> MatchNew
-    srli a6, a6, 1
-    bnez a6, 1f
+    slli a5, a5, 1
+    bne a5, a6, 1f
     bgeu a0, a1, .Lfail
     lbu a5, 0(a0)
     addi a0, a0, 1
-    li a6, 128
+    slli a5, a5, 1
+    ori a5, a5, 1
+    slli a5, a5, 55
 1:
-    and t0, a5, a6
-    beqz t0, .Leof_reached
+    bgez a5, .Leof_reached
 
     # Bit 1: MatchNew -> Inverted Elias for offset MSB
     li t1, 1                # t1 = msb
 .Lmsb_elias_loop:
-    srli a6, a6, 1
-    bnez a6, 2f
+    slli a5, a5, 1
+    bne a5, a6, 2f
     bgeu a0, a1, .Lfail
     lbu a5, 0(a0)
     addi a0, a0, 1
-    li a6, 128
+    slli a5, a5, 1
+    ori a5, a5, 1
+    slli a5, a5, 55
 2:
-    and t0, a5, a6
-    bnez t0, .Lmsb_elias_done
+    bltz a5, .Lmsb_elias_done
 
-    srli t0, t1, 29
-    bnez t0, .Lfail
 
-    srli a6, a6, 1
-    bnez a6, 3f
+    slli a5, a5, 1
+    bne a5, a6, 3f
     bgeu a0, a1, .Lfail
     lbu a5, 0(a0)
     addi a0, a0, 1
-    li a6, 128
+    slli a5, a5, 1
+    ori a5, a5, 1
+    slli a5, a5, 55
 3:
-    and t0, a5, a6
-    seqz t0, t0             # Inverted bit: 1 if bit was 0, 0 if bit was 1
+    not t0, a5               # inverted bit
+    srli t0, t0, 63
     slli t1, t1, 1
     add t1, t1, t0
-    j .Lmsb_elias_loop
+    srli t0, t1, 30          # limit check folded into the back-edge (v >= 2^30 after shift <=> v >= 2^29 before)
+    beqz t0, .Lmsb_elias_loop
+    j .Lfail
 
 .Lmsb_elias_done:
     blez t1, .Lfail
@@ -310,39 +329,42 @@ lz0dec_fast_riscv64:
 
     # Read 3 bits for MatchNew length
     # Bit 1
-    srli a6, a6, 1
-    bnez a6, 4f
+    slli a5, a5, 1
+    bne a5, a6, 4f
     bgeu a0, a1, .Lfail
     lbu a5, 0(a0)
     addi a0, a0, 1
-    li a6, 128
+    slli a5, a5, 1
+    ori a5, a5, 1
+    slli a5, a5, 55
 4:
-    and t0, a5, a6
-    snez t2, t0
+    srli t2, a5, 63
 
     # Bit 2
-    srli a6, a6, 1
-    bnez a6, 5f
+    slli a5, a5, 1
+    bne a5, a6, 5f
     bgeu a0, a1, .Lfail
     lbu a5, 0(a0)
     addi a0, a0, 1
-    li a6, 128
+    slli a5, a5, 1
+    ori a5, a5, 1
+    slli a5, a5, 55
 5:
-    and t0, a5, a6
-    snez t0, t0
+    srli t0, a5, 63
     slli t2, t2, 1
     add t2, t2, t0
 
     # Bit 3
-    srli a6, a6, 1
-    bnez a6, 6f
+    slli a5, a5, 1
+    bne a5, a6, 6f
     bgeu a0, a1, .Lfail
     lbu a5, 0(a0)
     addi a0, a0, 1
-    li a6, 128
+    slli a5, a5, 1
+    ori a5, a5, 1
+    slli a5, a5, 55
 6:
-    and t0, a5, a6
-    snez t0, t0
+    srli t0, a5, 63
     slli t2, t2, 1
     add t2, t2, t0
 
@@ -355,31 +377,33 @@ lz0dec_fast_riscv64:
     # Read uninverted Elias gamma
     li t2, 1
 .Lnl_elias_loop:
-    srli a6, a6, 1
-    bnez a6, 7f
+    slli a5, a5, 1
+    bne a5, a6, 7f
     bgeu a0, a1, .Lfail
     lbu a5, 0(a0)
     addi a0, a0, 1
-    li a6, 128
+    slli a5, a5, 1
+    ori a5, a5, 1
+    slli a5, a5, 55
 7:
-    and t0, a5, a6
-    bnez t0, .Lnl_elias_done
+    bltz a5, .Lnl_elias_done
 
-    srli t0, t2, 29
-    bnez t0, .Lfail
 
-    srli a6, a6, 1
-    bnez a6, 8f
+    slli a5, a5, 1
+    bne a5, a6, 8f
     bgeu a0, a1, .Lfail
     lbu a5, 0(a0)
     addi a0, a0, 1
-    li a6, 128
+    slli a5, a5, 1
+    ori a5, a5, 1
+    slli a5, a5, 55
 8:
-    and t0, a5, a6
-    snez t0, t0
+    srli t0, a5, 63
     slli t2, t2, 1
     add t2, t2, t0
-    j .Lnl_elias_loop
+    srli t0, t2, 30          # limit check folded into the back-edge (v >= 2^30 after shift <=> v >= 2^29 before)
+    beqz t0, .Lnl_elias_loop
+    j .Lfail
 
 .Lnl_elias_done:
     addi t2, t2, 8
@@ -546,15 +570,16 @@ lz0dec_fast_riscv64:
 
 .Lafter_match:
     # Decision bit after Match: 0 -> LiteralRun, 1 -> new_loop
-    srli a6, a6, 1
-    bnez a6, 1f
+    slli a5, a5, 1
+    bne a5, a6, 1f
     bgeu a0, a1, .Lfail
     lbu a5, 0(a0)
     addi a0, a0, 1
-    li a6, 128
+    slli a5, a5, 1
+    ori a5, a5, 1
+    slli a5, a5, 55
 1:
-    and t0, a5, a6
-    beqz t0, .Ldo_literal
+    bgez a5, .Ldo_literal
     j .Lenter_new_loop
 
 .Leof_reached:

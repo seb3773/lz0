@@ -10,7 +10,9 @@
  * High-performance hand-crafted AArch64 / ARM64 assembly decoder for LZ0:
  * - 100% pure leaf function: ZERO stack frame allocations (0 bytes stack).
  * - ZERO subroutine calls (no bl/ret) in the decompression hot loop.
- * - Inlined state machine with mask-based bitreader (tst + cset).
+ * - Inlined state machine with a sentinel bitreader: w6 = [unread bits][1]
+ *   [0..] left-aligned at bit 31; ADDS shifts the next bit into C and flags
+ *   exhaustion in Z. Payload bits accumulate with a single ADC.
  * - Fast-path for Elias gamma == 1 (resolved in 4 instructions without loop).
  * - 64-bit wildcopy transfers with boundary safety check.
  * - Broadcasted 64-bit stores for offset == 1 runs.
@@ -35,8 +37,7 @@ lz0dec_arm64:
     /* x2 = out_start */
 
     mov x5, #1              /* x5 = last_offset = 1 */
-    mov w6, #0              /* w6 = val = 0 */
-    mov w7, #0              /* w7 = mask = 0 */
+    mov w6, #0x80000000     /* w6 = sentinel bit reader, empty */
 
     /* First token is ALWAYS a LiteralRun */
     b .do_literal
@@ -44,27 +45,29 @@ lz0dec_arm64:
     .p2align 4
 .main_loop_after_literal:
     /* Decision bit after LiteralRun: 0 -> MatchLast, 1 -> enter new_loop */
-    lsr w7, w7, #1
-    cbnz w7, 1f
+    adds w6, w6, w6
+    b.ne 1f
     cmp x0, x1
     b.hs .fail
-    ldrb w6, [x0], #1
-    mov w7, #128
+    ldrb w7, [x0], #1
+    lsl w7, w7, #24
+    orr w6, w7, #0x800000
+    adds w6, w6, w6
 1:
-    tst w6, w7
-    b.ne .enter_new_loop
+    b.cs .enter_new_loop
 
 .do_match_last:
     /* Fast-path Elias == 1 */
-    lsr w7, w7, #1
-    cbnz w7, 1f
+    adds w6, w6, w6
+    b.ne 1f
     cmp x0, x1
     b.hs .fail
-    ldrb w6, [x0], #1
-    mov w7, #128
+    ldrb w7, [x0], #1
+    lsl w7, w7, #24
+    orr w6, w7, #0x800000
+    adds w6, w6, w6
 1:
-    tst w6, w7
-    b.eq .match_last_full_elias
+    b.cc .match_last_full_elias
     mov x8, #1
     b .match_last_have_len
 
@@ -76,27 +79,28 @@ lz0dec_arm64:
     cbnz x9, .fail
 
     /* Payload bit */
-    lsr w7, w7, #1
-    cbnz w7, 2f
+    adds w6, w6, w6
+    b.ne 2f
     cmp x0, x1
     b.hs .fail
-    ldrb w6, [x0], #1
-    mov w7, #128
+    ldrb w7, [x0], #1
+    lsl w7, w7, #24
+    orr w6, w7, #0x800000
+    adds w6, w6, w6
 2:
-    tst w6, w7
-    cset x9, ne
-    add x8, x9, x8, lsl #1
+    adc x8, x8, x8
 
     /* Control bit */
-    lsr w7, w7, #1
-    cbnz w7, 3f
+    adds w6, w6, w6
+    b.ne 3f
     cmp x0, x1
     b.hs .fail
-    ldrb w6, [x0], #1
-    mov w7, #128
+    ldrb w7, [x0], #1
+    lsl w7, w7, #24
+    orr w6, w7, #0x800000
+    adds w6, w6, w6
 3:
-    tst w6, w7
-    b.eq .ml_elias_loop
+    b.cc .ml_elias_loop
 
 .match_last_have_len:
     /* Validate last_offset >= 1 */
@@ -118,17 +122,24 @@ lz0dec_arm64:
     .p2align 4
 .do_literal:
     /* Fast-path Elias == 1 */
-    lsr w7, w7, #1
-    cbnz w7, 1f
+    adds w6, w6, w6
+    b.ne 1f
     cmp x0, x1
     b.hs .fail
-    ldrb w6, [x0], #1
-    mov w7, #128
+    ldrb w7, [x0], #1
+    lsl w7, w7, #24
+    orr w6, w7, #0x800000
+    adds w6, w6, w6
 1:
-    tst w6, w7
-    b.eq .lit_full_elias
-    mov x8, #1
-    b .lit_have_len
+    b.cc .lit_full_elias
+    /* single-byte literal (most frequent run length): direct copy */
+    cmp x3, x4
+    b.hs .fail
+    cmp x0, x1
+    b.hs .fail
+    ldrb w9, [x0], #1
+    strb w9, [x3], #1
+    b .main_loop_after_literal
 
 .lit_full_elias:
     mov x8, #1
@@ -137,27 +148,28 @@ lz0dec_arm64:
     cbnz x9, .fail
 
     /* Payload bit */
-    lsr w7, w7, #1
-    cbnz w7, 2f
+    adds w6, w6, w6
+    b.ne 2f
     cmp x0, x1
     b.hs .fail
-    ldrb w6, [x0], #1
-    mov w7, #128
+    ldrb w7, [x0], #1
+    lsl w7, w7, #24
+    orr w6, w7, #0x800000
+    adds w6, w6, w6
 2:
-    tst w6, w7
-    cset x9, ne
-    add x8, x9, x8, lsl #1
+    adc x8, x8, x8
 
     /* Control bit */
-    lsr w7, w7, #1
-    cbnz w7, 3f
+    adds w6, w6, w6
+    b.ne 3f
     cmp x0, x1
     b.hs .fail
-    ldrb w6, [x0], #1
-    mov w7, #128
+    ldrb w7, [x0], #1
+    lsl w7, w7, #24
+    orr w6, w7, #0x800000
+    adds w6, w6, w6
 3:
-    tst w6, w7
-    b.eq .lit_elias_loop
+    b.cc .lit_elias_loop
 
 .lit_have_len:
     /* Check out_ptr + L <= out_end */
@@ -222,43 +234,46 @@ lz0dec_arm64:
     .p2align 4
 .enter_new_loop:
     /* Read 1 bit: 0 -> EOF, 1 -> MatchNew */
-    lsr w7, w7, #1
-    cbnz w7, 1f
+    adds w6, w6, w6
+    b.ne 1f
     cmp x0, x1
     b.hs .fail
-    ldrb w6, [x0], #1
-    mov w7, #128
+    ldrb w7, [x0], #1
+    lsl w7, w7, #24
+    orr w6, w7, #0x800000
+    adds w6, w6, w6
 1:
-    tst w6, w7
-    b.eq .eof_reached
+    b.cc .eof_reached
 
     /* Bit 1: MatchNew -> Inverted Elias for offset MSB */
     mov x8, #1
 .msb_elias_loop:
-    lsr w7, w7, #1
-    cbnz w7, 2f
+    adds w6, w6, w6
+    b.ne 2f
     cmp x0, x1
     b.hs .fail
-    ldrb w6, [x0], #1
-    mov w7, #128
+    ldrb w7, [x0], #1
+    lsl w7, w7, #24
+    orr w6, w7, #0x800000
+    adds w6, w6, w6
 2:
-    tst w6, w7
-    b.ne .msb_elias_done
+    b.cs .msb_elias_done
 
-    lsr x9, x8, #29
-    cbnz x9, .fail
 
-    lsr w7, w7, #1
-    cbnz w7, 3f
+    adds w6, w6, w6
+    b.ne 3f
     cmp x0, x1
     b.hs .fail
-    ldrb w6, [x0], #1
-    mov w7, #128
+    ldrb w7, [x0], #1
+    lsl w7, w7, #24
+    orr w6, w7, #0x800000
+    adds w6, w6, w6
 3:
-    tst w6, w7
-    cset x9, eq             /* Inverted bit: 1 if bit was 0, 0 if bit was 1 */
+    cset x9, cc             /* Inverted bit: 1 if bit was 0, 0 if bit was 1 */
     add x8, x9, x8, lsl #1
-    b .msb_elias_loop
+    lsr x9, x8, #30         /* limit check folded into the back-edge: v >= 2^30 after the shift <=> v >= 2^29 before it */
+    cbz x9, .msb_elias_loop
+    b .fail
 
 .msb_elias_done:
     cmp x8, #1
@@ -282,39 +297,40 @@ lz0dec_arm64:
 
     /* Read 3 bits for MatchNew length */
     /* Bit 1 */
-    lsr w7, w7, #1
-    cbnz w7, 4f
+    adds w6, w6, w6
+    b.ne 4f
     cmp x0, x1
     b.hs .fail
-    ldrb w6, [x0], #1
-    mov w7, #128
+    ldrb w7, [x0], #1
+    lsl w7, w7, #24
+    orr w6, w7, #0x800000
+    adds w6, w6, w6
 4:
-    tst w6, w7
-    cset w11, ne
+    cset w11, cs
 
     /* Bit 2 */
-    lsr w7, w7, #1
-    cbnz w7, 5f
+    adds w6, w6, w6
+    b.ne 5f
     cmp x0, x1
     b.hs .fail
-    ldrb w6, [x0], #1
-    mov w7, #128
+    ldrb w7, [x0], #1
+    lsl w7, w7, #24
+    orr w6, w7, #0x800000
+    adds w6, w6, w6
 5:
-    tst w6, w7
-    cset w9, ne
-    add w11, w9, w11, lsl #1
+    adc w11, w11, w11
 
     /* Bit 3 */
-    lsr w7, w7, #1
-    cbnz w7, 6f
+    adds w6, w6, w6
+    b.ne 6f
     cmp x0, x1
     b.hs .fail
-    ldrb w6, [x0], #1
-    mov w7, #128
+    ldrb w7, [x0], #1
+    lsl w7, w7, #24
+    orr w6, w7, #0x800000
+    adds w6, w6, w6
 6:
-    tst w6, w7
-    cset w9, ne
-    add w11, w9, w11, lsl #1
+    adc w11, w11, w11
 
     cmp w11, #7
     b.hs .new_len_elias
@@ -325,30 +341,31 @@ lz0dec_arm64:
     /* Read uninverted Elias gamma */
     mov x8, #1
 .nl_elias_loop:
-    lsr w7, w7, #1
-    cbnz w7, 7f
+    adds w6, w6, w6
+    b.ne 7f
     cmp x0, x1
     b.hs .fail
-    ldrb w6, [x0], #1
-    mov w7, #128
+    ldrb w7, [x0], #1
+    lsl w7, w7, #24
+    orr w6, w7, #0x800000
+    adds w6, w6, w6
 7:
-    tst w6, w7
-    b.ne .nl_elias_done
+    b.cs .nl_elias_done
 
-    lsr x9, x8, #29
-    cbnz x9, .fail
 
-    lsr w7, w7, #1
-    cbnz w7, 8f
+    adds w6, w6, w6
+    b.ne 8f
     cmp x0, x1
     b.hs .fail
-    ldrb w6, [x0], #1
-    mov w7, #128
+    ldrb w7, [x0], #1
+    lsl w7, w7, #24
+    orr w6, w7, #0x800000
+    adds w6, w6, w6
 8:
-    tst w6, w7
-    cset x9, ne
-    add x8, x9, x8, lsl #1
-    b .nl_elias_loop
+    adc x8, x8, x8
+    lsr x9, x8, #30         /* limit check folded into the back-edge: v >= 2^30 after the shift <=> v >= 2^29 before it */
+    cbz x9, .nl_elias_loop
+    b .fail
 
 .nl_elias_done:
     add x8, x8, #8
@@ -470,15 +487,16 @@ lz0dec_arm64:
 
 .after_match:
     /* Decision bit after Match (MatchLast or MatchNew): 0 -> LiteralRun, 1 -> new_loop */
-    lsr w7, w7, #1
-    cbnz w7, 9f
+    adds w6, w6, w6
+    b.ne 9f
     cmp x0, x1
     b.hs .fail
-    ldrb w6, [x0], #1
-    mov w7, #128
+    ldrb w7, [x0], #1
+    lsl w7, w7, #24
+    orr w6, w7, #0x800000
+    adds w6, w6, w6
 9:
-    tst w6, w7
-    b.eq .do_literal
+    b.cc .do_literal
     b .enter_new_loop
 
 .eof_reached:

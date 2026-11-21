@@ -179,43 +179,46 @@ The repository provides independent, interoperable decoders tailored for differe
 
 #### Compact Assembly Implementations (Footprint & RAM-efficient)
 4. **`lz0/lz0dec_x86_64.s` (`lz0dec_x86_64` / `lz0dec_compact`)**:  
-   Compact hand-crafted x86-64 assembly decoder (~1.3 KiB code size). Zero lookup tables, pure arithmetic bit-unpacking, tail-overlapping 64-bit stores, and zero heap allocations.
+   Compact hand-crafted x86-64 assembly decoder (~1.2 KiB code size). Zero lookup tables, pure arithmetic bit-unpacking with sentinel bit reader (`add r8b, r8b`), 32-byte stack frame, tail-overlapping 64-bit stores, and zero heap allocations.
 5. **`lz0/lz0dec_arm64.s` (`lz0dec_arm64` / `lz0dec_compact`)**:  
-   Compact hand-crafted 64-bit ARM (AArch64) assembly decoder (~1.3 KiB code size). Pure leaf function, zero lookup tables, and zero heap allocations.
+   Compact hand-crafted 64-bit ARM (AArch64) assembly decoder (~1.3 KiB code size). Pure leaf function (0 bytes stack), sentinel bit reader (`adds w6, w6, w6`), zero lookup tables, and zero heap allocations.
+6. **`lz0/lz0dec_riscv64.s` (`lz0dec_riscv64` / `lz0dec_compact`)**:  
+   Compact hand-crafted 64-bit RISC-V (RV64GC) assembly decoder (~1.1 KiB code size). Pure leaf function (0 bytes stack), sign-bit sentinel reader, folded Elias back-edge checks, zero lookup tables, and zero heap allocations.
 
 #### High-Throughput Assembly Implementations ("FAST" Engine)
-6. **`lz0/lz0dec_fast_x86_64.s` (`lz0dec_fast_x86_64` / `lz0dec_fast`)**:  
-   Ultra-fast x86-64 assembly decoder (~2.8 KiB code size + 264-byte constant table). Delivers top-tier throughput (up to 800–1200+ MB/s) with a dual FAST/SAFE engine architecture.
-7. **`lz0/lz0dec_fast_arm64.s` (`lz0dec_fast_arm64` / `lz0dec_fast`)**:  
-   Ultra-fast AArch64 assembly decoder (~2.7 KiB code size + 264-byte constant table). Pure leaf (0 stack bytes), NEON vector copies, and branch-free Elias gamma decoding.
+7. **`lz0/lz0dec_fast_x86_64.s` (`lz0dec_fast_x86_64` / `lz0dec_fast`)**:  
+   Ultra-fast x86-64 assembly decoder (~2.7 KiB code size + 264-byte constant table). Delivers top-tier throughput (up to 850–1,350+ MB/s) with a dual FAST/SAFE engine architecture, in-window offset MSB decoding up to 8 MiB ($9 \le n \le 15$), and SSE2 vector copies.
+8. **`lz0/lz0dec_fast_arm64.s` (`lz0dec_fast_arm64` / `lz0dec_fast`)**:  
+   Ultra-fast AArch64 assembly decoder (~2.6 KiB code size + 264-byte constant table). Pure leaf (0 stack bytes), NEON vector copies, in-window offset MSB decoding ($9 \le n \le 15$), and branch-free Elias gamma decoding.
+9. **`lz0/lz0dec_fast_riscv64.s` (`lz0dec_fast_riscv64` / `lz0dec_fast`)**:  
+   High-throughput RV64GC assembly decoder (~1.3 KiB code size + 264-byte constant table). Pure leaf (0 stack bytes), sign-bit sentinel reader, 64-bit unaligned wildcopies, and table-assisted Elias gamma decoding.
 
-### Architecture du Décodeur ASM "FAST" (x86-64 & ARM64)
+### Architecture des Décodeurs ASM "FAST" et "Compact"
 
-Le décodeur haute performance introduit plusieurs innovations micro-architecturales avancées :
+Les décodeurs assembleur introduisent plusieurs innovations micro-architecturales avancées :
 
 * **Architecture à deux moteurs (FAST vs SAFE)** :
   * **Moteur FAST** (actif tant qu'il reste au moins 16 octets en entrée et en sortie) : utilise des transferts vectoriels de 16 octets (SSE2 `movdqu` sur x86, NEON `ldr q`/`str q` sur ARM64).
-  * **Moteur SAFE** (pour les 16 derniers octets et les très rares codes Elias géants) : lecteur de bits à sentinelle (`add r8b, r8b` sur x86, `adds w8, w8, w8` sur ARM plaçant le bit dans le carry et détectant l'épuisement par le zero flag), éliminant le registre compteur de bits et garantissant **zéro dépassement de mémoire**.
+  * **Moteur SAFE** (pour les 16 derniers octets et les rares très grands codes Elias) : lecteur de bits à sentinelle (`add r8b, r8b` sur x86, `adds w6, w6, w6` sur ARM, et bit de signe sur RV64), éliminant le registre compteur de bits et garantissant **zéro dépassement de mémoire**.
 
-* **La "Fenêtre de Segment" (Résolution de la contrainte LZ0)** :
-  * Dans LZ0, les octets bruts (littéraux et octet bas de match) sont entrelacés avec des groupes de bits de contrôle. Un refill classique de 64 bits avalerait des octets de littéraux.
-  * **L'idée clé** : tous les bits de contrôle entre deux lectures d'octets bruts forment un segment continu. Le décodeur charge une fenêtre de 64 bits (\(W = \text{leftover} \mid (\text{bswap}(\text{load64}) \gg k)\)), décode l'intégralité du segment en registres par décalages, et ne commet le pointeur (`in_ptr += q >> 3`) qu'au moment de lire le prochain octet brut.
-  * **Impact** : élimination des tests de refill par bit (qui provoquaient de nombreuses erreurs de prédiction de branchement dans le texte).
+* **La "Fenêtre de Segment" et Décodage In-Window Étendu ($n \le 15$)** :
+  * Dans LZ0, les octets bruts (littéraux et octet bas de match) sont entrelacés avec des groupes de bits de contrôle. Le décodeur charge une fenêtre de 64 bits (\(W = \text{leftover} \mid (\text{bswap}(\text{load64}) \gg k)\)), décode l'intégralité du segment en registres par décalages, et ne commet le pointeur (`in_ptr += q >> 3`) qu'au moment de lire le prochain octet brut.
+  * **Extension in-window $9 \le n \le 15$** : sur les fichiers de plus de 1 Mo, jusqu'à 17,5 % des MatchNew ont un offset $\ge 128$ Ko. Le décodeur traite désormais ces offsets (jusqu'à 8 Mo) directement dans la fenêtre 64 bits via 4 lectures dans la table existante de 256 octets, sans jamais sortir vers le moteur SAFE (+25 % de débit sur 1 Mo).
 
 * **Décodage Elias Gamma sans branchement (*Branch-Free*)** :
-  * Pour \(n \le 8\) (longueurs \(\le 511\) et distances \(\le 131\ 071\), soit >99 % des cas réels) :
+  * Pour \(n \le 8\) (longueurs \(\le 511\) et distances \(\le 131\ 071\)) :
     * Détection directe de la taille en 1 instruction : `bsr` (x86-64) ou `clz` (ARM64).
     * Extraction de la charge utile via deux lectures dans une table compacte de 256 octets (`.Lunzip`).
     * Zéro boucle, zéro pénalité de branchement (*branch misprediction*).
 
-* **Élimination totale des appels de fonction (`call` / `ret`)** :
-  * Sur x86-64, tous les sites d'appels ont été inlinés dans la boucle principale.
-  * Sur ARM64, la fonction est une **feuille pure (*pure leaf*)** : 0 octet alloué sur la pile, utilisation exclusive des registres appelants banalisés (`x0..x17` et `v0`).
+* **Lecteur de bits à sentinelle (Décodeurs Compacts)** :
+  * Un bit marqueur `1` est placé sous la charge utile. Sur x86-64 (`add r8b, r8b`), l'épuisement est signalé par ZF et le bit dans CF, libérant des registres et ramenant la pile à 32 octets. Sur ARM64 et RV64GC, les décodeurs compacts sont des **feuilles pures (*pure leaf*)** à 0 octet de pile.
 
-### Safety Contract
+### Safety Contract & Memory Protection
 All decoders adhere to strict safety guarantees:
 - Return `-1` on any corrupted token, out-of-bounds offset, truncated stream, or buffer overrun.
 - Never write beyond `out_max` and never read past `in_size`.
+- Hardware-enforced guard page testing (`tests/test_guard.c` with `mprotect(PROT_NONE)` immediately after input and output buffers) systematically verifies zero over-read and zero over-write under truncation and bit-flips across all architectures.
 - Overlap-safe byte-by-byte copying.
 
 ---
@@ -249,22 +252,22 @@ Comparison on real-world representative files (Canterbury, Silesia, Windows PE, 
 
 | File | Type / Category | Raw Size | LZ0 Normal (`-6`) | LZ0 Ultra (`-9`) | UPKR | LZ4 (default) | ZX0 | Decomp. `lz0dec_fast` vs LZ4 |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| `fields.c` | C source code | 11 150 B | 3 397 B (**30.47%**) | **3 374 B (30.26%)** | 2 928 B (26.26%) [-9] | 5 215 B (46.77%) | 3 214 B (28.83%) | **782 Mo/s** vs 2 554 Mo/s |
-| `sum` | SPARC ELF binary | 38 240 B | 12 125 B (**31.71%**) | **11 898 B (31.11%)** | 9 927 B (25.96%) [-6] | 18 812 B (49.19%) | 11 415 B (29.85%) | **808 Mo/s** vs 2 651 Mo/s |
-| `lz0_win64.exe` | Windows PE64 | 146 944 B | 75 147 B (**51.14%**) | **73 802 B (50.22%)** | 67 560 B (45.98%) [-6] | 101 596 B (69.14%) | *(trop lent)* | **410 Mo/s** vs 3 429 Mo/s |
-| `avatar.jpg` | JPEG Image | 25 380 B | 25 326 B (**99.79%**) | **25 281 B (99.61%)** | 25 749 B (101.45%) [-6] | 25 379 B (100.00%) | *(trop lent)* | **8 848 Mo/s** vs 32 413 Mo/s |
-| `break.mp3` | MP3 Audio CBR | 38 080 B | 11 299 B (**29.67%**) | **11 243 B (29.52%)** | 11 287 B (29.64%) [-6] | 11 552 B (30.34%) | *(trop lent)* | **9 730 Mo/s** vs 17 165 Mo/s |
-| `star.png` | PNG Image (Deflate) | 355 666 B | 357 301 B (**100.46%**) | **356 643 B (100.27%)** | 364 646 B (102.52%) [-2] | 356 988 B (100.37%) | *(trop lent)* | **10 034 Mo/s** vs 30 048 Mo/s |
-| `texture_rgb24.raw` | Raw RGB24 Texture | 196 608 B | 171 712 B (**87.34%**) | **171 429 B (87.19%)** | 86 531 B (44.01%) [-6] | 197 380 B (100.39%) | *(trop lent)* | **262 Mo/s** vs 32 617 Mo/s |
-| `texture_rgba32.raw`| Raw RGBA32 Texture | 262 144 B | 146 503 B (**55.89%**) | **135 901 B (51.84%)** | *(exclu >256K)* | 263 173 B (100.39%) | *(trop lent)* | **382 Mo/s** vs 28 854 Mo/s |
-| `audio_pcm16.raw` | Stereo PCM16 Audio | 192 000 B | 139 008 B (**72.40%**) | **134 434 B (70.02%)** | 117 053 B (61.07%) [-6] | 163 730 B (85.28%) | *(trop lent)* | **401 Mo/s** vs 7 564 Mo/s |
-| `alice29.txt` | English text | 152 089 B | 58 949 B (**38.76%**) | **58 655 B (38.57%)** | 50 488 B (33.20%) [-6] | 88 699 B (58.32%) | *(trop lent)* | **602 Mo/s** vs 2 660 Mo/s |
-| `plrabn12.txt` | Poetry text | 481 861 B | 208 776 B (**43.33%**) | **207 515 B (43.07%)** | 175 776 B (36.48%) [-2] | 325 589 B (67.57%) | *(trop lent)* | **530 Mo/s** vs 2 712 Mo/s |
-| `kennedy.xls` | Excel Spreadsheet | 1 029 744 B | 204 581 B (**19.87%**) | **201 093 B (19.53%)** | 64 830 B (6.30%) [-2] | 374 704 B (36.39%) | *(trop lent)* | **1 339 Mo/s** vs 3 125 Mo/s |
-| `dickens_1m.txt` | Large Text (1 MiB) | 1 048 576 B | 398 158 B (**37.97%**) | **394 996 B (37.67%)** | 331 404 B (31.61%) [-2] | 642 924 B (61.31%) | *(trop lent)* | **534 Mo/s** vs 2 676 Mo/s |
-| `bash_x86_64.bin` | ELF x86_64 binary | 1 298 416 B | 613 917 B (**47.28%**) | **600 868 B (46.28%)** | 553 594 B (42.64%) [-2] | 871 664 B (67.13%) | *(trop lent)* | **404 Mo/s** vs 2 797 Mo/s |
+| `fields.c` | C source code | 11 150 B | 3 397 B (**30.47%**) | **3 374 B (30.26%)** | 2 928 B (26.26%) [-9] | 5 215 B (46.77%) | 3 214 B (28.83%) | **994 Mo/s** vs 2 577 Mo/s |
+| `sum` | SPARC ELF binary | 38 240 B | 12 125 B (**31.71%**) | **11 898 B (31.11%)** | 9 927 B (25.96%) [-6] | 18 812 B (49.19%) | 11 415 B (29.85%) | **791 Mo/s** vs 2 948 Mo/s |
+| `lz0_win64.exe` | Windows PE64 | 146 944 B | 75 147 B (**51.14%**) | **73 802 B (50.22%)** | 67 560 B (45.98%) [-6] | 101 596 B (69.14%) | *(trop lent)* | **406 Mo/s** vs 3 375 Mo/s |
+| `avatar.jpg` | JPEG Image | 25 380 B | 25 326 B (**99.79%**) | **25 281 B (99.61%)** | 25 749 B (101.45%) [-6] | 25 379 B (100.00%) | *(trop lent)* | **8 205 Mo/s** vs 30 985 Mo/s |
+| `break.mp3` | Audio MP3 CBR | 38 080 B | 11 299 B (**29.67%**) | **11 243 B (29.52%)** | 11 287 B (29.64%) [-6] | 11 552 B (30.34%) | *(trop lent)* | **7 210 Mo/s** vs 16 687 Mo/s |
+| `star.png` | PNG Image (Deflate) | 355 666 B | 357 301 B (**100.46%**) | **356 643 B (100.27%)** | 364 646 B (102.52%) [-2] | 356 988 B (100.37%) | *(trop lent)* | **9 217 Mo/s** vs 30 225 Mo/s |
+| `texture_rgb24.raw` | Raw RGB24 Texture | 196 608 B | 171 712 B (**87.34%**) | **171 429 B (87.19%)** | 86 531 B (44.01%) [-6] | 197 380 B (100.39%) | *(trop lent)* | **290 Mo/s** vs 30 108 Mo/s |
+| `texture_rgba32.raw`| Raw RGBA32 Texture | 262 144 B | 146 503 B (**55.89%**) | **135 901 B (51.84%)** | *(exclu >256K)* | 263 173 B (100.39%) | *(trop lent)* | **406 Mo/s** vs 28 616 Mo/s |
+| `audio_pcm16.raw` | Stereo PCM16 Audio | 192 000 B | 139 008 B (**72.40%**) | **134 434 B (70.02%)** | 117 053 B (61.07%) [-6] | 163 730 B (85.28%) | *(trop lent)* | **416 Mo/s** vs 8 148 Mo/s |
+| `alice29.txt` | English text | 152 089 B | 58 949 B (**38.76%**) | **58 655 B (38.57%)** | 50 488 B (33.20%) [-6] | 88 699 B (58.32%) | *(trop lent)* | **582 Mo/s** vs 2 575 Mo/s |
+| `plrabn12.txt` | Poetry text | 481 861 B | 208 776 B (**43.33%**) | **207 515 B (43.07%)** | 175 776 B (36.48%) [-2] | 325 589 B (67.57%) | *(trop lent)* | **581 Mo/s** vs 2 687 Mo/s |
+| `kennedy.xls` | Excel Spreadsheet | 1 029 744 B | 204 581 B (**19.87%**) | **201 093 B (19.53%)** | 64 830 B (6.30%) [-2] | 374 704 B (36.39%) | *(trop lent)* | **1 352 Mo/s** vs 2 719 Mo/s |
+| `dickens_1m.txt` | Large Text (1 MiB) | 1 048 576 B | 398 158 B (**37.97%**) | **394 996 B (37.67%)** | 331 404 B (31.61%) [-2] | 642 924 B (61.31%) | *(trop lent)* | **631 Mo/s** vs 1 887 Mo/s |
+| `bash_x86_64.bin` | ELF x86_64 binary | 1 298 416 B | 613 917 B (**47.28%**) | **600 868 B (46.28%)** | 553 594 B (42.64%) [-2] | 871 664 B (67.13%) | *(trop lent)* | **400 Mo/s** vs 2 652 Mo/s |
 
-> **Key takeaway:** LZ0 delivers dense ratios competitive with UPKR on text and binaries while systematically outperforming both UPKR and LZ4 on pre-compressed and high-entropy media (`avatar.jpg` and `break.mp3` with zero inflation). Against LZ4, LZ0 cuts compressed size by **15% to 48%**, while providing decompressor throughputs of **400 to 1,340 Mo/s** (up to **10,000 Mo/s** on images).
+> **Key takeaway:** LZ0 delivers dense ratios competitive with UPKR on text and binaries while systematically outperforming both UPKR and LZ4 on pre-compressed and high-entropy media (`avatar.jpg` and `break.mp3` with zero inflation). Against LZ4, LZ0 cuts compressed size by **15% to 48%**, while providing decompressor throughputs of **400 to 1,355 Mo/s** (up to **10,000+ Mo/s** on images).
 
 ---
 
@@ -274,14 +277,14 @@ In embedded scenarios (firmware, game resource packages, packers), multiple disp
 
 | Target / Contents | Raw Size | LZ0 Normal (`-6`) | LZ0 Ultra (`-9`) | UPKR | LZ4 (default) | Decomp. `lz0dec_fast` vs UPKR |
 |---|---:|---:|---:|---:|---:|---:|
-| **`blob_png_256k`** (4 PNGs) | 262 144 B | 247 405 B (94.38%) | **246 567 B (94.06%)** | 247 888 B (94.56%) [-6] | 252 446 B (96.30%) | **1 676 Mo/s** vs 17.6 Mo/s (**95×**) |
-| **`blob_mix_256k`** (5 files: ELF, PE, XLS, PNG, txt) | 262 144 B | 128 155 B (48.89%) | 126 018 B (48.07%) | **110 904 B (42.31%)** [-6] | 168 178 B (64.15%) | **676 Mo/s** vs 37.9 Mo/s (**18×**) |
-| **`blob_png_512k`** (8 PNGs) | 524 288 B | 504 320 B (96.19%) | **502 897 B (95.92%)** | 508 723 B (97.03%) [-2] | 511 352 B (97.53%) | **2 201 Mo/s** vs 17.1 Mo/s (**128×**) |
-| **`blob_mix_512k`** (7 files: ELF, PE, PNGs, XLS, C, txt) | 524 288 B | 286 374 B (54.62%) | 283 212 B (54.02%) | **260 451 B (49.68%)** [-2] | 352 088 B (67.16%) | **779 Mo/s** vs 32.2 Mo/s (**24×**) |
-| **`blob_png_2m`** (8 distinct PNGs > 200 KiB) | 2 097 152 B | 2 056 945 B (98.08%) | **2 052 535 B (97.87%)** | 2 089 034 B (99.61%) [-1] | 2 067 355 B (98.58%) | **3 432 Mo/s** vs ~15 Mo/s (**228×**) |
-| **`blob_mix_2m`** (9 files: ELF, PE, 3 PNGs, XLS, txt, C) | 2 097 152 B | 1 198 585 B (57.15%) | 1 187 523 B (56.63%) | **1 125 643 B (53.67%)** [-1] | 1 484 306 B (70.78%) | **692 Mo/s** vs ~15 Mo/s (**46×**) |
-| **`blob_png_5m`** (15 distinct PNGs) | 5 242 880 B | **4 362 024 B (83.20%)** | *(analyzed)* | *(excluded >20 min)* | 5 210 986 B (99.39%) | **5 046 Mo/s** vs - |
-| **`blob_mix_5m`** (15 distinct real-world files) | 5 242 880 B | 2 191 126 B (41.79%) | **2 160 499 B (41.21%)** | *(excluded >30 min)* | 3 093 616 B (59.01%) | **657 Mo/s** vs - |
+| **`blob_png_256k`** (4 PNGs) | 262 144 B | 247 405 B (94.38%) | **246 567 B (94.06%)** | 247 888 B (94.56%) [-6] | 252 446 B (96.30%) | **1 625 Mo/s** vs 17.6 Mo/s (**92×**) |
+| **`blob_mix_256k`** (5 files: ELF, PE, XLS, PNG, txt) | 262 144 B | 128 155 B (48.89%) | 126 018 B (48.07%) | **110 904 B (42.31%)** [-6] | 168 178 B (64.15%) | **673 Mo/s** vs 37.9 Mo/s (**18×**) |
+| **`blob_png_512k`** (8 PNGs) | 524 288 B | 504 320 B (96.19%) | **502 897 B (95.92%)** | 508 723 B (97.03%) [-2] | 511 352 B (97.53%) | **2 160 Mo/s** vs 17.1 Mo/s (**126×**) |
+| **`blob_mix_512k`** (7 files: ELF, PE, PNGs, XLS, C, txt) | 524 288 B | 286 374 B (54.62%) | 283 212 B (54.02%) | **260 451 B (49.68%)** [-2] | 352 088 B (67.16%) | **767 Mo/s** vs 32.2 Mo/s (**24×**) |
+| **`blob_png_2m`** (8 distinct PNGs > 200 KiB) | 2 097 152 B | 2 056 945 B (98.08%) | **2 052 535 B (97.87%)** | 2 089 034 B (99.61%) [-1] | 2 067 355 B (98.58%) | **4 042 Mo/s** vs ~15 Mo/s (**269×**) |
+| **`blob_mix_2m`** (9 files: ELF, PE, 3 PNGs, XLS, txt, C) | 2 097 152 B | 1 198 585 B (57.15%) | 1 187 523 B (56.63%) | **1 125 643 B (53.67%)** [-1] | 1 484 306 B (70.78%) | **681 Mo/s** vs ~15 Mo/s (**45×**) |
+| **`blob_png_5m`** (15 distinct PNGs) | 5 242 880 B | **4 362 024 B (83.20%)** | *(analyzed)* | *(excluded >20 min)* | 5 210 986 B (99.39%) | **3 606 Mo/s** vs - |
+| **`blob_mix_5m`** (15 distinct real-world files) | 5 242 880 B | 2 191 126 B (41.79%) | **2 160 499 B (41.21%)** | *(excluded >30 min)* | 3 093 616 B (59.01%) | **733 Mo/s** vs - |
 
 ---
 
@@ -289,9 +292,9 @@ In embedded scenarios (firmware, game resource packages, packers), multiple disp
 
 | Compressor | Compressed Ratio | Encoding Time (1 MiB) | Decompression Throughput | Decoder Memory / Footprint |
 |---|---:|---:|---:|---|
-| **LZ0 (ASM FAST)** | **19% – 52%** | **~1.5 s – 2.7 s** (`-6`) | **400 – 1,340 MB/s** (up to **10,000 MB/s** on images) | **0 bytes** (2.8 KiB asm + 264 B table, 0 malloc) |
-| **LZ0 (ASM Compact)** | **19% – 52%** | **~1.5 s – 2.7 s** (`-6`) | **230 – 760 MB/s** (up to **2,850 MB/s** on images) | **0 bytes** (1.3 KiB asm, 0 malloc) |
-| **LZ0 (C library)** | **19% – 52%** | **~1.5 s – 2.7 s** (`-6`) | **175 – 600 MB/s** (up to **1,250 MB/s** on images) | **0 bytes** (portable C, 0 malloc) |
+| **LZ0 (ASM FAST)** | **19% – 52%** | **~1.5 s – 2.7 s** (`-6`) | **400 – 1,355 MB/s** (up to **10,800 MB/s** on images) | **0 bytes** (2.7 KiB asm + 264 B table, 0 malloc) |
+| **LZ0 (ASM Compact)** | **19% – 52%** | **~1.5 s – 2.7 s** (`-6`) | **250 – 880 MB/s** (up to **2,850 MB/s** on images) | **0 bytes** (1.2 KiB asm, 0 malloc) |
+| **LZ0 (C library)** | **19% – 52%** | **~1.5 s – 2.7 s** (`-6`) | **180 – 635 MB/s** (up to **4,750 MB/s** on images) | **0 bytes** (portable C, 0 malloc) |
 | **ZX0** | 19% – 45% | *Minutes to hours* | ~250 MB/s | **0 bytes** (tiny C, 0 malloc) |
 | **UPKR** | 6% – 46% | ~30 s – 300 s | **15 – 60 MB/s** (10×–100× slower) | Requires rANS entropy tables |
 | **LZ4** | 36% – 100% | < 3 ms | ~2,500 – 32,000 MB/s | Fast hash table |
@@ -306,37 +309,37 @@ Measured with `make bench_dec` (x86-64 native) and `make bench_dec_arm64` (AArch
 
 | File | C standard (`lz0_decompress_to`) | C minimal (`lz0dec_min`) | ASM Compact (`lz0dec_x86_64`) | ASM FAST (`lz0dec_fast_x86_64`) | Speedup FAST vs C |
 |---|---:|---:|---:|---:|---:|
-| `fields.c` | 304.0 MB/s | 315.3 MB/s | 420.3 MB/s | **1,022.2 MB/s** | **+236.3%** |
-| `cp.html` | 206.0 MB/s | 212.9 MB/s | 287.4 MB/s | **842.2 MB/s** | **+308.9%** |
-| `alice29.txt` | 197.0 MB/s | 206.4 MB/s | 277.1 MB/s | **616.0 MB/s** | **+212.6%** |
-| `plrabn12.txt` | 186.4 MB/s | 195.0 MB/s | 268.0 MB/s | **528.1 MB/s** | **+183.3%** |
-| `kennedy.xls` | 598.1 MB/s | 600.4 MB/s | 757.2 MB/s | **1,330.3 MB/s** | **+122.4%** |
-| `dickens_1m.txt` | 200.2 MB/s | 221.6 MB/s | 291.6 MB/s | **521.4 MB/s** | **+160.5%** |
-| `bash_x86_64.bin` | 175.3 MB/s | 179.3 MB/s | 232.9 MB/s | **397.1 MB/s** | **+126.5%** |
+| `fields.c` | 364.0 MB/s | 326.2 MB/s | 532.9 MB/s | **1,070.0 MB/s** | **+194.0%** |
+| `cp.html` | 237.0 MB/s | 224.7 MB/s | 325.5 MB/s | **852.7 MB/s** | **+259.8%** |
+| `alice29.txt` | 209.2 MB/s | 195.7 MB/s | 296.3 MB/s | **577.6 MB/s** | **+176.1%** |
+| `plrabn12.txt` | 200.6 MB/s | 180.1 MB/s | 270.7 MB/s | **579.0 MB/s** | **+188.7%** |
+| `kennedy.xls` | 631.7 MB/s | 575.7 MB/s | 876.2 MB/s | **1,355.2 MB/s** | **+114.5%** |
+| `dickens_1m.txt` | 220.9 MB/s | 191.6 MB/s | 299.8 MB/s | **532.1 MB/s** | **+140.9%** |
+| `bash_x86_64.bin` | 182.2 MB/s | 173.8 MB/s | 253.6 MB/s | **404.4 MB/s** | **+122.0%** |
 
 #### AArch64 / ARM64 Decompression (under QEMU)
 
 | File | C standard (`lz0_decompress_to`) | C minimal (`lz0dec_min`) | ASM Compact (`lz0dec_arm64`) | ASM FAST (`lz0dec_fast_arm64`) | Speedup FAST vs C |
 |---|---:|---:|---:|---:|---:|
-| `fields.c` | 43.4 MB/s | 94.9 MB/s | 74.5 MB/s | **261.0 MB/s** | **+502.0%** |
-| `cp.html` | 35.6 MB/s | 76.2 MB/s | 55.3 MB/s | **214.9 MB/s** | **+503.6%** |
-| `alice29.txt` | 34.9 MB/s | 68.9 MB/s | 41.8 MB/s | **213.0 MB/s** | **+510.5%** |
-| `plrabn12.txt` | 32.3 MB/s | 64.8 MB/s | 34.6 MB/s | **175.6 MB/s** | **+443.7%** |
-| `kennedy.xls` | 53.6 MB/s | 125.8 MB/s | 121.8 MB/s | **377.4 MB/s** | **+604.6%** |
-| `dickens_1m.txt` | 36.4 MB/s | 72.6 MB/s | 35.6 MB/s | **170.1 MB/s** | **+367.6%** |
-| `bash_x86_64.bin` | 30.8 MB/s | 61.3 MB/s | 45.2 MB/s | **143.7 MB/s** | **+366.6%** |
+| `fields.c` | 58.7 MB/s | 55.4 MB/s | 114.3 MB/s | **182.2 MB/s** | **+210.5%** |
+| `cp.html` | 54.9 MB/s | 50.2 MB/s | 92.9 MB/s | **157.7 MB/s** | **+187.3%** |
+| `alice29.txt` | 47.1 MB/s | 42.8 MB/s | 81.1 MB/s | **167.1 MB/s** | **+254.5%** |
+| `plrabn12.txt` | 44.3 MB/s | 38.1 MB/s | 65.8 MB/s | **162.7 MB/s** | **+267.2%** |
+| `kennedy.xls` | 83.1 MB/s | 73.8 MB/s | 173.9 MB/s | **207.1 MB/s** | **+149.3%** |
+| `dickens_1m.txt` | 48.7 MB/s | 41.9 MB/s | 76.3 MB/s | **133.6 MB/s** | **+174.4%** |
+| `bash_x86_64.bin` | 41.3 MB/s | 39.9 MB/s | 74.2 MB/s | **109.7 MB/s** | **+165.4%** |
 
 #### RISC-V 64 (RV64GC) Decompression (under QEMU)
 
 | File | C standard (`lz0_decompress_to`) | C minimal (`lz0dec_min`) | ASM Compact (`lz0dec_riscv64`) | ASM FAST (`lz0dec_fast_riscv64`) | Speedup FAST vs C |
 |---|---:|---:|---:|---:|---:|
-| `fields.c` | 37.1 MB/s | 120.5 MB/s | 176.1 MB/s | **178.4 MB/s** | **+380.5%** |
-| `cp.html` | 32.1 MB/s | 103.7 MB/s | 140.4 MB/s | **141.7 MB/s** | **+341.9%** |
-| `alice29.txt` | 25.2 MB/s | 89.6 MB/s | 119.0 MB/s | **121.2 MB/s** | **+380.6%** |
-| `plrabn12.txt` | 21.6 MB/s | 82.4 MB/s | 107.5 MB/s | **108.6 MB/s** | **+402.5%** |
-| `kennedy.xls` | 50.1 MB/s | 200.1 MB/s | 285.6 MB/s | **295.9 MB/s** | **+490.0%** |
-| `dickens_1m.txt` | 24.2 MB/s | 88.9 MB/s | 115.1 MB/s | **117.9 MB/s** | **+386.6%** |
-| `bash_x86_64.bin` | 23.5 MB/s | 86.6 MB/s | 113.3 MB/s | **112.4 MB/s** | **+378.5%** |
+| `fields.c` | 36.5 MB/s | 122.4 MB/s | 141.8 MB/s | **186.6 MB/s** | **+411.7%** |
+| `cp.html` | 29.4 MB/s | 101.6 MB/s | 113.0 MB/s | **147.3 MB/s** | **+401.7%** |
+| `alice29.txt` | 24.7 MB/s | 90.7 MB/s | 110.8 MB/s | **122.0 MB/s** | **+392.9%** |
+| `plrabn12.txt` | 21.1 MB/s | 79.0 MB/s | 92.9 MB/s | **113.8 MB/s** | **+440.2%** |
+| `kennedy.xls` | 45.4 MB/s | 202.9 MB/s | 167.3 MB/s | **309.9 MB/s** | **+583.3%** |
+| `dickens_1m.txt` | 23.4 MB/s | 81.6 MB/s | 99.0 MB/s | **124.6 MB/s** | **+432.5%** |
+| `bash_x86_64.bin` | 21.6 MB/s | 85.2 MB/s | 78.4 MB/s | **112.2 MB/s** | **+419.6%** |
 
 > [!NOTE]
 > **Key Architectural Takeaways on Decompression Speedup**:

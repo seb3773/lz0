@@ -14,10 +14,13 @@
  *    to in_ptr (single ADD with LSR #3 operand) before the next raw read.
  *    Elias-gamma codes with n <= 8 payload bits decode branch-free:
  *    CLZ on (window & control-mask) gives 2n, two byte-table lookups give
- *    the payload. Copies are 16-byte q-register wildcopies behind ONE
+ *    the payload. Offset MSB codes with 9 <= n <= 15 (offsets up to 8 MiB)
+ *    also stay in the window (four lookups, .Ff_new), so far matches never
+ *    fall back to the SAFE engine. Copies are 16-byte q-register wildcopies behind ONE
  *    "end <= limit-16" compare per token.
  *
- *  SAFE engine (last 16 input bytes, last 16 output bytes, codes n > 8):
+ *  SAFE engine (last 16 input bytes, last 16 output bytes, length codes
+ *  n > 8, offset codes n > 15):
  *    Sentinel bit reader in w8 (bits left-aligned at bit 31, followed by a
  *    1 marker): ADDS w8,w8,w8 gives the bit in C and flags exhaustion in Z.
  *    Exact, overrun-free copies.
@@ -235,6 +238,7 @@ lz0dec_fast_arm64:
     .p2align 5
 .F_mn:                          /* x10 at the inverted-Elias offset MSB */
     ELIAS_FAST x16, 1, .Ff_new
+.F_mn_have_msb:
     COMMIT
     cmp x0, x1                  /* provably in bounds; kept as defence */
     b.hs .Lfail
@@ -342,8 +346,41 @@ lz0dec_fast_arm64:
     mov x3, x14
     b .F_after_lit
 
-/* ---- fast -> safe hand-offs: commit window, continue bit by bit ---- */
+/* ---- offset MSB with 9 <= n <= 15 payload bits: still windowed ----
+   Far offsets (> 128 KiB) are common on multi-MiB inputs. Decoding them in
+   the window (4 table lookups) avoids a FAST->SAFE->FAST round trip and a
+   bit-serial loop. The window always holds >= 42 unread bits here (at most
+   22 bits are consumed before an offset code), and bits shifted in below
+   the valid region are zero, so a stop bit found by CLZ is always genuine.
+   x14 (length) is dead here and used as scratch. */
 .Ff_new:
+    movz x13, #0xAAAA, lsl #48  /* control bits c0..c15 */
+    movk x13, #0xAAAA, lsl #32
+    ands x13, x10, x13
+    b.eq .Ff_new_safe           /* n > 15 */
+    clz x13, x13                /* 2n */
+    ubfx x17, x10, #56, #8
+    ubfx x15, x10, #48, #8
+    ubfx x14, x10, #40, #8
+    ubfx x16, x10, #32, #8
+    ldrb w17, [x12, x17]        /* d1..d4   */
+    ldrb w15, [x12, x15]        /* d5..d8   */
+    ldrb w14, [x12, x14]        /* d9..d12  */
+    ldrb w16, [x12, x16]        /* d13..d16 */
+    orr w16, w16, w14, lsl #4
+    orr w16, w16, w15, lsl #8
+    orr w16, w16, w17, lsl #12
+    eor w16, w16, #0x1ffff      /* invert payload, leading 1 */
+    add x17, x13, #1            /* consumed = 2n + 1 */
+    lsl x10, x10, x17
+    add x9, x9, x17
+    lsr x13, x13, #1            /* n */
+    lsl w16, w16, w13
+    lsr x16, x16, #16           /* 1 d1 .. dn */
+    b .F_mn_have_msb
+
+/* ---- fast -> safe hand-offs: commit window, continue bit by bit ---- */
+.Ff_new_safe:
     COMMIT
     TO_SAFE
     b .S_new_body

@@ -15,10 +15,13 @@
  *    branch, no per-bit counter dependency.
  *    Interleaved Elias-gamma codes with n <= 8 payload bits decode branch-free:
  *    BSR on (window & control-mask) gives the length, two lookups in a
- *    256-byte table give the payload bits. Copies are 16-byte SSE2 wildcopies behind ONE "end <= limit-16"
+ *    256-byte table give the payload bits. Offset MSB codes with
+ *    9 <= n <= 15 (offsets up to 8 MiB) also stay in the window (four
+ *    lookups, .Ff_new), so far matches never fall back to the SAFE engine. Copies are 16-byte SSE2 wildcopies behind ONE "end <= limit-16"
  *    compare per token.
  *
- *  SAFE engine (last 16 input bytes, last 16 output bytes, codes n > 8):
+ *  SAFE engine (last 16 input bytes, last 16 output bytes, length codes
+ *  n > 8, offset codes n > 15):
  *    Sentinel bit reader: r8b = [remaining bits][1][0..]; a single ADD gives
  *    the bit in CF and flags exhaustion in ZF. Exact, overrun-free copies.
  *
@@ -275,6 +278,7 @@ lz0dec_fast_x86_64:
 .F_mn:
     /* MatchNew; rdi positioned at the inverted-Elias offset MSB */
     ELIAS_FAST rsi, 1, .Ff_new
+.F_mn_have_msb:
     COMMIT
     cmp r14, qword ptr [rsp]    /* provably in bounds; kept as defence */
     jae .Lfail
@@ -386,8 +390,46 @@ lz0dec_fast_x86_64:
     mov r12, rdx
     jmp .F_after_lit
 
-/* ---- fast -> safe hand-offs: commit window, continue bit by bit ---- */
+/* ---- offset MSB with 9 <= n <= 15 payload bits: still windowed ----
+   Far offsets (> 128 KiB) are common on multi-MiB inputs. Decoding them in
+   the window (4 table lookups) avoids a FAST->SAFE->FAST round trip and a
+   bit-serial loop. The window always holds >= 31 unread bits here (at most
+   22 bits are consumed before an offset code), and bits shifted in below
+   the valid region are zero, so a stop bit found by BSR is always genuine. */
 .Ff_new:
+    mov rdx, 0xAAAAAAAA00000000 /* control bits c0..c15 */
+    and rdx, rdi
+    jz .Ff_new_safe             /* n > 15 */
+    mov rax, rdi
+    shr rax, 32                 /* eax = b0 b1 b2 b3 (b0 = top byte) */
+    movzx ecx, al
+    movzx esi, byte ptr [r15 + rcx]   /* d13..d16 */
+    movzx ecx, ah
+    movzx ecx, byte ptr [r15 + rcx]   /* d9..d12 */
+    shl ecx, 4
+    or esi, ecx
+    shr eax, 16
+    movzx ecx, al
+    movzx ecx, byte ptr [r15 + rcx]   /* d5..d8 */
+    shl ecx, 8
+    or esi, ecx
+    movzx ecx, ah
+    movzx ecx, byte ptr [r15 + rcx]   /* d1..d4 */
+    shl ecx, 12
+    or esi, ecx
+    xor esi, 0x1FFFF            /* invert payload, set leading 1 */
+    bsr rdx, rdx                /* b = 63 - 2n */
+    mov ecx, 64
+    sub ecx, edx                /* consumed = 2n + 1 */
+    shl rdi, cl
+    add rbp, rcx
+    lea ecx, [rdx - 31]
+    shr ecx, 1                  /* 16 - n */
+    shr esi, cl
+    jmp .F_mn_have_msb
+
+/* ---- fast -> safe hand-offs: commit window, continue bit by bit ---- */
+.Ff_new_safe:
     COMMIT
     TO_SAFE
     jmp .S_new_body

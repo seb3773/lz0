@@ -13,7 +13,7 @@ LZ0DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.s lz0/lz0dec_fa
 
 VERSION ?= 0.3.0
 
-.PHONY: all bench clean test smoke bounds diag lite32 state sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz lz0 lz0dec cli sanitize valgrind bench_all bench_ratio bench_dec bench_dec_arm64 bench_dec_riscv64 bench_blobs test_arm64 arm64 test_riscv64 riscv64 windows dist dist_linux dist_arm64 dist_riscv64 dist_windows
+.PHONY: all bench clean test smoke bounds diag lite32 state sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz guard lz0 lz0dec cli sanitize valgrind bench_all bench_ratio bench_dec bench_dec_arm64 bench_dec_riscv64 bench_blobs test_arm64 arm64 test_riscv64 riscv64 windows dist dist_linux dist_arm64 dist_riscv64 dist_windows
 
 all: bench/lz0_bench bench/lz0_smoke bench/lz0_bounds bench/lz0_diag_rep bench/lz0_lite32 bench/lz0_diag_state bench/lz0_sdp32 bench/lz0_scale bench/lz0_prof bench/lz0_cmpfind bench/lz0_jumpsweep bench/lz0_pruneab bench/lz0_bits bench/lz0_final
 
@@ -251,6 +251,13 @@ tests/test_malformed: tests/test_malformed.c $(LZ0_SRC) $(LZ0DEC_SRC)
 malformed: tests/test_malformed
 	./tests/test_malformed
 
+tests/test_guard: tests/test_guard.c $(LZ0_SRC) $(LZ0DEC_SRC)
+	$(CC) $(CFLAGS) -o $@ tests/test_guard.c $(LZ0_SRC) $(LZ0DEC_SRC)
+
+# Guard-page memory-safety + differential test (all decoders vs lz0dec_ref)
+guard: tests/test_guard
+	./tests/test_guard
+
 tests/test_fuzz: tests/test_fuzz.c $(LZ0_SRC) $(LZ0DEC_SRC)
 	$(CC) $(CFLAGS) -o $@ tests/test_fuzz.c $(LZ0_SRC) $(LZ0DEC_SRC)
 
@@ -277,7 +284,7 @@ valgrind: bin/lz0
 	rm -f /tmp/lz0_vg.lz0 /tmp/lz0_vg.out
 	@echo "Valgrind: zero leaks detected."
 
-test: smoke bounds bench/lz0_bench vectors boundary malformed
+test: smoke bounds bench/lz0_bench vectors boundary malformed guard
 	./bench/lz0_bench --quick
 
 ARM64_CC = aarch64-linux-gnu-gcc
@@ -295,6 +302,8 @@ test_arm64: lz0/lz0dec_arm64.s lz0/lz0dec_fast_arm64.s
 	$(ARM64_EMU) ./tests/test_malformed_arm64
 	$(ARM64_CC) $(ARM64_CFLAGS) -o tests/test_fuzz_arm64 tests/test_fuzz.c $(LZ0_SRC) $(ARM64_DEC_SRC)
 	$(ARM64_EMU) ./tests/test_fuzz_arm64
+	$(ARM64_CC) $(ARM64_CFLAGS) -o tests/test_guard_arm64 tests/test_guard.c $(LZ0_SRC) $(ARM64_DEC_SRC)
+	$(ARM64_EMU) ./tests/test_guard_arm64
 	@echo "All ARM64 (AArch64) tests passed cleanly under QEMU!"
 
 arm64: test_arm64
@@ -314,11 +323,13 @@ test_riscv64: lz0/lz0dec_riscv64.s lz0/lz0dec_fast_riscv64.s
 	$(RISCV64_EMU) ./tests/test_malformed_riscv64
 	$(RISCV64_CC) $(RISCV64_CFLAGS) -o tests/test_fuzz_riscv64 tests/test_fuzz.c $(LZ0_SRC) $(RISCV64_DEC_SRC)
 	$(RISCV64_EMU) ./tests/test_fuzz_riscv64
+	$(RISCV64_CC) $(RISCV64_CFLAGS) -o tests/test_guard_riscv64 tests/test_guard.c $(LZ0_SRC) $(RISCV64_DEC_SRC)
+	$(RISCV64_EMU) ./tests/test_guard_riscv64
 	@echo "All RISC-V 64 tests passed cleanly under QEMU!"
 
 riscv64: test_riscv64
 
 clean:
 	rm -f bench/lz0_* bench/dump_rep bench/debug_a3 bench/count_bench bench/scatter_bench
-	rm -f bin/lz0* tests/test_vectors tests/test_boundary tests/test_malformed tests/test_fuzz tests/*_arm64 tests/*_riscv64
+	rm -f bin/lz0* tests/test_vectors tests/test_boundary tests/test_malformed tests/test_fuzz tests/test_guard tests/*_arm64 tests/*_riscv64
 	rm -rf dist build

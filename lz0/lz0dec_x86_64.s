@@ -13,6 +13,12 @@
  * - Tail-overlapping 64-bit stores eliminating remainder byte-by-byte loops.
  * - Broadcasted 64-bit stores for offset == 1 runs.
  * - Zero dynamic memory allocations.
+ * - Only rbx/rbp are saved: 16 bytes of stack plus at most one return
+ *   address (.read_elias_rest), i.e. <= 32 bytes total including the
+ *   caller's return address. Match copies are reached by JMP and all end
+ *   in the shared decision-bit code (.after_match): no call/ret per match.
+ * - Sentinel bit reader: r8b = [unread bits][1][0..]. One ADD shifts the
+ *   next bit into CF and flags exhaustion in ZF (no bit counter register).
  */
 
 lz0dec_x86_64:
@@ -26,54 +32,48 @@ lz0dec_x86_64:
     test ecx, ecx
     jle .fail_early
 
-    push rbp
-    mov rbp, rsp
     push rbx
-    push r12
-    push r13
-    push r14
-    push r15
+    push rbp
 
-    mov r14, rdi                    /* in_ptr */
+    /* rdi = in_ptr (already in place) */
     movsxd rax, esi
-    lea r15, [rdi + rax]            /* in_end */
+    lea r9, [rdi + rax]            /* in_end */
 
     mov r10, rdx                    /* out_start */
-    mov r12, rdx                    /* out_ptr */
+    mov rbp, rdx                    /* out_ptr */
     movsxd rax, ecx
-    lea r13, [rdx + rax]            /* out_end */
+    lea r11, [rdx + rax]            /* out_end */
 
     mov rbx, 1                      /* last_offset = 1 */
-    xor r8d, r8d                    /* bit_val = 0 */
-    xor r9d, r9d                    /* bits_left = 0 */
+    mov r8d, 0x80                   /* sentinel bit reader: empty */
 
     jmp .do_literal
 
     .p2align 4
 .main_loop_after_literal:
     /* Decision bit after LiteralRun: 0 -> MatchLast, 1 -> enter new_loop */
-    dec r9d
-    jns 1f
-    cmp r14, r15
+    add r8b, r8b
+    jnz 1f
+    cmp rdi, r9
     jae .fail
-    mov r8b, [r14]
-    inc r14
-    mov r9d, 7
+    mov r8b, [rdi]
+    inc rdi
+    stc
+    adc r8b, r8b
 1:
-    shl r8b, 1
     jc .enter_new_loop
 
 .do_match_last:
     /* Fast-path Elias == 1 (most frequent case: length is 1) */
-    dec r9d
-    jns 1f
-    cmp r14, r15
+    add r8b, r8b
+    jnz 1f
+    cmp rdi, r9
     jae .fail
-    mov r8b, [r14]
-    inc r14
-    mov r9d, 7
+    mov r8b, [rdi]
+    inc rdi
+    stc
+    adc r8b, r8b
 1:
-    shl r8b, 1
     jnc .match_last_full_elias
     mov ecx, 1
     jmp .match_last_have_len
@@ -86,57 +86,67 @@ lz0dec_x86_64:
     test rbx, rbx
     jle .fail
 
-    mov rsi, r12
+    mov rsi, rbp
     sub rsi, rbx
     cmp rsi, r10
     jb .fail
 
-    mov rax, r13
-    sub rax, r12
+    mov rax, r11
+    sub rax, rbp
     cmp rcx, rax
     ja .fail
 
-    call .copy_match_fast
+    jmp .copy_match_fast
 
-    /* After MatchLast: read decision bit (0 -> LiteralRun, 1 -> enter new_loop) */
-    dec r9d
-    jns 2f
-    cmp r14, r15
+    /* Common continuation of every match copy (MatchLast and MatchNew):
+       decision bit, 0 -> LiteralRun, 1 -> enter new_loop. */
+.after_match:
+    add r8b, r8b
+    jnz 2f
+    cmp rdi, r9
     jae .fail
-    mov r8b, [r14]
-    inc r14
-    mov r9d, 7
+    mov r8b, [rdi]
+    inc rdi
+    stc
+    adc r8b, r8b
 2:
-    shl r8b, 1
     jc .enter_new_loop
 
 .do_literal:
     /* Fast-path Elias == 1 (single-byte literal run) */
-    dec r9d
-    jns 1f
-    cmp r14, r15
+    add r8b, r8b
+    jnz 1f
+    cmp rdi, r9
     jae .fail
-    mov r8b, [r14]
-    inc r14
-    mov r9d, 7
+    mov r8b, [rdi]
+    inc rdi
+    stc
+    adc r8b, r8b
 1:
-    shl r8b, 1
     jnc .lit_full_elias
-    mov ecx, 1
-    jmp .lit_have_len
+    /* single-byte literal (most frequent run length): direct copy */
+    cmp rbp, r11
+    jae .fail
+    cmp rdi, r9
+    jae .fail
+    mov al, [rdi]
+    mov [rbp], al
+    inc rdi
+    inc rbp
+    jmp .main_loop_after_literal
 
 .lit_full_elias:
     call .read_elias_rest
     mov rcx, rax
 
 .lit_have_len:
-    mov rax, r13
-    sub rax, r12
+    mov rax, r11
+    sub rax, rbp
     cmp rcx, rax
     ja .fail
 
-    mov rax, r15
-    sub rax, r14
+    mov rax, r9
+    sub rax, rdi
     cmp rcx, rax
     ja .fail
 
@@ -148,17 +158,17 @@ lz0dec_x86_64:
     ja .lit_large
 
     /* Short literal (1..8 bytes) */
-    lea rax, [r12 + 8]
-    cmp rax, r13
+    lea rax, [rbp + 8]
+    cmp rax, r11
     ja .lit_byte_loop
-    lea rax, [r14 + 8]
-    cmp rax, r15
+    lea rax, [rdi + 8]
+    cmp rax, r9
     ja .lit_byte_loop
 
-    mov rax, [r14]
-    mov [r12], rax
-    add r14, rcx
-    add r12, rcx
+    mov rax, [rdi]
+    mov [rbp], rax
+    add rdi, rcx
+    add rbp, rcx
     jmp .main_loop_after_literal
 
 .lit_large:
@@ -166,10 +176,10 @@ lz0dec_x86_64:
 .lit_large_loop:
     cmp rcx, 8
     jb .lit_large_tail
-    mov rax, [r14]
-    mov [r12], rax
-    add r14, 8
-    add r12, 8
+    mov rax, [rdi]
+    mov [rbp], rax
+    add rdi, 8
+    add rbp, 8
     sub rcx, 8
     jmp .lit_large_loop
 
@@ -177,52 +187,81 @@ lz0dec_x86_64:
     test rcx, rcx
     jz .main_loop_after_literal
 
-    lea rax, [r12 + 8]
-    cmp rax, r13
+    lea rax, [rbp + 8]
+    cmp rax, r11
     ja .lit_byte_loop
-    lea rax, [r14 + 8]
-    cmp rax, r15
+    lea rax, [rdi + 8]
+    cmp rax, r9
     ja .lit_byte_loop
 
-    mov rax, [r14 + rcx - 8]
-    mov [r12 + rcx - 8], rax
-    add r14, rcx
-    add r12, rcx
+    mov rax, [rdi + rcx - 8]
+    mov [rbp + rcx - 8], rax
+    add rdi, rcx
+    add rbp, rcx
     jmp .main_loop_after_literal
 
 .lit_byte_loop:
     test rcx, rcx
     jz .main_loop_after_literal
-    mov al, [r14]
-    mov [r12], al
-    inc r14
-    inc r12
+    mov al, [rdi]
+    mov [rbp], al
+    inc rdi
+    inc rbp
     dec rcx
     jmp .lit_byte_loop
 
     .p2align 4
 .enter_new_loop:
     /* Read 1 bit: 0 -> EOF, 1 -> MatchNew */
-    dec r9d
-    jns 1f
-    cmp r14, r15
+    add r8b, r8b
+    jnz 1f
+    cmp rdi, r9
     jae .fail
-    mov r8b, [r14]
-    inc r14
-    mov r9d, 7
+    mov r8b, [rdi]
+    inc rdi
+    stc
+    adc r8b, r8b
 1:
-    shl r8b, 1
     jnc .eof_reached
 
     /* Bit 1: MatchNew */
-    call .read_elias_inv
+    /* inverted Elias gamma (offset MSB), inlined: single call site */
+    mov eax, 1
+.elias_inv_loop:
+    add r8b, r8b
+    jnz 1f
+    cmp rdi, r9
+    jae .fail
+    mov r8b, [rdi]
+    inc rdi
+    stc
+    adc r8b, r8b
+1:
+    jc .elias_inv_done
+
+
+    add r8b, r8b
+    jnz 2f
+    cmp rdi, r9
+    jae .fail
+    mov r8b, [rdi]
+    inc rdi
+    stc
+    adc r8b, r8b
+2:
+    cmc
+    adc eax, eax
+    cmp eax, 0x40000000             /* limit check folded into the back-edge: v >= 2^30 after the shift <=> v >= 2^29 before it */
+    jb .elias_inv_loop
+    jmp .fail
+.elias_inv_done:
     test eax, eax
     jle .fail
 
-    cmp r14, r15
+    cmp rdi, r9
     jae .fail
-    movzx edx, byte ptr [r14]
-    inc r14
+    movzx edx, byte ptr [rdi]
+    inc rdi
 
     mov rbx, rax
     shl rbx, 8
@@ -230,44 +269,44 @@ lz0dec_x86_64:
 
     test rbx, rbx
     jle .fail
-    mov rax, r12
+    mov rax, rbp
     sub rax, r10
     cmp rbx, rax
     ja .fail
 
     /* 3 bits length */
     xor edx, edx
-    dec r9d
-    jns 2f
-    cmp r14, r15
+    add r8b, r8b
+    jnz 2f
+    cmp rdi, r9
     jae .fail
-    mov r8b, [r14]
-    inc r14
-    mov r9d, 7
+    mov r8b, [rdi]
+    inc rdi
+    stc
+    adc r8b, r8b
 2:
-    shl r8b, 1
     adc edx, edx
 
-    dec r9d
-    jns 3f
-    cmp r14, r15
+    add r8b, r8b
+    jnz 3f
+    cmp rdi, r9
     jae .fail
-    mov r8b, [r14]
-    inc r14
-    mov r9d, 7
+    mov r8b, [rdi]
+    inc rdi
+    stc
+    adc r8b, r8b
 3:
-    shl r8b, 1
     adc edx, edx
 
-    dec r9d
-    jns 4f
-    cmp r14, r15
+    add r8b, r8b
+    jnz 4f
+    cmp rdi, r9
     jae .fail
-    mov r8b, [r14]
-    inc r14
-    mov r9d, 7
+    mov r8b, [rdi]
+    inc rdi
+    stc
+    adc r8b, r8b
 4:
-    shl r8b, 1
     adc edx, edx
 
     cmp edx, 7
@@ -277,32 +316,47 @@ lz0dec_x86_64:
     jmp .new_len_ready
 
 .new_len_elias:
-    call .read_elias
+    /* Elias gamma (long MatchNew length), inlined: single call site */
+    mov eax, 1
+.elias_loop:
+    add r8b, r8b
+    jnz 1f
+    cmp rdi, r9
+    jae .fail
+    mov r8b, [rdi]
+    inc rdi
+    stc
+    adc r8b, r8b
+1:
+    jc .elias_done
+
+
+    add r8b, r8b
+    jnz 2f
+    cmp rdi, r9
+    jae .fail
+    mov r8b, [rdi]
+    inc rdi
+    stc
+    adc r8b, r8b
+2:
+    adc eax, eax
+    cmp eax, 0x40000000             /* limit check folded into the back-edge: v >= 2^30 after the shift <=> v >= 2^29 before it */
+    jb .elias_loop
+    jmp .fail
+.elias_done:
     lea rcx, [rax + 8]
 
 .new_len_ready:
-    mov rax, r13
-    sub rax, r12
+    mov rax, r11
+    sub rax, rbp
     cmp rcx, rax
     ja .fail
 
-    mov rsi, r12
+    mov rsi, rbp
     sub rsi, rbx
 
-    call .copy_match_fast
-
-    /* Decision bit after MatchNew */
-    dec r9d
-    jns 5f
-    cmp r14, r15
-    jae .fail
-    mov r8b, [r14]
-    inc r14
-    mov r9d, 7
-5:
-    shl r8b, 1
-    jnc .do_literal
-    jmp .enter_new_loop
+    jmp .copy_match_fast
 
     .p2align 4
 .copy_match_fast:
@@ -317,13 +371,13 @@ lz0dec_x86_64:
     ja .match_large
 
     /* Short match (1..8 bytes) with offset >= 8 */
-    lea rax, [r12 + 8]
-    cmp rax, r13
+    lea rax, [rbp + 8]
+    cmp rax, r11
     ja .match_byte_loop
     mov rax, [rsi]
-    mov [r12], rax
-    add r12, rcx
-    ret
+    mov [rbp], rax
+    add rbp, rcx
+    jmp .after_match
 
 .match_large:
     /* Large match (>8 bytes) with offset >= 8 */
@@ -331,30 +385,30 @@ lz0dec_x86_64:
     cmp rcx, 8
     jb .match_large_tail
     mov rax, [rsi]
-    mov [r12], rax
+    mov [rbp], rax
     add rsi, 8
-    add r12, 8
+    add rbp, 8
     sub rcx, 8
     jmp .match_large_loop
 
 .match_large_tail:
     test rcx, rcx
     jz .copy_ret
-    lea rax, [r12 + 8]
-    cmp rax, r13
+    lea rax, [rbp + 8]
+    cmp rax, r11
     ja .match_byte_loop
     mov rax, [rsi + rcx - 8]
-    mov [r12 + rcx - 8], rax
-    add r12, rcx
-    ret
+    mov [rbp + rcx - 8], rax
+    add rbp, rcx
+    jmp .after_match
 
 .match_byte_loop:
     test rcx, rcx
     jz .copy_ret
     mov al, [rsi]
-    mov [r12], al
+    mov [rbp], al
     inc rsi
-    inc r12
+    inc rbp
     dec rcx
     jmp .match_byte_loop
 
@@ -370,59 +424,59 @@ lz0dec_x86_64:
     cmp rcx, 8
     ja .fill1_large
 
-    lea rdx, [r12 + 8]
-    cmp rdx, r13
+    lea rdx, [rbp + 8]
+    cmp rdx, r11
     ja .fill1_bytes
-    mov [r12], rax
-    add r12, rcx
-    ret
+    mov [rbp], rax
+    add rbp, rcx
+    jmp .after_match
 
 .fill1_large:
 .fill1_qwords:
     cmp rcx, 32
     jb .fill1_8
-    mov [r12], rax
-    mov [r12 + 8], rax
-    mov [r12 + 16], rax
-    mov [r12 + 24], rax
-    add r12, 32
+    mov [rbp], rax
+    mov [rbp + 8], rax
+    mov [rbp + 16], rax
+    mov [rbp + 24], rax
+    add rbp, 32
     sub rcx, 32
     jmp .fill1_qwords
 .fill1_8:
     cmp rcx, 8
     jb .fill1_tail
-    mov [r12], rax
-    add r12, 8
+    mov [rbp], rax
+    add rbp, 8
     sub rcx, 8
     jmp .fill1_8
 .fill1_tail:
     test rcx, rcx
     jz .copy_ret
-    lea rdx, [r12 + 8]
-    cmp rdx, r13
+    lea rdx, [rbp + 8]
+    cmp rdx, r11
     ja .fill1_bytes
-    mov [r12 + rcx - 8], rax
-    add r12, rcx
-    ret
+    mov [rbp + rcx - 8], rax
+    add rbp, rcx
+    jmp .after_match
 .fill1_bytes:
     test rcx, rcx
     jz .copy_ret
-    mov [r12], al
-    inc r12
+    mov [rbp], al
+    inc rbp
     dec rcx
     jmp .fill1_bytes
 
 .match_short_bytes:
     /* Offsets 2..7 */
     mov al, [rsi]
-    mov [r12], al
+    mov [rbp], al
     inc rsi
-    inc r12
+    inc rbp
     dec rcx
     jnz .match_short_bytes
 
 .copy_ret:
-    ret
+    jmp .after_match
 
     .p2align 4
 .read_elias_rest:
@@ -430,119 +484,48 @@ lz0dec_x86_64:
     mov eax, 1
 .elias_rest_loop:
     cmp eax, 0x20000000
-    jae .fail
+    jae .fail_sub
 
     /* Read payload bit */
-    dec r9d
-    jns 2f
-    cmp r14, r15
-    jae .fail
-    mov r8b, [r14]
-    inc r14
-    mov r9d, 7
+    add r8b, r8b
+    jnz 2f
+    cmp rdi, r9
+    jae .fail_sub
+    mov r8b, [rdi]
+    inc rdi
+    stc
+    adc r8b, r8b
 2:
-    shl r8b, 1
     adc eax, eax
 
     /* Read control bit */
-    dec r9d
-    jns 1f
-    cmp r14, r15
-    jae .fail
-    mov r8b, [r14]
-    inc r14
-    mov r9d, 7
+    add r8b, r8b
+    jnz 1f
+    cmp rdi, r9
+    jae .fail_sub
+    mov r8b, [rdi]
+    inc rdi
+    stc
+    adc r8b, r8b
 1:
-    shl r8b, 1
     jnc .elias_rest_loop
     ret
 
-    .p2align 4
-.read_elias:
-    mov eax, 1
-.elias_loop:
-    dec r9d
-    jns 1f
-    cmp r14, r15
-    jae .fail
-    mov r8b, [r14]
-    inc r14
-    mov r9d, 7
-1:
-    shl r8b, 1
-    jc .elias_done
 
-    cmp eax, 0x20000000
-    jae .fail
-
-    dec r9d
-    jns 2f
-    cmp r14, r15
-    jae .fail
-    mov r8b, [r14]
-    inc r14
-    mov r9d, 7
-2:
-    shl r8b, 1
-    adc eax, eax
-    jmp .elias_loop
-.elias_done:
-    ret
-
-    .p2align 4
-.read_elias_inv:
-    mov eax, 1
-.elias_inv_loop:
-    dec r9d
-    jns 1f
-    cmp r14, r15
-    jae .fail
-    mov r8b, [r14]
-    inc r14
-    mov r9d, 7
-1:
-    shl r8b, 1
-    jc .elias_inv_done
-
-    cmp eax, 0x20000000
-    jae .fail
-
-    dec r9d
-    jns 2f
-    cmp r14, r15
-    jae .fail
-    mov r8b, [r14]
-    inc r14
-    mov r9d, 7
-2:
-    shl r8b, 1
-    cmc
-    adc eax, eax
-    jmp .elias_inv_loop
-.elias_inv_done:
-    ret
 
 .eof_reached:
-    mov rax, r12
+    mov rax, rbp
     sub rax, r10
-    lea rsp, [rbp - 40]
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
     pop rbp
+    pop rbx
     ret
 
+.fail_sub:                          /* failure inside .read_elias_rest */
+    pop rax                         /* drop its return address */
 .fail:
     mov rax, -1
-    lea rsp, [rbp - 40]
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
     pop rbp
+    pop rbx
     ret
 
 .fail_early:
