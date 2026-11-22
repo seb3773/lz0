@@ -158,12 +158,19 @@ Input Data
 3. **Multi-Window Stride & Media Periodicity:** Automatically detects structural repetitions (table columns in CSV/XLS, machine instruction alignment 4/8 bytes, interleaved channels for RGB24 stride 3, RGBA32 stride 4, and stereo PCM16 stride 4) via multi-window autocorrelation and 4-byte MPEG Layer III header validation for MP3 CBR frame synchronization.
 4. **Binary Tree Match Finder (Ultra `-9`):** Maintains a lexicographically ordered binary search tree per 3-byte hash bucket. Rooted at the most recent position, the search path visits strictly older occurrences to produce the true nearest Pareto-optimal match per length, capturing optimal candidates on structured text, source code, and binaries.
 
-### 5.2 Sparse DP Parser & Profitability Filtering
-Instead of a greedy heuristic or a memory-intensive full DP lattice, LZ0 maintains Pareto-optimal live states per input position ($K=2$ in default `-6`, and adaptive $K=32/16/8$ in Ultra `-9` according to file size).
+### 5.2 Sparse DP Parser & Dedicated Ultra Mode
+Instead of a greedy heuristic or a memory-intensive full DP lattice, LZ0 maintains Pareto-optimal live states per input position:
+- **Default Mode (`-6`):** Sparse DP (`SDP`) with $K=2$ Pareto states, Elias plateau pruning, and stride-aware length-2 profitability filtering ($offset \le 32$ or stride harmonic).
+- **Ultra Mode (`-9`):** Dedicated Structure-of-Arrays parser (`lz0_parse_ultra` in `lz0/lz0_ultra.c`):
+  - **12-byte SoA states** (`key`, `cost`, `pp`), halving memory per state compared to generic SDP structures.
+  - **64-bit Bloom filter key indexing** and cached worst-slot tracking for $O(1)$ fast rejection of dominated states.
+  - **Cost-margin pruning:** Drops states whose cumulative bit-cost exceeds `row_best + 32 + elias(msb(offset))` (a single repeat match cannot recover the difference).
+  - **Dynamic State Budgeting (`lz0_ultra_budget`):** Adapts $K$ according to input size ($K=128$ for small inputs, 64 around 1 MiB, 32 at 2 MiB, 12 floor) within an overall 768 MiB budget, keeping peak memory bounded.
+  - **Unconstrained Length-2 Matches:** With $K$ up to 128 and strict margin pruning, length-2 matches are accepted across all offsets without state pollution, unlocking multi-kilobyte gains on textures and structured records without inflating high-entropy streams.
+  - **RLE Tail Probing (`lz0_rle_tail = 64`):** Finder continues matching within the last 64 bytes of identical-byte runs to discover matches spanning beyond the run boundary.
 
 - **Pareto New-Match Pruning (NEWBEST):** Because `MatchNew` bit-cost is invariant to the source state, emitting new matches from every live state produces strictly dominated states that are immediately discarded by relaxation. The parser emits `MatchNew` only from the lowest-cost Pareto state at each position (and the secondary state if matching the previous offset), halving SDP parsing time while preserving identical optimal compression paths.
 - **Elias Plateau Stepping** (`next_len_plateau`): Because Elias gamma lengths remain constant across powers-of-two intervals ($[2^k, 2^{k+1}-1]$), evaluating intermediate lengths inside a plateau incurs the same bit-cost as the maximum length. The parser skips redundant transitions and only tests plateau upper bounds, dramatically pruning search branches.
-- **Stride-Aware Length-2 Profitability Filter**: In high-entropy streams (PNG, JPEG, MP3, encrypted sections), matches of length 2 are accepted only if $offset \le 32$ (default) or $offset \le 512$ (Ultra), or if matching a detected structural stride or its harmonic multiples up to $8\times$. This unlocks massive multi-kilobyte gains on textures and structured media while strictly preventing bitstream inflation on high-entropy streams and audio.
 
 ---
 
@@ -232,14 +239,14 @@ All decoders adhere to strict safety guarantees:
 | **Bit Packing** | **MSB-first** | **MSB-first** | Bits 7 down to 0 in control bytes |
 | **Offset Low Part** | 8 bits (`LSB=8`) | 8 bits (`LSB=8`) | 1 raw byte ($255 - \text{rem}$) |
 | **New Match Length** | `LEN=3` | `LEN=3` | 3 fixed bits for lengths 2–8; `111` + Elias for $\ge 9$ |
-| **Parser** | Sparse DP (`SDP`, $K=2$) | Adaptive Sparse DP ($K=32/16/8$) | Pareto-optimal dynamic programming |
+| **Parser** | Sparse DP (`SDP`, $K=2$) | Dedicated SoA DP (`lz0_parse_ultra`, $K=128..12$) | Pareto-optimal dynamic programming |
 | **Hash Match Finder** | 3-byte hash, max chain 8 | 3-byte hash, max chain 48 | Table size $2^{17}$, power-of-2 skip steps |
 | **Suffix Array Builder** | SA-IS linear time $O(N)$ | SA-IS linear time $O(N)$ | Oracle-verified deterministic SA |
 | **SA Search Window** | Adaptive $\pm 4 / \pm 8 / \pm 16$ | Dense $1..128$ + geometric jumps up to 512 | Exponential multi-scale probing for large files |
 | **Candidate Cap** | 16 | 48 | Maximum candidates evaluated per position |
 | **Stride / Periodicity** | Multi-window (stride $\ge 2$) | Multi-window + Containers + Large Strides | Autocorrelation for CSV, XLS, RGB24, RGBA32, PCM16, MP3, TAR (512b), SQLite (4096b), and large pitches (2048..8192) |
 | **Bridge Matching** | - | 8-entry MRU offset cache | Bridges short matches ($L \ge 2$) into cheap 1-bit `MatchLast` repeat-offsets |
-| **Length-2 Filter** | Strict ($off \le 32$ or rep) | Strict ($off \le 32$ or rep) | Prevents inflation on pre-compressed data (PNG, JPG, MP3) |
+| **Length-2 Filter** | Strict ($off \le 32$ or stride) | Unconstrained DP ($off \ge 1$) | Exact DP cost margin prevents inflation on pre-compressed data |
 
 ---
 
@@ -254,20 +261,20 @@ Comparison on real-world representative files (Canterbury, Silesia, Windows PE, 
 
 | File | Type / Category | Raw Size | LZ0 Normal (`-6`) | LZ0 Ultra (`-9`) | UPKR | LZ4 (default) | ZX0 | Decomp. `lz0dec_fast` vs LZ4 |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| `fields.c` | C source code | 11 150 B | 3 397 B (**30.47%**) | **3 374 B (30.26%)** | 2 928 B (26.26%) [-9] | 5 215 B (46.77%) | 3 214 B (28.83%) | **994 Mo/s** vs 2 577 Mo/s |
-| `sum` | SPARC ELF binary | 38 240 B | 12 125 B (**31.71%**) | **11 898 B (31.11%)** | 9 927 B (25.96%) [-6] | 18 812 B (49.19%) | 11 415 B (29.85%) | **791 Mo/s** vs 2 948 Mo/s |
-| `lz0_win64.exe` | Windows PE64 | 146 944 B | 75 147 B (**51.14%**) | **73 802 B (50.22%)** | 67 560 B (45.98%) [-6] | 101 596 B (69.14%) | *(trop lent)* | **406 Mo/s** vs 3 375 Mo/s |
-| `avatar.jpg` | JPEG Image | 25 380 B | 25 326 B (**99.79%**) | **25 281 B (99.61%)** | 25 749 B (101.45%) [-6] | 25 379 B (100.00%) | *(trop lent)* | **8 205 Mo/s** vs 30 985 Mo/s |
-| `break.mp3` | Audio MP3 CBR | 38 080 B | 11 299 B (**29.67%**) | **11 243 B (29.52%)** | 11 287 B (29.64%) [-6] | 11 552 B (30.34%) | *(trop lent)* | **7 210 Mo/s** vs 16 687 Mo/s |
-| `star.png` | PNG Image (Deflate) | 355 666 B | 357 301 B (**100.46%**) | **356 643 B (100.27%)** | 364 646 B (102.52%) [-2] | 356 988 B (100.37%) | *(trop lent)* | **9 217 Mo/s** vs 30 225 Mo/s |
-| `texture_rgb24.raw` | Raw RGB24 Texture | 196 608 B | 171 712 B (**87.34%**) | **171 429 B (87.19%)** | 86 531 B (44.01%) [-6] | 197 380 B (100.39%) | *(trop lent)* | **290 Mo/s** vs 30 108 Mo/s |
-| `texture_rgba32.raw`| Raw RGBA32 Texture | 262 144 B | 146 503 B (**55.89%**) | **135 901 B (51.84%)** | *(exclu >256K)* | 263 173 B (100.39%) | *(trop lent)* | **406 Mo/s** vs 28 616 Mo/s |
-| `audio_pcm16.raw` | Stereo PCM16 Audio | 192 000 B | 139 008 B (**72.40%**) | **134 434 B (70.02%)** | 117 053 B (61.07%) [-6] | 163 730 B (85.28%) | *(trop lent)* | **416 Mo/s** vs 8 148 Mo/s |
-| `alice29.txt` | English text | 152 089 B | 58 949 B (**38.76%**) | **58 655 B (38.57%)** | 50 488 B (33.20%) [-6] | 88 699 B (58.32%) | *(trop lent)* | **582 Mo/s** vs 2 575 Mo/s |
-| `plrabn12.txt` | Poetry text | 481 861 B | 208 776 B (**43.33%**) | **207 515 B (43.07%)** | 175 776 B (36.48%) [-2] | 325 589 B (67.57%) | *(trop lent)* | **581 Mo/s** vs 2 687 Mo/s |
-| `kennedy.xls` | Excel Spreadsheet | 1 029 744 B | 204 581 B (**19.87%**) | **201 093 B (19.53%)** | 64 830 B (6.30%) [-2] | 374 704 B (36.39%) | *(trop lent)* | **1 352 Mo/s** vs 2 719 Mo/s |
-| `dickens_1m.txt` | Large Text (1 MiB) | 1 048 576 B | 398 158 B (**37.97%**) | **394 996 B (37.67%)** | 331 404 B (31.61%) [-2] | 642 924 B (61.31%) | *(trop lent)* | **631 Mo/s** vs 1 887 Mo/s |
-| `bash_x86_64.bin` | ELF x86_64 binary | 1 298 416 B | 613 917 B (**47.28%**) | **600 868 B (46.28%)** | 553 594 B (42.64%) [-2] | 871 664 B (67.13%) | *(trop lent)* | **400 Mo/s** vs 2 652 Mo/s |
+| `fields.c` | C source code | 11 150 B | 3 397 B (**30.47%**) | **3 344 B (29.99%)** | 2 928 B (26.26%) [-9] | 5 215 B (46.77%) | 3 214 B (28.83%) | **994 Mo/s** vs 2 577 Mo/s |
+| `sum` | SPARC ELF binary | 38 240 B | 12 125 B (**31.71%**) | **11 766 B (30.77%)** | 9 927 B (25.96%) [-6] | 18 812 B (49.19%) | 11 415 B (29.85%) | **791 Mo/s** vs 2 948 Mo/s |
+| `lz0_win64.exe` | Windows PE64 | 146 944 B | 75 147 B (**51.14%**) | **72 615 B (49.42%)** | 67 560 B (45.98%) [-6] | 101 596 B (69.14%) | *(trop lent)* | **406 Mo/s** vs 3 375 Mo/s |
+| `avatar.jpg` | JPEG Image | 25 380 B | 25 326 B (**99.79%**) | **25 268 B (99.56%)** | 25 749 B (101.45%) [-6] | 25 379 B (100.00%) | *(trop lent)* | **8 205 Mo/s** vs 30 985 Mo/s |
+| `break.mp3` | Audio MP3 CBR | 38 080 B | 11 299 B (**29.67%**) | **11 246 B (29.53%)** | 11 287 B (29.64%) [-6] | 11 552 B (30.34%) | *(trop lent)* | **7 210 Mo/s** vs 16 687 Mo/s |
+| `star.png` | PNG Image (Deflate) | 355 666 B | 357 301 B (**100.46%**) | **356 400 B (100.21%)** | 364 646 B (102.52%) [-2] | 356 988 B (100.37%) | *(trop lent)* | **9 217 Mo/s** vs 30 225 Mo/s |
+| `texture_rgb24.raw` | Raw RGB24 Texture | 196 608 B | 171 712 B (**87.34%**) | **131 157 B (66.71%)** | 86 531 B (44.01%) [-6] | 197 380 B (100.39%) | *(trop lent)* | **290 Mo/s** vs 30 108 Mo/s |
+| `texture_rgba32.raw`| Raw RGBA32 Texture | 262 144 B | 146 503 B (**55.89%**) | **134 122 B (51.16%)** | *(exclu >256K)* | 263 173 B (100.39%) | *(trop lent)* | **406 Mo/s** vs 28 616 Mo/s |
+| `audio_pcm16.raw` | Stereo PCM16 Audio | 192 000 B | 139 008 B (**72.40%**) | **134 230 B (69.91%)** | 117 053 B (61.07%) [-6] | 163 730 B (85.28%) | *(trop lent)* | **416 Mo/s** vs 8 148 Mo/s |
+| `alice29.txt` | English text | 152 089 B | 58 949 B (**38.76%**) | **58 323 B (38.35%)** | 50 488 B (33.20%) [-6] | 88 699 B (58.32%) | *(trop lent)* | **582 Mo/s** vs 2 575 Mo/s |
+| `plrabn12.txt` | Poetry text | 481 861 B | 208 776 B (**43.33%**) | **206 804 B (42.92%)** | 175 776 B (36.48%) [-2] | 325 589 B (67.57%) | *(trop lent)* | **581 Mo/s** vs 2 687 Mo/s |
+| `kennedy.xls` | Excel Spreadsheet | 1 029 744 B | 204 581 B (**19.87%**) | **196 737 B (19.11%)** | 64 830 B (6.30%) [-2] | 374 704 B (36.39%) | *(trop lent)* | **1 352 Mo/s** vs 2 719 Mo/s |
+| `dickens_1m.txt` | Large Text (1 MiB) | 1 048 576 B | 398 158 B (**37.97%**) | **393 497 B (37.53%)** | 331 404 B (31.61%) [-2] | 642 924 B (61.31%) | *(trop lent)* | **631 Mo/s** vs 1 887 Mo/s |
+| `bash_x86_64.bin` | ELF x86_64 binary | 1 298 416 B | 613 917 B (**47.28%**) | **593 597 B (45.72%)** | 553 594 B (42.64%) [-2] | 871 664 B (67.13%) | *(trop lent)* | **400 Mo/s** vs 2 652 Mo/s |
 
 > **Key takeaway:** LZ0 delivers dense ratios competitive with UPKR on text and binaries while systematically outperforming both UPKR and LZ4 on pre-compressed and high-entropy media (`avatar.jpg` and `break.mp3` with zero inflation). Against LZ4, LZ0 cuts compressed size by **15% to 48%**, while providing decompressor throughputs of **400 to 1,355 Mo/s** (up to **10,000+ Mo/s** on images).
 
@@ -279,14 +286,14 @@ In embedded scenarios (firmware, game resource packages, packers), multiple disp
 
 | Target / Contents | Raw Size | LZ0 Normal (`-6`) | LZ0 Ultra (`-9`) | UPKR | LZ4 (default) | Decomp. `lz0dec_fast` vs UPKR |
 |---|---:|---:|---:|---:|---:|---:|
-| **`blob_png_256k`** (4 PNGs) | 262 144 B | 247 405 B (94.38%) | **246 567 B (94.06%)** | 247 888 B (94.56%) [-6] | 252 446 B (96.30%) | **1 625 Mo/s** vs 17.6 Mo/s (**92×**) |
-| **`blob_mix_256k`** (5 files: ELF, PE, XLS, PNG, txt) | 262 144 B | 128 155 B (48.89%) | 126 018 B (48.07%) | **110 904 B (42.31%)** [-6] | 168 178 B (64.15%) | **673 Mo/s** vs 37.9 Mo/s (**18×**) |
-| **`blob_png_512k`** (8 PNGs) | 524 288 B | 504 320 B (96.19%) | **502 897 B (95.92%)** | 508 723 B (97.03%) [-2] | 511 352 B (97.53%) | **2 160 Mo/s** vs 17.1 Mo/s (**126×**) |
-| **`blob_mix_512k`** (7 files: ELF, PE, PNGs, XLS, C, txt) | 524 288 B | 286 374 B (54.62%) | 283 212 B (54.02%) | **260 451 B (49.68%)** [-2] | 352 088 B (67.16%) | **767 Mo/s** vs 32.2 Mo/s (**24×**) |
-| **`blob_png_2m`** (8 distinct PNGs > 200 KiB) | 2 097 152 B | 2 056 945 B (98.08%) | **2 052 535 B (97.87%)** | 2 089 034 B (99.61%) [-1] | 2 067 355 B (98.58%) | **4 042 Mo/s** vs ~15 Mo/s (**269×**) |
-| **`blob_mix_2m`** (9 files: ELF, PE, 3 PNGs, XLS, txt, C) | 2 097 152 B | 1 198 585 B (57.15%) | 1 187 523 B (56.63%) | **1 125 643 B (53.67%)** [-1] | 1 484 306 B (70.78%) | **681 Mo/s** vs ~15 Mo/s (**45×**) |
-| **`blob_png_5m`** (15 distinct PNGs) | 5 242 880 B | **4 362 024 B (83.20%)** | *(analyzed)* | *(excluded >20 min)* | 5 210 986 B (99.39%) | **3 606 Mo/s** vs - |
-| **`blob_mix_5m`** (15 distinct real-world files) | 5 242 880 B | 2 191 126 B (41.79%) | **2 160 499 B (41.21%)** | *(excluded >30 min)* | 3 093 616 B (59.01%) | **733 Mo/s** vs - |
+| **`blob_png_256k`** (4 PNGs) | 262 144 B | 247 405 B (94.38%) | **246 192 B (93.91%)** | 247 888 B (94.56%) [-6] | 252 446 B (96.30%) | **1 625 Mo/s** vs 17.6 Mo/s (**92×**) |
+| **`blob_mix_256k`** (5 files: ELF, PE, XLS, PNG, txt) | 262 144 B | 128 155 B (48.89%) | 124 976 B (47.67%) | **110 904 B (42.31%)** [-6] | 168 178 B (64.15%) | **673 Mo/s** vs 37.9 Mo/s (**18×**) |
+| **`blob_png_512k`** (8 PNGs) | 524 288 B | 504 320 B (96.19%) | **502 292 B (95.80%)** | 508 723 B (97.03%) [-2] | 511 352 B (97.53%) | **2 160 Mo/s** vs 17.1 Mo/s (**126×**) |
+| **`blob_mix_512k`** (7 files: ELF, PE, PNGs, XLS, C, txt) | 524 288 B | 286 374 B (54.62%) | 281 539 B (53.70%) | **260 451 B (49.68%)** [-2] | 352 088 B (67.16%) | **767 Mo/s** vs 32.2 Mo/s (**24×**) |
+| **`blob_png_2m`** (8 distinct PNGs > 200 KiB) | 2 097 152 B | 2 056 945 B (98.08%) | **2 051 622 B (97.83%)** | 2 089 034 B (99.61%) [-1] | 2 067 355 B (98.58%) | **4 042 Mo/s** vs ~15 Mo/s (**269×**) |
+| **`blob_mix_2m`** (9 files: ELF, PE, 3 PNGs, XLS, txt, C) | 2 097 152 B | 1 198 585 B (57.15%) | 1 181 308 B (56.33%) | **1 125 643 B (53.67%)** [-1] | 1 484 306 B (70.78%) | **681 Mo/s** vs ~15 Mo/s (**45×**) |
+| **`blob_png_5m`** (15 distinct PNGs) | 5 242 880 B | **4 362 024 B (83.20%)** | **4 353 045 B (83.03%)** | *(excluded >20 min)* | 5 210 986 B (99.39%) | **3 606 Mo/s** vs - |
+| **`blob_mix_5m`** (15 distinct real-world files) | 5 242 880 B | 2 191 126 B (41.79%) | **2 157 767 B (41.16%)** | *(excluded >30 min)* | 3 093 616 B (59.01%) | **733 Mo/s** vs - |
 
 ---
 
@@ -404,7 +411,7 @@ The `lz0` executable operates on disk files using the `LZ01` container:
 
 # Compress with explicit compression level (-1 fast to -9 ultra)
 ./bin/lz0 c -1 original.bin fast.lz0    # Fast mode (K=2, smaller search window)
-./bin/lz0 c -9 original.bin ultra.lz0   # Ultra mode (adaptive K=32 DP, multi-scale SA window, media stride detection, strict len2 filter)
+./bin/lz0 c -9 original.bin ultra.lz0   # Ultra mode (SoA DP K=128..12, multi-scale SA window, media stride detection, BT match finder)
 
 # Decompress a file
 ./bin/lz0 d compressed.lz0 restored.bin

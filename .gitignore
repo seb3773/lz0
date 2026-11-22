@@ -55,3 +55,6 @@ core
 *.swp
 *.swo
 
+
+# Ultra bench corpus (regenerated via bench/ultra/make_corpus.sh)
+bench/ultra/corpus/

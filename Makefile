@@ -7,7 +7,7 @@ ZX0_SRC = zx0_compressor/compress.c zx0_compressor/optimize.c \
           zx0_decompressor/zx0_decompress.c
 
 LZ0_SRC = lz0/lz0_cost.c lz0/lz0_find.c lz0/lz0_parse.c \
-          lz0/lz0_emit.c lz0/lz0_decompress.c lz0/lz0_compress.c
+          lz0/lz0_emit.c lz0/lz0_decompress.c lz0/lz0_compress.c lz0/lz0_ultra.c
 
 LZ0DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.s lz0/lz0dec_fast_x86_64.s
 

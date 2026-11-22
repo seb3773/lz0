@@ -19,7 +19,8 @@ typedef enum {
     LZ0_PARSE_LITE1F = 8,
     LZ0_PARSE_LITE1FN = 9,
     LZ0_PARSE_H2 = 10,
-    LZ0_PARSE_SDP = 11
+    LZ0_PARSE_SDP = 11,
+    LZ0_PARSE_ULTRA = 12
 } lz0_parse_t;
 
 typedef struct {

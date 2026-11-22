@@ -47,6 +47,7 @@ typedef struct {
     uint32_t bt_next;
     int bt_depth;
     int bt_hbits;
+    int kc_score[64];
 } lz0_finder;
 
 typedef struct {
@@ -129,6 +130,14 @@ int lz0_parse_lite1f(lz0_finder *f, lz0_toklist *tl);
 int lz0_parse_lite1fn(lz0_finder *f, lz0_toklist *tl);
 int lz0_parse_h2(lz0_finder *f, lz0_toklist *tl);
 int lz0_parse_sdp(lz0_finder *f, lz0_toklist *tl);
+int lz0_parse_ultra(lz0_finder *f, lz0_toklist *tl);
+extern int lz0_ultra_states;
+extern size_t lz0_ultra_budget;
+int lz0_ultra_states_for(uint32_t n);
+size_t lz0_ram_ultra(uint32_t n);
+extern int lz0_ultra_margin;
+extern int lz0_ultra_fine;
+extern int lz0_rle_tail;
 int lz0_parse_dp(lz0_finder *f, lz0_toklist *tl);
 int lz0_tokens_valid(const lz0_toklist *tl, uint32_t n);
 

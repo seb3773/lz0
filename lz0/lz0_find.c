@@ -1026,6 +1026,7 @@ static inline int match_score(lz0_match m) {
 }
 
 int lz0_len2_max_off = 32;
+int lz0_rle_tail = 0;
 
 int lz0_is_len2_allowed(const lz0_finder *f, uint32_t off) {
     if (lz0_len2_max_off <= 0)
@@ -1050,32 +1051,44 @@ static inline int is_valid_candidate(const lz0_finder *f, uint32_t len, uint32_t
     return 1;
 }
 
-static int keep_candidate(const lz0_finder *f, lz0_match *out, int *n, int max_c, lz0_match m) {
+/* Scores of the current candidate list, kept in sync by keep_candidate()
+ * inside f->kc_score[]. Every write to the list during a lz0_find_matches()
+ * call goes through keep_candidate(), so the cache never goes stale while
+ * it is read. Thread-safe per finder instance. */
+static int keep_candidate(lz0_finder *f, lz0_match *out, int *n, int max_c, lz0_match m) {
     if (!is_valid_candidate(f, m.length, m.offset))
         return 0;
-    if (already_has_offset(out, *n, m.offset)) {
-        for (int i = 0; i < *n; i++) {
-            if (out[i].offset == m.offset && m.length > out[i].length)
+    int cnt = *n;
+    for (int i = 0; i < cnt; i++) {
+        if (out[i].offset == m.offset) {
+            if (m.length > out[i].length) {
                 out[i].length = m.length;
+                f->kc_score[i] = match_score(out[i]);
+            }
+            return 1;
         }
-        return 1;
     }
-    if (*n < max_c) {
-        out[(*n)++] = m;
+    if (max_c > 64)
+        max_c = 64;
+    if (cnt < max_c) {
+        out[cnt] = m;
+        f->kc_score[cnt] = match_score(m);
+        *n = cnt + 1;
         return 1;
     }
     int m_score = match_score(m);
     int worst = 0;
-    int worst_score = match_score(out[0]);
-    for (int i = 1; i < *n; i++) {
-        int s = match_score(out[i]);
-        if (s < worst_score || (s == worst_score && out[i].length < out[worst].length)) {
+    int worst_score = f->kc_score[0];
+    for (int i = 1; i < cnt; i++) {
+        int sc = f->kc_score[i];
+        if (sc < worst_score || (sc == worst_score && out[i].length < out[worst].length)) {
             worst = i;
-            worst_score = s;
+            worst_score = sc;
         }
     }
     if (m_score > worst_score) {
         out[worst] = m;
+        f->kc_score[worst] = m_score;
         return 1;
     }
     return 0;
@@ -1435,7 +1448,8 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
         m.offset = 1;
         m.length = (uint32_t)rlen;
         keep_candidate(f, out, &nout, f->max_candidates, m);
-        return nout;
+        if (lz0_rle_tail <= 0 || rlen > lz0_rle_tail)
+            return nout;
     }
 
     if (pos + (uint32_t)minm > n)

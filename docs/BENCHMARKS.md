@@ -14,20 +14,20 @@ Toutes les décompressions LZ0 présentées ci-dessous ont été vérifiées **1
 
 | Fichier | Type / Description | Taille Brute | LZ0 Normal (`-6`) | LZ0 Ultra (`-9`) | UPKR | LZ4 (défaut) | ZX0 | Débit Déc. `lz0dec_fast` vs LZ4 |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| `fields.c` | Code source C | 11 150 B | 3 407 B (**30.56%**) | **3 353 B (30.07%)** | 2 928 B (26.26%) [-9] | 5 215 B (46.77%) | 3 214 B (28.83%) | **994 Mo/s** vs 2 577 Mo/s |
-| `sum` | SPARC ELF binaire | 38 240 B | 12 139 B (**31.74%**) | **11 798 B (30.85%)** | 9 927 B (25.96%) [-6] | 18 812 B (49.19%) | 11 415 B (29.85%) | **791 Mo/s** vs 2 948 Mo/s |
-| `lz0_win64.exe` | PE64 Windows binaire | 146 944 B | 75 289 B (**51.24%**) | **73 157 B (49.79%)** | 67 560 B (45.98%) [-6] | 101 596 B (69.14%) | *(trop lent)* | **406 Mo/s** vs 3 375 Mo/s |
-| `star.png` | Image PNG (Deflate) | 355 666 B | 357 309 B (**100.46%**) | **356 558 B (100.25%)** | 364 646 B (102.52%) [-2] | 356 988 B (100.37%) | *(trop lent)* | **9 217 Mo/s** vs 30 225 Mo/s |
-| `avatar.jpg` | Image JPEG | 25 380 B | 25 334 B (**99.82%**) | **25 274 B (99.58%)** | 25 749 B (101.45%) [-6] | 25 379 B (100.00%) | *(trop lent)* | **8 205 Mo/s** vs 30 985 Mo/s |
-| `break.mp3` | Audio MP3 CBR | 38 080 B | 11 289 B (**29.65%**) | **11 248 B (29.54%)** | 11 287 B (29.64%) [-6] | 11 552 B (30.34%) | *(trop lent)* | **7 210 Mo/s** vs 16 687 Mo/s |
-| `texture_rgb24.raw` | Texture RGB 24b | 196 608 B | 154 475 B (**78.57%**) | **144 283 B (73.39%)** | 86 531 B (44.01%) [-6] | 197 380 B (100.39%) | *(trop lent)* | **290 Mo/s** vs 30 108 Mo/s |
-| `texture_rgba32.raw`| Texture RGBA 32b | 262 144 B | 144 027 B (**54.94%**) | **134 246 B (51.21%)** | *(exclu >256K)* | 263 173 B (100.39%) | *(trop lent)* | **406 Mo/s** vs 28 616 Mo/s |
-| `audio_pcm16.raw` | Audio PCM16 Stéréo | 192 000 B | 139 027 B (**72.41%**) | **134 313 B (69.95%)** | 117 053 B (60.97%) [-6] | 163 730 B (85.28%) | *(trop lent)* | **416 Mo/s** vs 8 148 Mo/s |
-| `alice29.txt` | Texte littéraire anglais | 152 089 B | 59 804 B (**39.32%**) | **58 372 B (38.38%)** | 50 488 B (33.20%) [-6] | 88 699 B (58.32%) | *(trop lent)* | **582 Mo/s** vs 2 575 Mo/s |
-| `plrabn12.txt` | Poésie classique | 481 861 B | 214 066 B (**44.42%**) | **206 919 B (42.94%)** | 175 776 B (36.48%) [-2] | 325 589 B (67.57%) | *(trop lent)* | **581 Mo/s** vs 2 687 Mo/s |
-| `kennedy.xls` | Feuille de calcul XLS | 1 029 744 B | 204 890 B (**19.90%**) | **201 171 B (19.54%)** | 64 830 B (6.30%) [-2] | 374 704 B (36.39%) | *(trop lent)* | **1 352 Mo/s** vs 2 719 Mo/s |
-| `dickens_1m.txt`| Corpus texte 1 Mo | 1 048 576 B | 411 317 B (**39.23%**) | **393 713 B (37.55%)** | 331 404 B (31.61%) [-2] | 642 924 B (61.31%) | *(trop lent)* | **631 Mo/s** vs 1 887 Mo/s |
-| `bash_x86_64.bin`| Exécutable ELF x86_64 | 1 298 416 B | 620 832 B (**47.81%**) | **596 939 B (45.97%)** | 553 594 B (42.64%) [-2] | 871 664 B (67.13%) | *(trop lent)* | **400 Mo/s** vs 2 652 Mo/s |
+| `fields.c` | Code source C | 11 150 B | 3 407 B (**30.56%**) | **3 344 B (29.99%)** | 2 928 B (26.26%) [-9] | 5 215 B (46.77%) | 3 214 B (28.83%) | **994 Mo/s** vs 2 577 Mo/s |
+| `sum` | SPARC ELF binaire | 38 240 B | 12 139 B (**31.74%**) | **11 766 B (30.77%)** | 9 927 B (25.96%) [-6] | 18 812 B (49.19%) | 11 415 B (29.85%) | **791 Mo/s** vs 2 948 Mo/s |
+| `lz0_win64.exe` | PE64 Windows binaire | 146 944 B | 75 289 B (**51.24%**) | **72 615 B (49.42%)** | 67 560 B (45.98%) [-6] | 101 596 B (69.14%) | *(trop lent)* | **406 Mo/s** vs 3 375 Mo/s |
+| `star.png` | Image PNG (Deflate) | 355 666 B | 357 309 B (**100.46%**) | **356 400 B (100.21%)** | 364 646 B (102.52%) [-2] | 356 988 B (100.37%) | *(trop lent)* | **9 217 Mo/s** vs 30 225 Mo/s |
+| `avatar.jpg` | Image JPEG | 25 380 B | 25 334 B (**99.82%**) | **25 268 B (99.56%)** | 25 749 B (101.45%) [-6] | 25 379 B (100.00%) | *(trop lent)* | **8 205 Mo/s** vs 30 985 Mo/s |
+| `break.mp3` | Audio MP3 CBR | 38 080 B | 11 289 B (**29.65%**) | **11 246 B (29.53%)** | 11 287 B (29.64%) [-6] | 11 552 B (30.34%) | *(trop lent)* | **7 210 Mo/s** vs 16 687 Mo/s |
+| `texture_rgb24.raw` | Texture RGB 24b | 196 608 B | 154 475 B (**78.57%**) | **131 157 B (66.71%)** | 86 531 B (44.01%) [-6] | 197 380 B (100.39%) | *(trop lent)* | **290 Mo/s** vs 30 108 Mo/s |
+| `texture_rgba32.raw`| Texture RGBA 32b | 262 144 B | 144 027 B (**54.94%**) | **134 122 B (51.16%)** | *(exclu >256K)* | 263 173 B (100.39%) | *(trop lent)* | **406 Mo/s** vs 28 616 Mo/s |
+| `audio_pcm16.raw` | Audio PCM16 Stéréo | 192 000 B | 139 027 B (**72.41%**) | **134 230 B (69.91%)** | 117 053 B (60.97%) [-6] | 163 730 B (85.28%) | *(trop lent)* | **416 Mo/s** vs 8 148 Mo/s |
+| `alice29.txt` | Texte littéraire anglais | 152 089 B | 59 804 B (**39.32%**) | **58 323 B (38.35%)** | 50 488 B (33.20%) [-6] | 88 699 B (58.32%) | *(trop lent)* | **582 Mo/s** vs 2 575 Mo/s |
+| `plrabn12.txt` | Poésie classique | 481 861 B | 214 066 B (**44.42%**) | **206 804 B (42.92%)** | 175 776 B (36.48%) [-2] | 325 589 B (67.57%) | *(trop lent)* | **581 Mo/s** vs 2 687 Mo/s |
+| `kennedy.xls` | Feuille de calcul XLS | 1 029 744 B | 204 890 B (**19.90%**) | **196 737 B (19.11%)** | 64 830 B (6.30%) [-2] | 374 704 B (36.39%) | *(trop lent)* | **1 352 Mo/s** vs 2 719 Mo/s |
+| `dickens_1m.txt`| Corpus texte 1 Mo | 1 048 576 B | 411 317 B (**39.23%**) | **393 497 B (37.53%)** | 331 404 B (31.61%) [-2] | 642 924 B (61.31%) | *(trop lent)* | **631 Mo/s** vs 1 887 Mo/s |
+| `bash_x86_64.bin`| Exécutable ELF x86_64 | 1 298 416 B | 620 832 B (**47.81%**) | **593 597 B (45.72%)** | 553 594 B (42.64%) [-2] | 871 664 B (67.13%) | *(trop lent)* | **400 Mo/s** vs 2 652 Mo/s |
 
 ---
 
@@ -41,14 +41,14 @@ Conformément à l'**Approche A**, le flux compressé reste **un seul flux LZ0 s
 
 | Cible / Fichiers | Taille Brute | LZ0 Normal (`-6`) | LZ0 Ultra (`-9`) | UPKR | LZ4 (défaut) | Débit Déc. `lz0dec_fast` vs UPKR |
 |---|---:|---:|---:|---:|---:|---:|
-| **`blob_png_256k`**<br>(4 PNGs) | 262 144 B | 247 444 B (94.39%) | **246 399 B (93.99%)** | 247 888 B (94.56%) [-6] | 252 446 B (96.30%) | **1 625 Mo/s** vs 17.6 Mo/s (**92×**) |
-| **`blob_mix_256k`**<br>(5 f. : ELF, PE, XLS, PNG, txt) | 262 144 B | 128 308 B (48.95%) | 125 532 B (47.89%) | **110 904 B (42.31%)** [-6] | 168 178 B (64.15%) | **673 Mo/s** vs 37.9 Mo/s (**18×**) |
-| **`blob_png_512k`**<br>(8 PNGs) | 524 288 B | 504 340 B (96.20%) | **502 605 B (95.86%)** | 508 723 B (97.03%) [-2] | 511 352 B (97.53%) | **2 160 Mo/s** vs 17.1 Mo/s (**126×**) |
-| **`blob_mix_512k`**<br>(7 f. : ELF, PE, 2 PNGs, XLS, C, txt) | 524 288 B | 286 813 B (54.71%) | 282 434 B (53.87%) | **260 451 B (49.68%)** [-2] | 352 088 B (67.16%) | **767 Mo/s** vs 32.2 Mo/s (**24×**) |
-| **`blob_png_2m`**<br>(8 PNGs distincts > 200 Ko) | 2 097 152 B | 2 057 017 B (98.09%) | **2 052 123 B (97.85%)** | 2 089 034 B (99.61%) [-1] | 2 067 355 B (98.58%) | **4 042 Mo/s** vs ~15 Mo/s (**269×**) |
-| **`blob_mix_2m`**<br>(9 f. : ELF, PE, 3 PNGs, XLS, txt, C, HTML) | 2 097 152 B | 1 204 218 B (57.42%) | 1 184 273 B (56.47%) | **1 125 643 B (53.67%)** [-1] | 1 484 306 B (70.78%) | **681 Mo/s** vs ~15 Mo/s (**45×**) |
-| **`blob_png_5m`**<br>(15 PNGs distincts) | 5 242 880 B | **4 362 141 B (83.20%)** | **4 353 263 B (83.03%)** | *(exclu >20 min)* | 5 210 986 B (99.39%) | **3 606 Mo/s** vs - |
-| **`blob_mix_5m`**<br>(15 fichiers réels distincts) | 5 242 880 B | 2 219 217 B (42.33%) | **2 162 830 B (41.25%)** | *(exclu >30 min)* | 3 093 616 B (59.01%) | **733 Mo/s** vs - |
+| **`blob_png_256k`**<br>(4 PNGs) | 262 144 B | 247 444 B (94.39%) | **246 192 B (93.91%)** | 247 888 B (94.56%) [-6] | 252 446 B (96.30%) | **1 625 Mo/s** vs 17.6 Mo/s (**92×**) |
+| **`blob_mix_256k`**<br>(5 f. : ELF, PE, XLS, PNG, txt) | 262 144 B | 128 308 B (48.95%) | 124 976 B (47.67%) | **110 904 B (42.31%)** [-6] | 168 178 B (64.15%) | **673 Mo/s** vs 37.9 Mo/s (**18×**) |
+| **`blob_png_512k`**<br>(8 PNGs) | 524 288 B | 504 340 B (96.20%) | **502 292 B (95.80%)** | 508 723 B (97.03%) [-2] | 511 352 B (97.53%) | **2 160 Mo/s** vs 17.1 Mo/s (**126×**) |
+| **`blob_mix_512k`**<br>(7 f. : ELF, PE, 2 PNGs, XLS, C, txt) | 524 288 B | 286 813 B (54.71%) | 281 539 B (53.70%) | **260 451 B (49.68%)** [-2] | 352 088 B (67.16%) | **767 Mo/s** vs 32.2 Mo/s (**24×**) |
+| **`blob_png_2m`**<br>(8 PNGs distincts > 200 Ko) | 2 097 152 B | 2 057 017 B (98.09%) | **2 051 622 B (97.83%)** | 2 089 034 B (99.61%) [-1] | 2 067 355 B (98.58%) | **4 042 Mo/s** vs ~15 Mo/s (**269×**) |
+| **`blob_mix_2m`**<br>(9 f. : ELF, PE, 3 PNGs, XLS, txt, C, HTML) | 2 097 152 B | 1 204 218 B (57.42%) | 1 181 308 B (56.33%) | **1 125 643 B (53.67%)** [-1] | 1 484 306 B (70.78%) | **681 Mo/s** vs ~15 Mo/s (**45×**) |
+| **`blob_png_5m`**<br>(15 PNGs distincts) | 5 242 880 B | **4 362 141 B (83.20%)** | **4 353 045 B (83.03%)** | *(exclu >20 min)* | 5 210 986 B (99.39%) | **3 606 Mo/s** vs - |
+| **`blob_mix_5m`**<br>(15 fichiers réels distincts) | 5 242 880 B | 2 219 217 B (42.33%) | **2 157 767 B (41.16%)** | *(exclu >30 min)* | 3 093 616 B (59.01%) | **733 Mo/s** vs - |
 
 ---
 
@@ -132,9 +132,10 @@ Dans les flux à haute entropie (JPEG, MP3, PNG, binaires chiffrés), émettre u
 - **Audio MP3 CBR** : Les en-têtes de trames MPEG Layer III sont synchronisés via un filtre strict validant le mot magique `0xFF 0xE0`, la répétition bit-exacte du header 4 octets (`memcmp(win+i, win+i-p, 4) == 0`), le bit de Layer III, et des débits valides. Cela élimine 100 % des faux positifs sur textures graphiques.
 - **Textures RGB24 / RGBA32 / Audio PCM16** : Le pas de corrélation utilise un échantillonnage sans repliement de parité (`step = (p <= 32) ? 1 : 2`), garantissant la détection exacte du stride 3 (RGB24) et du stride 4 (RGBA32 et PCM16 stéréo). Les strides candidats sont triés par taux de corrélation décroissant afin d'élaguer les multiples harmoniques.
 
-### Programmation Dynamique Adaptative ($K=32$) et Multi-Échelle SA-IS
-- En mode Ultra (`-9`), le nombre d'états DP par position s'ajuste à la taille du fichier :
-  - **$K=32$** pour fichiers $\le 512$ Ko (capture maximale des interactions d'offsets).
-  - **$K=16$** pour fichiers entre 512 Ko et 2 Mo (garantit une empreinte RAM DP $\le 130$ Mo).
-  - **$K=8$** pour fichiers $> 2$ Mo (évite toute explosion quadratique du temps de calcul).
+### Parseur Ultra Dédié SoA ($K=128..12$) et Multi-Échelle SA-IS
+- En mode Ultra (`-9`), le parseur dédié `lz0_parse_ultra` utilise une représentation compacte Structure-of-Arrays (12 octets par état), un filtre de Bloom 64 bits et un élagage par marge de coût :
+  - **$K=128$** pour fichiers $\le 512$ Ko (capture maximale des interactions d'offsets).
+  - **$K=64$** autour de 1 Mo (garantit une empreinte RAM DP calibrée par `lz0_ultra_budget`).
+  - **$K=32$** à 2 Mo et **$K=12$** à 5 Mo (évite toute explosion de l'empreinte mémoire).
+- Les correspondances de longueur 2 sont évaluées sans contrainte d'offset (`lz0_len2_max_off = 0`), ce qui génère des gains substantiels sur les formats tabulaires et multimédia (textures RGB24, RGBA32, XLS) sans dégrader les données à haute entropie.
 - L'échantillonnage de la fenêtre Suffix Array associe une fenêtre linéaire dense $1 \dots 128$ et des sauts géométriques $\{160, 192, 256, 320, 384, 512\}$, capturant les dépendances lointaines sur les gros fichiers sans accroître le nombre de comparaisons.

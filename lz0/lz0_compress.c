@@ -67,11 +67,11 @@ void lz0_config_level(lz0_config *cfg, int level) {
         lz0_deep_probe = 2;
         lz0_hash4_probe = 1;
     } else {
-        // Level 9: Ultra maximal compression
+        // Level 9: Ultra maximal compression (dedicated ultra parser)
         cfg->min_match = 2;
         cfg->max_chain = 64;
         cfg->max_candidates = 48;
-        cfg->parser = LZ0_PARSE_SDP;
+        cfg->parser = LZ0_PARSE_ULTRA;
         cfg->score_k = 8;
         cfg->max_states = 32;
         cfg->jump_levels = 0;
@@ -82,7 +82,11 @@ void lz0_config_level(lz0_config *cfg, int level) {
         lz0_sdp_fine_matches = 1;
         lz0_deep_probe = 4;
         lz0_hash4_probe = 1;
-        lz0_len2_max_off = 512;
+        lz0_len2_max_off = 0;
+        lz0_rle_tail = 64;
+        lz0_ultra_states = 0;
+        lz0_ultra_margin = 32;
+        lz0_ultra_fine = 8;
     }
 }
 
@@ -109,6 +113,7 @@ void lz0_h2c8_apply(void) {
     lz0_sa_algo = 1;
     lz0_sdp_census_out = NULL;
     lz0_len2_max_off = 32;
+    lz0_rle_tail = 0;
 }
 
 #if defined(_WIN32)
@@ -160,6 +165,8 @@ int lz0_compress(const unsigned char *in, size_t in_sz,
         int k = cfg->max_states > 0 ? cfg->max_states : 4;
         stats->peak_ram += lz0_ram_sdp((uint32_t)in_sz, k);
     }
+    if (cfg->parser == LZ0_PARSE_ULTRA)
+        stats->peak_ram += lz0_ram_ultra((uint32_t)in_sz);
 
     lz0_toklist tl;
     lz0_toklist_init(&tl);
@@ -186,6 +193,8 @@ int lz0_compress(const unsigned char *in, size_t in_sz,
         rc = lz0_parse_h2(&f, &tl);
     else if (cfg->parser == LZ0_PARSE_SDP)
         rc = lz0_parse_sdp(&f, &tl);
+    else if (cfg->parser == LZ0_PARSE_ULTRA)
+        rc = lz0_parse_ultra(&f, &tl);
     else
         rc = lz0_parse_lazy(&f, &tl);
     double t2 = now_ms();
