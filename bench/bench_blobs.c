@@ -8,6 +8,8 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#include <lz4.h>
+#include <lz4hc.h>
 #include "lz0.h"
 #include "lz0dec.h"
 #include "lz0_internal.h"
@@ -220,6 +222,58 @@ static void benchmark_blob(const blob_target *tgt, int test_upkr, int upkr_level
         printf("| UPKR | (Excluded for size > 2 MiB: time > 10 min) | - | - | - | - | - |\n");
     }
 
+    /* 5. LZ4 default */
+    {
+        int max_dst = LZ4_compressBound((int)in_sz);
+        char *comp = (char *)malloc(max_dst);
+        char *out = (char *)malloc(in_sz + 64);
+        double t0 = now_ms();
+        int csz = LZ4_compress_default((const char *)in, comp, (int)in_sz, max_dst);
+        double enc_ms = now_ms() - t0;
+
+        int iters = (in_sz <= 512 * 1024) ? 50 : (in_sz <= 2 * 1024 * 1024) ? 10 : 3;
+        t0 = now_ms();
+        int d = 0;
+        for (int i = 0; i < iters; i++) {
+            d = LZ4_decompress_safe(comp, out, csz, (int)in_sz);
+        }
+        double dec_ms = (now_ms() - t0) / iters;
+        int ok = (csz > 0 && d == (int)in_sz && memcmp(in, out, in_sz) == 0);
+        double dec_mbs = (dec_ms > 0) ? ((double)in_sz / (1024.0 * 1024.0)) / (dec_ms / 1000.0) : 0.0;
+
+        printf("| **LZ4 (default)** | %d B | %.2f%% | %+.2f%% | %.1f ms | **%.1f MB/s** | %s |\n",
+               csz, (double)csz * 100.0 / in_sz, ((double)csz - (double)in_sz) * 100.0 / in_sz,
+               enc_ms, dec_mbs, ok ? "✅ Bit-exact" : "❌ FAIL");
+        free(comp);
+        free(out);
+    }
+
+    /* 6. LZ4HC (-9) */
+    {
+        int max_dst = LZ4_compressBound((int)in_sz);
+        char *comp = (char *)malloc(max_dst);
+        char *out = (char *)malloc(in_sz + 64);
+        double t0 = now_ms();
+        int csz = LZ4_compress_HC((const char *)in, comp, (int)in_sz, max_dst, 9);
+        double enc_ms = now_ms() - t0;
+
+        int iters = (in_sz <= 512 * 1024) ? 50 : (in_sz <= 2 * 1024 * 1024) ? 10 : 3;
+        t0 = now_ms();
+        int d = 0;
+        for (int i = 0; i < iters; i++) {
+            d = LZ4_decompress_safe(comp, out, csz, (int)in_sz);
+        }
+        double dec_ms = (now_ms() - t0) / iters;
+        int ok = (csz > 0 && d == (int)in_sz && memcmp(in, out, in_sz) == 0);
+        double dec_mbs = (dec_ms > 0) ? ((double)in_sz / (1024.0 * 1024.0)) / (dec_ms / 1000.0) : 0.0;
+
+        printf("| **LZ4HC (-9)** | %d B | %.2f%% | %+.2f%% | %.1f ms | **%.1f MB/s** | %s |\n",
+               csz, (double)csz * 100.0 / in_sz, ((double)csz - (double)in_sz) * 100.0 / in_sz,
+               enc_ms, dec_mbs, ok ? "✅ Bit-exact" : "❌ FAIL");
+        free(comp);
+        free(out);
+    }
+
     free(in);
 }
 
@@ -240,6 +294,7 @@ int main(int argc, char **argv) {
     }
 
     printf("# Comparative Benchmark: Heterogeneous Multi-Resource Blobs\n");
+    printf("Benchmarked on: Intel(R) Core(TM) i3-9100 CPU @ 3.60GHz (x86_64 Linux)\n");
     printf("Corpus: 8 Blobs (Pure PNGs and Mixed binary/image/text, from 256 KiB to 5 MiB)\n\n");
 
     int n_targets = (int)(sizeof(BLOBS) / sizeof(BLOBS[0]));

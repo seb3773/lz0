@@ -9,6 +9,7 @@
 #include <sys/types.h>
 
 #include <lz4.h>
+#include <lz4hc.h>
 #include "lz0.h"
 #include "lz0dec.h"
 #include "zx0_compress_wrapper.h"
@@ -118,6 +119,12 @@ typedef struct {
     double lz4_enc_ms;
     double lz4_dec_mbs;
     int lz4_ok;
+
+    /* LZ4HC */
+    size_t lz4hc_sz;
+    double lz4hc_enc_ms;
+    double lz4hc_dec_mbs;
+    int lz4hc_ok;
 
     /* ZX0 */
     size_t zx0_sz;
@@ -285,6 +292,35 @@ static void run_test(const char *path, const char *category, test_result_t *r, i
         fflush(stdout);
     }
 
+    /* 4b. LZ4HC (-9) */
+    {
+        int max_dst = LZ4_compressBound((int)in_sz);
+        char *comp = (char *)malloc(max_dst);
+        char *out = (char *)malloc(in_sz);
+
+        double t0 = now_ms();
+        int csz = LZ4_compress_HC((const char *)in, comp, (int)in_sz, max_dst, 9);
+        r->lz4hc_enc_ms = now_ms() - t0;
+        r->lz4hc_sz = (size_t)csz;
+
+        int iters_lz4 = (in_sz < 256 * 1024) ? 200 : (in_sz < 1024 * 1024) ? 100 : 30;
+        t0 = now_ms();
+        int d = 0;
+        for (int i = 0; i < iters_lz4; i++) {
+            d = LZ4_decompress_safe(comp, out, csz, (int)in_sz);
+        }
+        double dec_total_ms = (now_ms() - t0) / iters_lz4;
+        r->lz4hc_ok = (csz > 0 && d == (int)in_sz && memcmp(in, out, in_sz) == 0);
+        r->lz4hc_dec_mbs = (dec_total_ms > 0) ? ((double)in_sz / (1024.0 * 1024.0)) / (dec_total_ms / 1000.0) : 0;
+
+        printf("  LZ4HC (-9)     : %8zu B (%5.2f%%) | Enc: %6.1f ms | Dec in-memory: %6.1f MB/s\n",
+               r->lz4hc_sz, (double)r->lz4hc_sz * 100.0 / in_sz,
+               r->lz4hc_enc_ms, r->lz4hc_dec_mbs);
+        free(comp);
+        free(out);
+        fflush(stdout);
+    }
+
     /* 5. ZX0 (only if <= 64 KB and non-media) */
     if (in_sz <= 64 * 1024 && strstr(category, "Image") == NULL && strstr(category, "Audio") == NULL) {
         unsigned char *comp = NULL;
@@ -318,8 +354,8 @@ static void run_test(const char *path, const char *category, test_result_t *r, i
 
 static void print_markdown_table(const char *title, test_result_t *results, int count) {
     printf("### %s\n\n", title);
-    printf("| File / Target | Type / Category | Raw Size | LZ0 Normal (-6) | LZ0 Ultra (-9) | UPKR | LZ4 (default) | Decomp. Throughput LZ0 FAST ASM vs LZ4 |\n");
-    printf("|---|---|---:|---:|---:|---:|---:|---:|\n");
+    printf("| File / Target | Type / Category | Raw Size | LZ0 Normal (-6) | LZ0 Ultra (-9) | UPKR | LZ4 (default) | LZ4HC (-9) | Decomp. Throughput LZ0 FAST ASM vs LZ4 |\n");
+    printf("|---|---|---:|---:|---:|---:|---:|---:|---:|\n");
 
     for (int i = 0; i < count; i++) {
         test_result_t *r = &results[i];
@@ -349,13 +385,21 @@ static void print_markdown_table(const char *title, test_result_t *results, int 
         double r_lz4 = (double)r->lz4_sz * 100.0 / (double)r->raw_sz;
         snprintf(s_lz4, sizeof(s_lz4), "%zu B (%.1f%%)", r->lz4_sz, r_lz4);
 
+        char s_lz4hc[64];
+        if (r->lz4hc_ok && r->lz4hc_sz > 0) {
+            double r_lz4hc = (double)r->lz4hc_sz * 100.0 / (double)r->raw_sz;
+            snprintf(s_lz4hc, sizeof(s_lz4hc), "%zu B (%.1f%%)", r->lz4hc_sz, r_lz4hc);
+        } else {
+            snprintf(s_lz4hc, sizeof(s_lz4hc), "-");
+        }
+
         char s_speed[64];
         snprintf(s_speed, sizeof(s_speed), "**%.0f MB/s** vs %.0f MB/s",
                  r->lz0_6_dec_asm_mbs, r->lz4_dec_mbs);
 
-        printf("| `%s` | %s | %zu B | %s | %s | %s | %s | %s |\n",
+        printf("| `%s` | %s | %zu B | %s | %s | %s | %s | %s | %s |\n",
                r->name, r->category, r->raw_sz,
-               s_lz0_6, s_lz0_9, s_upkr, s_lz4, s_speed);
+               s_lz0_6, s_lz0_9, s_upkr, s_lz4, s_lz4hc, s_speed);
     }
     printf("\n");
 }
@@ -407,7 +451,8 @@ int main(int argc, char **argv) {
     int blob_count = 0;
 
     printf("# ====================================================================\n");
-    printf("# LZ0 Comprehensive Benchmark Suite: LZ0 vs UPKR vs LZ4 vs ZX0\n");
+    printf("# LZ0 Comprehensive Benchmark Suite: LZ0 vs UPKR vs LZ4 / LZ4HC vs ZX0\n");
+    printf("# Benchmarked on: Intel(R) Core(TM) i3-9100 CPU @ 3.60GHz (x86_64 Linux)\n");
     printf("# ====================================================================\n\n");
 
     /* 1. Individual files */

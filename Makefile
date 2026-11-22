@@ -27,7 +27,7 @@ bench/lz0_bench: bench/bench.c $(ZX0_SRC) $(LZ0_SRC)
 	$(CC) $(CFLAGS) -o $@ bench/bench.c $(ZX0_SRC) $(LZ0_SRC)
 
 bench/lz0_bench_blobs: bench/bench_blobs.c $(LZ0_SRC) $(LZ0DEC_SRC) bench/external/upkr/c_unpacker/unpack.c
-	$(CC) $(CFLAGS) -o $@ bench/bench_blobs.c $(LZ0_SRC) $(LZ0DEC_SRC) bench/external/upkr/c_unpacker/unpack.c -lm
+	$(CC) $(CFLAGS) -o $@ bench/bench_blobs.c $(LZ0_SRC) $(LZ0DEC_SRC) bench/external/upkr/c_unpacker/unpack.c -llz4 -lm
 
 bench_blobs: bench/lz0_bench_blobs
 	./bench/lz0_bench_blobs
