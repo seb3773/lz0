@@ -188,7 +188,7 @@ static void run_test(const char *path, const char *category, test_result_t *r, i
         free(comp);
         free(out);
 
-        printf("  LZ0 (-6)       : %8zu B (%5.2f%%) | Enc: %6.1f ms | Dec Fast ASM: %6.1f Mo/s | C: %5.1f Mo/s\n",
+        printf("  LZ0 (-6)       : %8zu B (%5.2f%%) | Enc: %6.1f ms | Dec Fast ASM: %6.1f MB/s | C: %5.1f MB/s\n",
                r->lz0_6_sz, (double)r->lz0_6_sz * 100.0 / in_sz,
                r->lz0_6_enc_ms, r->lz0_6_dec_asm_mbs, r->lz0_6_dec_c_mbs);
         fflush(stdout);
@@ -223,7 +223,7 @@ static void run_test(const char *path, const char *category, test_result_t *r, i
         free(comp);
         free(out);
 
-        printf("  LZ0 (-9 Ultra) : %8zu B (%5.2f%%) | Enc: %6.1f ms | Dec Fast ASM: %6.1f Mo/s\n",
+        printf("  LZ0 (-9 Ultra) : %8zu B (%5.2f%%) | Enc: %6.1f ms | Dec Fast ASM: %6.1f MB/s\n",
                r->lz0_9_sz, (double)r->lz0_9_sz * 100.0 / in_sz,
                r->lz0_9_enc_ms, r->lz0_9_dec_asm_mbs);
         fflush(stdout);
@@ -244,7 +244,7 @@ static void run_test(const char *path, const char *category, test_result_t *r, i
             r->upkr_sz = csz;
             r->upkr_enc_ms = enc_ms;
             r->upkr_dec_mbs = dec_mbs;
-            printf("  UPKR (-%d)      : %8zu B (%5.2f%%) | Enc: %6.1f ms | Dec C unpack: %6.1f Mo/s\n",
+            printf("  UPKR (-%d)      : %8zu B (%5.2f%%) | Enc: %6.1f ms | Dec C unpack: %6.1f MB/s\n",
                    level, r->upkr_sz, (double)r->upkr_sz * 100.0 / in_sz,
                    r->upkr_enc_ms, r->upkr_dec_mbs);
         } else {
@@ -277,7 +277,7 @@ static void run_test(const char *path, const char *category, test_result_t *r, i
         r->lz4_ok = (csz > 0 && d == (int)in_sz && memcmp(in, out, in_sz) == 0);
         r->lz4_dec_mbs = (dec_total_ms > 0) ? ((double)in_sz / (1024.0 * 1024.0)) / (dec_total_ms / 1000.0) : 0;
 
-        printf("  LZ4 (default)  : %8zu B (%5.2f%%) | Enc: %6.1f ms | Dec in-memory: %6.1f Mo/s\n",
+        printf("  LZ4 (default)  : %8zu B (%5.2f%%) | Enc: %6.1f ms | Dec in-memory: %6.1f MB/s\n",
                r->lz4_sz, (double)r->lz4_sz * 100.0 / in_sz,
                r->lz4_enc_ms, r->lz4_dec_mbs);
         free(comp);
@@ -304,7 +304,7 @@ static void run_test(const char *path, const char *category, test_result_t *r, i
         r->zx0_ok = (rc == 0 && d == (int)in_sz && memcmp(in, out, in_sz) == 0);
         r->zx0_dec_mbs = (dec_total_ms > 0) ? ((double)in_sz / (1024.0 * 1024.0)) / (dec_total_ms / 1000.0) : 0;
 
-        printf("  ZX0            : %8zu B (%5.2f%%) | Enc: %6.1f ms | Dec C: %6.1f Mo/s\n",
+        printf("  ZX0            : %8zu B (%5.2f%%) | Enc: %6.1f ms | Dec C: %6.1f MB/s\n",
                r->zx0_sz, (double)r->zx0_sz * 100.0 / in_sz,
                r->zx0_enc_ms, r->zx0_dec_mbs);
         free(comp);
@@ -318,7 +318,7 @@ static void run_test(const char *path, const char *category, test_result_t *r, i
 
 static void print_markdown_table(const char *title, test_result_t *results, int count) {
     printf("### %s\n\n", title);
-    printf("| Fichier / Cible | Type / Catégorie | Taille Brute | LZ0 Normal (-6) | LZ0 Ultra (-9) | UPKR | LZ4 (default) | Débit Décomp. LZ0 FAST ASM vs LZ4 |\n");
+    printf("| File / Target | Type / Category | Raw Size | LZ0 Normal (-6) | LZ0 Ultra (-9) | UPKR | LZ4 (default) | Decomp. Throughput LZ0 FAST ASM vs LZ4 |\n");
     printf("|---|---|---:|---:|---:|---:|---:|---:|\n");
 
     for (int i = 0; i < count; i++) {
@@ -350,7 +350,7 @@ static void print_markdown_table(const char *title, test_result_t *results, int 
         snprintf(s_lz4, sizeof(s_lz4), "%zu B (%.1f%%)", r->lz4_sz, r_lz4);
 
         char s_speed[64];
-        snprintf(s_speed, sizeof(s_speed), "**%.0f Mo/s** vs %.0f Mo/s",
+        snprintf(s_speed, sizeof(s_speed), "**%.0f MB/s** vs %.0f MB/s",
                  r->lz0_6_dec_asm_mbs, r->lz4_dec_mbs);
 
         printf("| `%s` | %s | %zu B | %s | %s | %s | %s | %s |\n",
@@ -371,32 +371,32 @@ int main(int argc, char **argv) {
     } target_def;
 
     static const target_def INDIVIDUAL_FILES[] = {
-        { "bench/corpus/fields.c",         "Code C",       0, 0 },
+        { "bench/corpus/fields.c",         "C Source",       0, 0 },
         { "bench/corpus/sum",              "SPARC ELF",    0, 0 },
-        { "bench/corpus/lz0_win64.exe",     "PE64 Windows", 0, 0 },
-        { "bench/corpus/star.png",         "Image PNG",    1, 0 },
-        { "bench/corpus/avatar.jpg",       "Image JPEG",   0, 0 },
-        { "bench/corpus/break.mp3",        "Audio MP3 CBR",0, 0 },
-        { "bench/corpus/texture_rgb24.raw","Texture RGB24",0, 0 },
-        { "bench/corpus/texture_rgba32.raw","Texture RGBA32",1, 0 },
-        { "bench/corpus/audio_pcm16.raw",  "Audio PCM16 Stereo",0, 0 },
-        { "bench/corpus/alice29.txt",      "Texte anglais",0, 0 },
-        { "bench/corpus/plrabn12.txt",     "Texte poésie", 1, 0 },
-        { "bench/corpus/kennedy.xls",      "Tableur XLS",  1, 0 },
-        { "bench/corpus/dickens_1m.txt",   "Gros Texte",   1, 0 },
+        { "bench/corpus/lz0_win64.exe",     "Windows PE64", 0, 0 },
+        { "bench/corpus/star.png",         "PNG Image",    1, 0 },
+        { "bench/corpus/avatar.jpg",       "JPEG Image",   0, 0 },
+        { "bench/corpus/break.mp3",        "MP3 CBR Audio",0, 0 },
+        { "bench/corpus/texture_rgb24.raw","RGB24 Texture",0, 0 },
+        { "bench/corpus/texture_rgba32.raw","RGBA32 Texture",1, 0 },
+        { "bench/corpus/audio_pcm16.raw",  "Stereo PCM16 Audio",0, 0 },
+        { "bench/corpus/alice29.txt",      "English Text", 0, 0 },
+        { "bench/corpus/plrabn12.txt",     "Poetry Text",  1, 0 },
+        { "bench/corpus/kennedy.xls",      "Excel Spreadsheet", 1, 0 },
+        { "bench/corpus/dickens_1m.txt",   "Large Text",   1, 0 },
         { "bench/corpus/bash_x86_64.bin",   "ELF x86_64",   1, 0 },
         { NULL, NULL, 0, 0 }
     };
 
     static const target_def BLOBS[] = {
         { "bench/blobs/blob_png_256k.bin", "Blob 4 PNGs",       0, 0 },
-        { "bench/blobs/blob_mix_256k.bin", "Blob Mixte (5 f.)",  0, 0 },
+        { "bench/blobs/blob_mix_256k.bin", "Mixed Blob (5 files)",  0, 0 },
         { "bench/blobs/blob_png_512k.bin", "Blob 8 PNGs",       0, 0 },
-        { "bench/blobs/blob_mix_512k.bin", "Blob Mixte (7 f.)",  0, 0 },
+        { "bench/blobs/blob_mix_512k.bin", "Mixed Blob (7 files)",  0, 0 },
         { "bench/blobs/blob_png_2m.bin",   "Blob 8 PNGs 2M",    1, 0 },
-        { "bench/blobs/blob_mix_2m.bin",   "Blob Mixte (9 f.) 2M", 1, 0 },
+        { "bench/blobs/blob_mix_2m.bin",   "Mixed Blob (9 files) 2M", 1, 0 },
         { "bench/blobs/blob_png_5m.bin",   "Blob 15 PNGs 5M",   1, 1 },
-        { "bench/blobs/blob_mix_5m.bin",   "Blob Mixte (15 f.) 5M", 1, 1 },
+        { "bench/blobs/blob_mix_5m.bin",   "Mixed Blob (15 files) 5M", 1, 1 },
         { NULL, NULL, 0, 0 }
     };
 
@@ -411,7 +411,7 @@ int main(int argc, char **argv) {
     printf("# ====================================================================\n\n");
 
     /* 1. Individual files */
-    printf("## Phase 1: Fichiers Individuels (ELF, PE, PNG, XLS, Textes, Code C)\n\n");
+    printf("## Phase 1: Individual Files (ELF, PE, PNG, XLS, Texts, C Code)\n\n");
     for (int i = 0; INDIVIDUAL_FILES[i].path; i++) {
         if (access(INDIVIDUAL_FILES[i].path, R_OK) == 0) {
             run_test(INDIVIDUAL_FILES[i].path, INDIVIDUAL_FILES[i].category,
@@ -421,7 +421,7 @@ int main(int argc, char **argv) {
     }
 
     /* 2. Blobs */
-    printf("## Phase 2: Blobs Multi-Ressources Hétérogènes (256 Ko à 5 Mo)\n\n");
+    printf("## Phase 2: Heterogeneous Multi-Resource Blobs (256 KiB to 5 MiB)\n\n");
     for (int i = 0; BLOBS[i].path; i++) {
         if (access(BLOBS[i].path, R_OK) == 0) {
             run_test(BLOBS[i].path, BLOBS[i].category,
@@ -431,13 +431,13 @@ int main(int argc, char **argv) {
     }
 
     printf("# ====================================================================\n");
-    printf("# TABLEAUX RÉCAPITULATIFS COMPARATIFS\n");
+    printf("# COMPARATIVE SUMMARY TABLES\n");
     printf("# ====================================================================\n\n");
 
-    print_markdown_table("1. Comparatif Corpus Réel : Fichiers Individuels",
+    print_markdown_table("1. Real-World Corpus Comparison: Individual Files",
                          file_results, file_count);
 
-    print_markdown_table("2. Comparatif Blobs Multi-Ressources Concaténés",
+    print_markdown_table("2. Concatenated Multi-Resource Blobs Comparison",
                          blob_results, blob_count);
 
     return 0;

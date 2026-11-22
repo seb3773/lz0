@@ -50,9 +50,9 @@ static const blob_target BLOBS[] = {
     { "blob_mix_256k", "bench/blobs/blob_mix_256k.bin", 5,  "ELF + PE + XLS + PNG + Text" },
     { "blob_png_512k", "bench/blobs/blob_png_512k.bin", 8,  "8 PNGs" },
     { "blob_mix_512k", "bench/blobs/blob_mix_512k.bin", 7,  "ELF + PE + PNGs + XLS + C + Text" },
-    { "blob_png_2m",   "bench/blobs/blob_png_2m.bin",   8,  "8 PNGs distincts" },
+    { "blob_png_2m",   "bench/blobs/blob_png_2m.bin",   8,  "8 distinct PNGs" },
     { "blob_mix_2m",   "bench/blobs/blob_mix_2m.bin",   9,  "ELF + PE + PNGs + XLS + Text" },
-    { "blob_png_5m",   "bench/blobs/blob_png_5m.bin",   15, "15 PNGs distincts" },
+    { "blob_png_5m",   "bench/blobs/blob_png_5m.bin",   15, "15 distinct PNGs" },
     { "blob_mix_5m",   "bench/blobs/blob_mix_5m.bin",   15, "ELF + PE + SPARC + PNGs + XLS + Text + Fax" },
 };
 
@@ -113,9 +113,9 @@ static void benchmark_blob(const blob_target *tgt, int test_upkr, int upkr_level
         return;
     }
 
-    printf("\n### `%s` (%zu octets / %.2f Ko, %d fichiers - %s)\n\n",
+    printf("\n### `%s` (%zu bytes / %.2f KiB, %d files - %s)\n\n",
            tgt->name, in_sz, (double)in_sz / 1024.0, tgt->num_files, tgt->desc);
-    printf("| Compresseur / Configuration | Taille comp. | Ratio | Gain vs Brut | Enc. (ms) | Déc. (Mo/s) | Décompression |\n");
+    printf("| Compressor / Configuration | Packed Size | Ratio | Gain vs Raw | Enc. (ms) | Decomp. (MB/s) | Decompression |\n");
     printf("|---|---:|---:|---:|---:|---:|:---:|\n");
 
     /* 1. LZ0 Normal (-6) */
@@ -141,7 +141,7 @@ static void benchmark_blob(const blob_target *tgt, int test_upkr, int upkr_level
         int ok = (rc == 0 && d == (int)in_sz && memcmp(in, out, in_sz) == 0);
         double dec_mbs = (dec_ms > 0) ? ((double)in_sz / (1024.0 * 1024.0)) / (dec_ms / 1000.0) : 0.0;
 
-        printf("| **LZ0 Normal (-6)** | %zu B | **%.2f%%** | %+.2f%% | %.1f ms | **%.1f Mo/s** | %s |\n",
+        printf("| **LZ0 Normal (-6)** | %zu B | **%.2f%%** | %+.2f%% | %.1f ms | **%.1f MB/s** | %s |\n",
                csz, (double)csz * 100.0 / in_sz, ((double)csz - (double)in_sz) * 100.0 / in_sz,
                enc_ms, dec_mbs, ok ? "✅ Bit-exact" : "❌ FAIL");
         free(comp);
@@ -174,7 +174,7 @@ static void benchmark_blob(const blob_target *tgt, int test_upkr, int upkr_level
         int ok = (rc == 0 && d == (int)in_sz && memcmp(in, out, in_sz) == 0);
         double dec_mbs = (dec_ms > 0) ? ((double)in_sz / (1024.0 * 1024.0)) / (dec_ms / 1000.0) : 0.0;
 
-        printf("| **LZ0 Ultra (-9) [Multi-Scan]** | %zu B | **%.2f%%** | %+.2f%% | %.1f ms | **%.1f Mo/s** | %s |\n",
+        printf("| **LZ0 Ultra (-9) [Multi-Scan]** | %zu B | **%.2f%%** | %+.2f%% | %.1f ms | **%.1f MB/s** | %s |\n",
                csz, (double)csz * 100.0 / in_sz, ((double)csz - (double)in_sz) * 100.0 / in_sz,
                enc_ms, dec_mbs, ok ? "✅ Bit-exact" : "❌ FAIL");
         free(comp);
@@ -196,7 +196,7 @@ static void benchmark_blob(const blob_target *tgt, int test_upkr, int upkr_level
         (void)rc; (void)enc_ms;
 
         long delta = (long)csz_ultra_current - (long)csz;
-        printf("| *LZ0 Ultra (-9) [Legacy 1-Win]* | %zu B | %.2f%% | %s%ld B vs Multi | - | - | (comparatif) |\n",
+        printf("| *LZ0 Ultra (-9) [Legacy 1-Win]* | %zu B | %.2f%% | %s%ld B vs Multi | - | - | (comparison) |\n",
                csz, (double)csz * 100.0 / in_sz, delta <= 0 ? "" : "+", delta);
         free(comp);
         lz0_legacy_single_window_scan = 0;
@@ -209,15 +209,15 @@ static void benchmark_blob(const blob_target *tgt, int test_upkr, int upkr_level
         double enc_ms = 0.0, dec_mbs = 0.0;
         int rc = run_upkr_cli(in, in_sz, &comp, &csz, &enc_ms, &dec_mbs, upkr_level);
         if (rc == 0) {
-            printf("| **UPKR (-%d)** | %zu B | **%.2f%%** | %+.2f%% | %.1f ms | %.1f Mo/s | ✅ Bit-exact |\n",
-                   upkr_level, csz, (double)csz * 100.0 / in_sz,
-                   ((double)csz - (double)in_sz) * 100.0 / in_sz, enc_ms, dec_mbs);
+            printf("| **UPKR (-%d)** | %zu B | **%.2f%%** | %+.2f%% | %.1f ms | %.1f MB/s | ✅ Bit-exact |\n",
+               upkr_level, csz, (double)csz * 100.0 / in_sz,
+               ((double)csz - (double)in_sz) * 100.0 / in_sz, enc_ms, dec_mbs);
         } else {
-            printf("| UPKR (-%d) | Echec / Timeout | - | - | - | - | ❌ FAIL |\n", upkr_level);
+            printf("| UPKR (-%d) | Failed / Timeout | - | - | - | - | ❌ FAIL |\n", upkr_level);
         }
         free(comp);
     } else {
-        printf("| UPKR | (Exclu pour taille > 2 Mo : temps > 10 min) | - | - | - | - | - |\n");
+        printf("| UPKR | (Excluded for size > 2 MiB: time > 10 min) | - | - | - | - | - |\n");
     }
 
     free(in);
@@ -239,8 +239,8 @@ int main(int argc, char **argv) {
         }
     }
 
-    printf("# Benchmark Comparatif des Blobs Hétérogènes et Multi-Fichiers\n");
-    printf("Corpus: 8 Blobs (PNGs purs et Mix binaire/image/texte, de 256 Ko à 5 Mo)\n\n");
+    printf("# Comparative Benchmark: Heterogeneous Multi-Resource Blobs\n");
+    printf("Corpus: 8 Blobs (Pure PNGs and Mixed binary/image/text, from 256 KiB to 5 MiB)\n\n");
 
     int n_targets = (int)(sizeof(BLOBS) / sizeof(BLOBS[0]));
     for (int i = 0; i < n_targets; i++) {

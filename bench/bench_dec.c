@@ -178,7 +178,7 @@ static void bench_one(const char *path) {
     double speed_fast = (best_fast_ns > 0) ? mib / (best_fast_ns / 1e9) : 0;
     double speedup_vs_c = (best_c_ns > 0 && best_fast_ns > 0) ? ((speed_fast / speed_c) - 1.0) * 100.0 : 0;
 
-    printf("| `%s` (%.1f K) | %.1f Mo/s | %.1f Mo/s | %.1f Mo/s | **%.1f Mo/s** | **%+5.1f%%** |\n",
+    printf("| `%s` (%.1f K) | %.1f MB/s | %.1f MB/s | %.1f MB/s | **%.1f MB/s** | **%+5.1f%%** |\n",
            basename, (double)in_sz / 1024.0,
            speed_c,
            speed_min,
@@ -194,14 +194,14 @@ static void bench_one(const char *path) {
 
 int main(int argc, char **argv) {
 #if defined(__aarch64__) || defined(_M_ARM64)
-    printf("# Comparatif Décompression ARM64 (AArch64) : C vs C min vs ASM Compact vs ASM FAST\n\n");
-    printf("| Fichier (Taille) | C standard | C min (`lz0dec_min`) | ASM Compact (`lz0dec_arm64`) | ASM FAST (`lz0dec_fast_arm64`) | Speedup FAST vs C |\n");
+    printf("# ARM64 (AArch64) Decompression Benchmark: Standard C vs Minimal C vs Compact ASM vs FAST ASM\n\n");
+    printf("| File (Size) | Standard C | Minimal C (`lz0dec_min`) | Compact ASM (`lz0dec_arm64`) | FAST ASM (`lz0dec_fast_arm64`) | Speedup FAST vs C |\n");
 #elif (defined(__riscv) && __riscv_xlen == 64)
-    printf("# Comparatif Décompression RISC-V 64 : C vs C min vs ASM Compact vs ASM FAST\n\n");
-    printf("| Fichier (Taille) | C standard | C min (`lz0dec_min`) | ASM Compact (`lz0dec_riscv64`) | ASM FAST (`lz0dec_fast_riscv64`) | Speedup FAST vs C |\n");
+    printf("# RISC-V 64 Decompression Benchmark: Standard C vs Minimal C vs Compact ASM vs FAST ASM\n\n");
+    printf("| File (Size) | Standard C | Minimal C (`lz0dec_min`) | Compact ASM (`lz0dec_riscv64`) | FAST ASM (`lz0dec_fast_riscv64`) | Speedup FAST vs C |\n");
 #else
-    printf("# Comparatif Décompression x86-64 : C vs C min vs ASM Compact vs ASM FAST\n\n");
-    printf("| Fichier (Taille) | C standard | C min (`lz0dec_min`) | ASM Compact (`lz0dec_x86_64`) | ASM FAST (`lz0dec_fast_x86_64`) | Speedup FAST vs C |\n");
+    printf("# x86-64 Decompression Benchmark: Standard C vs Minimal C vs Compact ASM vs FAST ASM\n\n");
+    printf("| File (Size) | Standard C | Minimal C (`lz0dec_min`) | Compact ASM (`lz0dec_x86_64`) | FAST ASM (`lz0dec_fast_x86_64`) | Speedup FAST vs C |\n");
 #endif
     printf("|---|---:|---:|---:|---:|---:|\n");
 
