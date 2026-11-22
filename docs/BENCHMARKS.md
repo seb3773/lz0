@@ -1,6 +1,6 @@
 # LZ0 Benchmarks & Performance Guide
 
-This document presents an exhaustive comparative evaluation of the **LZ0** compressor (version v0.3.0) against state-of-the-art baselines: **UPKR** (an asymmetric compressor using a rANS bitstream), **LZ4 / LZ4HC** (the industrial standard for ultra-fast decompression and its optimal parser variant), and **ZX0** (the reference for backward-compatible optimal parsing).
+This document presents an exhaustive comparative evaluation of the **LZ0** compressor (version v0.4.0) against state-of-the-art baselines: **UPKR** (an asymmetric compressor using a rANS bitstream), **LZ4 / LZ4HC** (the industrial standard for ultra-fast decompression and its optimal parser variant), and **ZX0** (the reference for backward-compatible optimal parsing).
 
 All benchmarks in this document were measured on an **Intel(R) Core(TM) i3-9100 CPU @ 3.60GHz (Coffee Lake Refresh, 4 cores / 4 threads, 6 MiB L3 cache)** running Linux x86_64 (GCC `-O3`). Reproducible via `make bench_all`, `make bench_blobs`, and `make bench_dec`.  
 All LZ0 decompressions reported below were verified **100% bit-exact** using both reference and high-performance decoders (`lz0dec_fast`, `lz0dec_compact`, `lz0dec_min`, `lz0dec_ref`).
