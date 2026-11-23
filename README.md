@@ -184,7 +184,7 @@ The repository provides independent, interoperable decoders tailored for differe
 2. **`lz0/lz0dec_ref.c` (`lz0dec_ref`)**:  
    The normative reference decoder. Co-authoritative with [docs/LZ0_FORMAT.md](docs/LZ0_FORMAT.md); concise, didactic and strictly conforming.
 3. **`lz0/lz0dec_min.c` (`lz0dec_min`)**:  
-   An ultra-compact, standalone single-function implementation (~40 lines of C99, ~200 bytes of machine code). Zero internal function calls, zero tables in memory, zero includes beyond basic types, and zero heap allocations. Ideal for bootloaders, ROMs, microcontrollers (AVR, STM32, Cortex-M0), and kernel drivers.
+   An ultra-compact, standalone single-function implementation (~200 lines of clean C99, ~800–900 bytes of machine code with `-Os`, e.g. 806–894 B on RV32IMC, ~990 B on x86-64). Zero internal function calls, zero tables in memory, zero includes beyond basic types, and zero heap allocations. Ideal for bootloaders, ROMs, microcontrollers (AVR, STM32, Cortex-M, RV32), and kernel drivers.
 
 #### Compact Assembly Implementations (Footprint & RAM-efficient)
 4. **`lz0/lz0dec_x86_64.s` (`lz0dec_x86_64` / `lz0dec_compact`)**:  
@@ -349,7 +349,7 @@ While standard LZ4 prioritizes extreme encoding speed (single-pass greedy hash),
 3. **Incompressible Data Inflation**:  
    LZ4 incurs 0.3% to 1.0% expansion on pre-compressed media (`texture_rgb24`, `texture_rgba32`, `star.png`) due to periodic token overhead. LZ0 avoids inflation with exact DP cost checks.
 4. **Minimal Decompressor Footprint**:  
-   While a bare-metal LZ4 decompressor can be implemented in ~150–200 bytes of assembly, LZ0's compact assembly decoders achieve an identical footprint (**184 B on x86-64, 180 B on ARM64, 160 B on RV64GC**, 0 heap, 0 stack) despite decoding variable-bit Elias gamma codes and unbounded offsets.
+   While a bare-metal LZ4 decompressor can be implemented in ~150–200 bytes of assembly (or ~1–2 KiB with full bounds checking), LZ0's standalone compact assembly decoders achieve a minimal footprint (~1.1–1.3 KiB code size, 0 heap, 0 stack) despite decoding variable-bit Elias gamma codes and unbounded sliding window offsets. The minimal C99 decoder (`lz0dec_min.c`) compiles to only ~800–900 bytes with `-Os` (806–894 B on RV32IMC).
 5. **Decompression Throughput**:  
    LZ4 achieves 2,000–3,500 MB/s decompression due to byte alignment without bit extraction. However, LZ0 FAST ASM delivers 400–1,350 MB/s on text/code and 1,500–4,000+ MB/s on blobs, providing a **10× to 100× speed advantage** over traditional high-density optimal parsers like ZX0 (10–30 MB/s) and UPKR (15–40 MB/s).
 

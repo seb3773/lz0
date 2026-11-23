@@ -105,7 +105,7 @@ While standard LZ4 prioritizes extreme single-pass encoding throughput, **LZ4HC*
 3. **No Inflation on High Entropy**:  
    LZ4 expands non-compressible files by 0.3% to 1.0%. LZ0 avoids inflation via exact dynamic programming cost margins.
 4. **Minimal Decoder Equivalence**:  
-   A minimal LZ4 decompressor is typically ~150–200 bytes of assembly. LZ0's standalone compact decoders match this footprint (**160 B on RV64, 180 B on ARM64, 184 B on x86-64**, 0 malloc, 0 stack) despite managing an Elias gamma bitstream with arbitrary window size.
+   While a bare-metal unsafe LZ4 decompressor can be written in ~150–200 bytes of assembly (or ~1–2 KiB safe), LZ0's standalone compact assembly decoders achieve a minimal footprint (~1.1–1.3 KiB code size, 0 heap, 0 stack) despite decoding variable-bit Elias gamma codes and unbounded window offsets. The minimal C99 decoder (`lz0dec_min.c`) compiles to only ~800–900 bytes with `-Os` (806–894 B on RV32IMC).
 5. **Decompression Throughput**:  
    While LZ4's pure byte alignment enables 2,000–3,500 MB/s decompression, LZ0 FAST ASM provides 400–1,350 MB/s on code/text and 1,500–4,000+ MB/s on multimedia, outperforming ZX0 (10–30 MB/s) and UPKR (15–40 MB/s) by 10× to 100×.
 
