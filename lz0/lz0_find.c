@@ -284,66 +284,88 @@ static void sais_get_buckets(const int *C, int *B, int k, int end) {
     }
 }
 
+/* L/S suffix types packed 8 per byte (1 = S-type): n / 8 bytes per level
+ * instead of n, and a smaller footprint for the random-order lookups of the
+ * induction passes. */
+#define SAIS_T(t, i) ((unsigned)((t)[(size_t)(i) >> 3] >> ((unsigned)(i) & 7u)) & 1u)
+#define SAIS_SET_S(t, i) ((t)[(size_t)(i) >> 3] |= (unsigned char)(1u << ((unsigned)(i) & 7u)))
+#define SAIS_LMS(t, i) (SAIS_T(t, i) && !SAIS_T(t, (i) - 1))
+
 static void sais_induce(const int *s, int *sa, const unsigned char *t, const int *C, int *B,
                         int n, int k) {
     sais_get_buckets(C, B, k, 0);
     for (int i = 0; i < n; i++) {
         int j = sa[i] - 1;
-        if (j >= 0 && !t[j])
+        if (j >= 0 && !SAIS_T(t, j))
             sa[B[s[j]]++] = j;
     }
     sais_get_buckets(C, B, k, 1);
     for (int i = n - 1; i >= 0; i--) {
         int j = sa[i] - 1;
-        if (j >= 0 && t[j])
+        if (j >= 0 && SAIS_T(t, j))
             sa[--B[s[j]]] = j;
     }
 }
 
 static int sais_lms_diff(const int *s, const unsigned char *t, int a, int b) {
     for (int d = 0;; d++) {
-        if (s[a + d] != s[b + d] || t[a + d] != t[b + d])
+        if (s[a + d] != s[b + d] || SAIS_T(t, a + d) != SAIS_T(t, b + d))
             return 1;
-        if (d > 0 && t[a + d] && !t[a + d - 1])
+        if (d > 0 && SAIS_LMS(t, a + d))
             return 0;
     }
 }
 
-static void sais_core(const int *s, int *sa, int n, int k) {
+/*
+ * SA-IS core. ws/ws_len: optional scratch ints owned by the caller and free
+ * for the whole call (the recursive call receives the part of its parent's
+ * sa that lies between the reduced suffix array sa[0, n1) and the reduced
+ * string sa[n - n1, n), which the parent does not touch until the call
+ * returns). The bucket arrays C and B are carved from it when they fit, so
+ * the recursion does not allocate up to 2 x n1 ints on top of the input.
+ * Returns 0, or -1 if a work buffer could not be allocated (sa is then left
+ * incomplete and must not be used).
+ */
+static int sais_core(const int *s, int *sa, int n, int k, int *ws, size_t ws_len) {
     if (n == 1) {
         sa[0] = 0;
-        return;
+        return 0;
     }
-    unsigned char *t = (unsigned char *)malloc((size_t)n);
-    int *C = (int *)malloc((size_t)k * sizeof(int));
-    int *B = (int *)malloc((size_t)k * sizeof(int));
+    unsigned char *t = (unsigned char *)calloc(((size_t)n + 7u) >> 3, 1);
+    int *C = NULL, *B = NULL, *C_own = NULL, *B_own = NULL;
+    if (ws && ws_len >= 2u * (size_t)k) {
+        C = ws;
+        B = ws + k;
+    } else if (ws && ws_len >= (size_t)k) {
+        B = ws;
+        C = C_own = (int *)malloc((size_t)k * sizeof(int));
+    } else {
+        C = C_own = (int *)malloc((size_t)k * sizeof(int));
+        B = B_own = (int *)malloc((size_t)k * sizeof(int));
+    }
     if (!t || !C || !B) {
         free(t);
-        free(C);
-        free(B);
-        return;
+        free(C_own);
+        free(B_own);
+        return -1;
     }
-    t[n - 1] = 1;
+    SAIS_SET_S(t, n - 1);
     for (int i = n - 2; i >= 0; i--) {
-        if (s[i] < s[i + 1])
-            t[i] = 1;
-        else if (s[i] > s[i + 1])
-            t[i] = 0;
-        else
-            t[i] = t[i + 1];
+        if (s[i] < s[i + 1] || (s[i] == s[i + 1] && SAIS_T(t, i + 1)))
+            SAIS_SET_S(t, i);
     }
     sais_get_counts(s, C, n, k);
     memset(sa, 0xff, (size_t)n * sizeof(int));
     sais_get_buckets(C, B, k, 1);
     for (int i = n - 1; i >= 1; i--)
-        if (t[i] && !t[i - 1])
+        if (SAIS_LMS(t, i))
             sa[--B[s[i]]] = i;
     sais_induce(s, sa, t, C, B, n, k);
 
     int n1 = 0;
     for (int i = 0; i < n; i++) {
         int p = sa[i];
-        if (p > 0 && t[p] && !t[p - 1])
+        if (p > 0 && SAIS_LMS(t, p))
             sa[n1++] = p;
     }
     if (n1 > 0) {
@@ -363,16 +385,22 @@ static void sais_core(const int *s, int *sa, int n, int k) {
                 s1[j--] = sa[i];
         }
         int *sa1 = sa;
-        if (name < n1)
-            sais_core(s1, sa1, n1, name);
-        else {
+        if (name < n1) {
+            /* n1 <= n / 2, so sa[n1, n - n1) is free scratch for the child */
+            if (sais_core(s1, sa1, n1, name, sa + n1, (size_t)(n - 2 * n1)) != 0) {
+                free(t);
+                free(C_own);
+                free(B_own);
+                return -1;
+            }
+        } else {
             for (int i = 0; i < n1; i++)
                 sa1[s1[i]] = i;
         }
         {
             int j = 0;
             for (int i = 1; i < n; i++)
-                if (t[i] && !t[i - 1])
+                if (SAIS_LMS(t, i))
                     s1[j++] = i;
         }
         for (int i = 0; i < n1; i++)
@@ -390,37 +418,52 @@ static void sais_core(const int *s, int *sa, int n, int k) {
     }
     sais_induce(s, sa, t, C, B, n, k);
     free(t);
-    free(C);
-    free(B);
+    free(C_own);
+    free(B_own);
+    return 0;
 }
 
+/*
+ * SA-IS over s = in[i] + 1 followed by a 0 sentinel, built in the two
+ * buffers that are kept afterwards (f->sa, f->rank) instead of two extra
+ * working arrays:
+ *   - the rank buffer first holds the integer text s (n + 1 ints),
+ *   - the sa buffer receives the (n + 1)-entry suffix array of s, which is
+ *     then compacted in place (the sentinel suffix is dropped; out <= i, so
+ *     every entry is read before its slot is overwritten),
+ *   - once s is dead, the rank buffer is overwritten with the inverse SA.
+ * Peak: 2 x (n + 1) x 4 bytes + sais_core's own work buffers (type bits,
+ * recursion buckets carved from sa's free middle when they fit), instead of
+ * 4 x (n + 1) x 4 bytes + n type bytes per level + malloc'd buckets. The suffix array of a string is
+ * unique, so f->sa and f->rank are identical, element for element.
+ */
 static int sa_build_sais(lz0_finder *f) {
     int n = (int)f->n;
-    if (n <= 0)
+    if (n <= 0 || n == INT_MAX)
         return -1;
-    uint32_t *sa = (uint32_t *)malloc((size_t)n * sizeof(uint32_t));
-    uint32_t *rnk = (uint32_t *)malloc((size_t)n * sizeof(uint32_t));
-    int *s = (int *)malloc(((size_t)n + 1) * sizeof(int));
-    int *isa = (int *)malloc(((size_t)n + 1) * sizeof(int));
-    if (!sa || !rnk || !s || !isa) {
+    uint32_t *sa = (uint32_t *)malloc(((size_t)n + 1) * sizeof(uint32_t));
+    uint32_t *rnk = (uint32_t *)malloc(((size_t)n + 1) * sizeof(uint32_t));
+    if (!sa || !rnk) {
         free(sa);
         free(rnk);
-        free(s);
-        free(isa);
         return -1;
     }
+    int *s = (int *)rnk;  /* text, dead once sais_core returns */
+    int *isa = (int *)sa; /* suffix array of s, compacted below */
     for (int i = 0; i < n; i++)
         s[i] = (int)f->in[i] + 1;
     s[n] = 0;
-    sais_core(s, isa, n + 1, 257);
+    if (sais_core(s, isa, n + 1, 257, NULL, 0) != 0) {
+        free(sa);
+        free(rnk);
+        return -1;
+    }
     int out = 0;
     for (int i = 0; i < n + 1; i++) {
         int p = isa[i];
         if (p < 0 || p > n) {
             free(sa);
             free(rnk);
-            free(s);
-            free(isa);
             return -1;
         }
         if (p == n)
@@ -432,15 +475,11 @@ static int sa_build_sais(lz0_finder *f) {
     if (out != n) {
         free(sa);
         free(rnk);
-        free(s);
-        free(isa);
         return -1;
     }
     f->sa = sa;
     f->rank = rnk;
     f->sa_n = (uint32_t)n;
-    free(s);
-    free(isa);
     return 0;
 }
 

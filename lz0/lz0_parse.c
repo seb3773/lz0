@@ -62,6 +62,29 @@ void lz0_toklist_free(lz0_toklist *tl) {
     tl->cap = 0;
 }
 
+/*
+ * Appends m tokens at once and returns the first of them (uninitialised, the
+ * caller fills all m), or NULL on overflow / allocation failure. The list
+ * grows to exactly n + m entries when it has to grow, so a parser that knows
+ * its token count (backtracking parsers count the chain first) neither keeps
+ * a temporary reversed copy nor over-allocates by up to 2x.
+ */
+lz0_token *lz0_toklist_extend(lz0_toklist *tl, uint32_t m) {
+    if (m > UINT32_MAX - tl->n)
+        return NULL;
+    uint32_t need = tl->n + m;
+    if (need > tl->cap) {
+        lz0_token *nt = (lz0_token *)realloc(tl->t, (size_t)need * sizeof(lz0_token));
+        if (!nt)
+            return NULL;
+        tl->t = nt;
+        tl->cap = need;
+    }
+    lz0_token *base = tl->t + tl->n;
+    tl->n = need;
+    return base;
+}
+
 int lz0_toklist_push(lz0_toklist *tl, uint32_t pos, uint32_t length, uint32_t offset) {
     if (tl->n >= tl->cap) {
         uint32_t nc = tl->cap ? tl->cap * 2 : 256;
@@ -1207,88 +1230,97 @@ int lz0_parse_dp(lz0_finder *f, lz0_toklist *tl) {
         return -1;
     }
 
-    lz0_token *rev = (lz0_token *)malloc((size_t)(n + 2) * sizeof(lz0_token));
-    if (!rev) {
-        free(al);
-        free(am);
-        return -1;
-    }
+    /* pass 1: validate the chain and count its tokens (no reversed copy) */
     uint32_t m = 0;
     uint32_t p = n;
     int in_lit = end_lit;
     while (p > 0) {
         st_t *cur = in_lit ? &al[p] : &am[p];
         if (cur->length == 0 || cur->prev >= p) {
-            free(rev);
             free(al);
             free(am);
             return -1;
         }
-        rev[m].pos = cur->prev;
-        rev[m].length = cur->length;
-        rev[m].offset = cur->offset;
         in_lit = cur->from_lit;
         p = cur->prev;
         m++;
     }
-
-    for (uint32_t k = m; k-- > 0;) {
-        if (lz0_toklist_push(tl, rev[k].pos, rev[k].length, rev[k].offset) < 0) {
-            free(rev);
-            free(al);
-            free(am);
-            return -1;
-        }
+    /* pass 2: same walk, tokens written back to front in place */
+    lz0_token *out = lz0_toklist_extend(tl, m);
+    if (!out) {
+        free(al);
+        free(am);
+        return -1;
     }
-    free(rev);
+    p = n;
+    in_lit = end_lit;
+    for (uint32_t k = m; k-- > 0;) {
+        st_t *cur = in_lit ? &al[p] : &am[p];
+        out[k].pos = cur->prev;
+        out[k].length = cur->length;
+        out[k].offset = cur->offset;
+        in_lit = cur->from_lit;
+        p = cur->prev;
+    }
     free(al);
     free(am);
     return 0;
 }
 
+/*
+ * Packed state key shared by the K = 2 and the generic SDP parsers:
+ *     key = last_off | SDP_LIT_FLAG   (flag set iff the state ends a literal run,
+ *                                      i.e. a repeat match may follow: can_last)
+ */
+#define SDP_LIT_FLAG 0x80000000u
+
+/*
+ * K = 2 state: 12 bytes (formerly a 24-byte record carrying last_off,
+ * can_last, tok_len and tok_off). The token that reached a state is implied:
+ *     tok_len = pos - prev_pos
+ *     tok_off = (key & SDP_LIT_FLAG) ? 0 : key
+ * (literal runs carry offset 0, both match kinds set last_off = their offset),
+ * and with two slots per row the predecessor slot is a single bit packed on
+ * top of prev_pos (positions < 2^31, enforced by the parser). Lookup (key
+ * equality), insertion order, eviction (slot 1 iff strictly costlier) and the
+ * strict "cost <" replacement rule are unchanged, so every decision and the
+ * bitstream are identical to the former layout.
+ */
+#define SDP_PP_SLOT 0x80000000u
+
 typedef struct {
-    uint32_t last_off;
-    int cost;
-    uint32_t prev_pos;
-    uint32_t tok_len;
-    uint32_t tok_off;
-    uint8_t prev_slot;
-    uint8_t can_last;
+    uint32_t key;  /* last_off | SDP_LIT_FLAG after a literal run */
+    int32_t cost;
+    uint32_t pp;   /* prev_pos | prev_slot << 31 */
 } sdp_st;
 
-static inline void sdp_store(sdp_st *d, uint32_t last_off, int can_last, int cost,
-                             uint32_t prev_pos, uint8_t prev_slot, uint32_t tok_len,
-                             uint32_t tok_off) {
-    d->last_off = last_off;
-    d->can_last = (uint8_t)can_last;
+static inline uint32_t sdp_pp_pos(uint32_t pp) { return pp & ~SDP_PP_SLOT; }
+static inline uint8_t sdp_pp_slot(uint32_t pp) { return (uint8_t)(pp >> 31); }
+
+static inline void sdp_store(sdp_st *d, uint32_t key, int cost, uint32_t prev_pos,
+                             uint8_t prev_slot) {
+    d->key = key;
     d->cost = cost;
-    d->prev_pos = prev_pos;
-    d->prev_slot = prev_slot;
-    d->tok_len = tok_len;
-    d->tok_off = tok_off;
+    d->pp = prev_pos | ((uint32_t)prev_slot << 31);
 }
 
-static inline void sdp_relax2(sdp_st *row, uint8_t *nslot, uint32_t last_off,
-                              int can_last, int cost, uint32_t prev_pos, uint8_t prev_slot,
-                              uint32_t tok_len, uint32_t tok_off, lz0_sdp_census *cen) {
+static inline void sdp_relax2(sdp_st *row, uint8_t *nslot, uint32_t key, int cost,
+                              uint32_t prev_pos, uint8_t prev_slot, lz0_sdp_census *cen) {
     uint8_t n = *nslot;
     if (cen)
         cen->n_relax++;
-    if (n > 0 && row[0].last_off == last_off && row[0].can_last == can_last) {
+    if (n > 0 && row[0].key == key) {
         if (cost < row[0].cost)
-            sdp_store(&row[0], last_off, can_last, cost, prev_pos, prev_slot, tok_len,
-                      tok_off);
+            sdp_store(&row[0], key, cost, prev_pos, prev_slot);
         return;
     }
-    if (n > 1 && row[1].last_off == last_off && row[1].can_last == can_last) {
+    if (n > 1 && row[1].key == key) {
         if (cost < row[1].cost)
-            sdp_store(&row[1], last_off, can_last, cost, prev_pos, prev_slot, tok_len,
-                      tok_off);
+            sdp_store(&row[1], key, cost, prev_pos, prev_slot);
         return;
     }
     if (n < 2) {
-        sdp_store(&row[n], last_off, can_last, cost, prev_pos, prev_slot, tok_len,
-                  tok_off);
+        sdp_store(&row[n], key, cost, prev_pos, prev_slot);
         *nslot = (uint8_t)(n + 1);
         return;
     }
@@ -1296,8 +1328,7 @@ static inline void sdp_relax2(sdp_st *row, uint8_t *nslot, uint32_t last_off,
     if (cen)
         cen->n_evicted++;
     if (cost < row[w].cost)
-        sdp_store(&row[w], last_off, can_last, cost, prev_pos, prev_slot, tok_len,
-                  tok_off);
+        sdp_store(&row[w], key, cost, prev_pos, prev_slot);
 }
 
 static void sdp_emit_last2(sdp_st *st, uint8_t *ns, uint32_t i, int L,
@@ -1307,7 +1338,7 @@ static void sdp_emit_last2(sdp_st *st, uint8_t *ns, uint32_t i, int L,
     while (start <= L) {
         int end = lz0_next_plateau_last(start, L);
         sdp_relax2(st + (size_t)(i + (uint32_t)end) * 2u, &ns[i + (uint32_t)end], last_off,
-                   0, cost + lz0_cost_last(end), i, slot, (uint32_t)end, last_off, NULL);
+                   cost + lz0_cost_last(end), i, slot, NULL);
         if (cen) {
             cen->n_trans_last++;
             cen->n_last_plat++;
@@ -1325,8 +1356,8 @@ static inline int sdp_elias_bits(int value) {
 static inline void sdp_emit_one_new2(sdp_st *st, uint8_t *ns, uint32_t i, int end,
                                      uint32_t off, int cc, uint8_t slot,
                                      lz0_sdp_census *cen) {
-    sdp_relax2(st + (size_t)(i + (uint32_t)end) * 2u, &ns[i + (uint32_t)end], off, 0, cc, i,
-               slot, (uint32_t)end, off, NULL);
+    sdp_relax2(st + (size_t)(i + (uint32_t)end) * 2u, &ns[i + (uint32_t)end], off, cc, i,
+               slot, NULL);
     if (cen)
         cen->n_trans_new++;
 }
@@ -1380,56 +1411,60 @@ static void sdp_emit_new2(const lz0_finder *f, sdp_st *st, uint8_t *ns, uint32_t
         start = 3;
     while (start <= L) {
         int end = lz0_next_plateau_new(start, L);
-        sdp_relax2(st + (size_t)(i + (uint32_t)end) * 2u, &ns[i + (uint32_t)end], off, 0,
-                   cost + lz0_cost_new((int)off, end), i, slot, (uint32_t)end, off, NULL);
+        sdp_relax2(st + (size_t)(i + (uint32_t)end) * 2u, &ns[i + (uint32_t)end], off,
+                   cost + lz0_cost_new((int)off, end), i, slot, NULL);
         if (cen)
             cen->n_trans_new++;
         start = end + 1;
     }
 }
 
-/* Backtracking for the K = 2 AoS rows (the generic parser uses sdp_rows_backtrack). */
-static int sdp_backtrack(sdp_st *st, uint8_t *ns, int K, uint32_t n, lz0_toklist *tl) {
+/* Backtracking for the K = 2 rows (the generic parser uses sdp_rows_backtrack).
+ * Two walks of the predecessor chain: the first validates it and counts the
+ * tokens, the second writes them back to front straight into the token list,
+ * so no reversed copy of up to n tokens is ever allocated. */
+static int sdp_backtrack(const sdp_st *st, const uint8_t *ns, uint32_t n, lz0_toklist *tl) {
     if (ns[n] == 0)
         return -1;
     int best = 0;
-    sdp_st *endrow = st + (size_t)n * (size_t)K;
+    const sdp_st *endrow = st + (size_t)n * 2u;
     for (int s = 1; s < ns[n]; s++) {
         if (endrow[s].cost < endrow[best].cost)
             best = s;
     }
-    lz0_token *rev = (lz0_token *)malloc((size_t)(n + 2) * sizeof(lz0_token));
-    if (!rev)
-        return -1;
     uint32_t m = 0;
     uint32_t p = n;
-    int slot = best;
+    uint32_t slot = (uint32_t)best;
     while (p > 0) {
-        sdp_st *cur = &st[(size_t)p * (size_t)K + (size_t)slot];
-        if (cur->tok_len == 0 || cur->prev_pos >= p) {
-            free(rev);
+        uint32_t prev = sdp_pp_pos(st[(size_t)p * 2u + slot].pp);
+        if (prev >= p)
             return -1;
-        }
-        rev[m].pos = cur->prev_pos;
-        rev[m].length = cur->tok_len;
-        rev[m].offset = cur->tok_off;
-        slot = cur->prev_slot;
-        p = cur->prev_pos;
+        slot = sdp_pp_slot(st[(size_t)p * 2u + slot].pp);
+        p = prev;
         m++;
     }
-    int rc = 0;
+    lz0_token *out = lz0_toklist_extend(tl, m);
+    if (!out)
+        return -1;
+    p = n;
+    slot = (uint32_t)best;
     for (uint32_t k = m; k-- > 0;) {
-        if (lz0_toklist_push(tl, rev[k].pos, rev[k].length, rev[k].offset) < 0) {
-            rc = -1;
-            break;
-        }
+        const sdp_st *cur = &st[(size_t)p * 2u + slot];
+        uint32_t prev = sdp_pp_pos(cur->pp);
+        out[k].pos = prev;
+        out[k].length = p - prev;
+        out[k].offset = (cur->key & SDP_LIT_FLAG) ? 0 : cur->key;
+        slot = sdp_pp_slot(cur->pp);
+        p = prev;
     }
-    free(rev);
-    return rc;
+    return 0;
 }
 
 static int lz0_parse_sdp_k2(lz0_finder *f, lz0_toklist *tl) {
     uint32_t n = f->n;
+    /* prev_pos shares its word with the slot bit, offsets with the literal flag */
+    if (n >= SDP_PP_SLOT)
+        return -1;
     lz0_sdp_census *cen = lz0_sdp_census_out;
     sdp_st *st = (sdp_st *)malloc((size_t)(n + 1) * 2u * sizeof(sdp_st));
     uint8_t *ns = (uint8_t *)calloc((size_t)(n + 1), sizeof(uint8_t));
@@ -1438,7 +1473,7 @@ static int lz0_parse_sdp_k2(lz0_finder *f, lz0_toklist *tl) {
         free(ns);
         return -1;
     }
-    sdp_store(&st[0], LZ0_INITIAL_OFFSET, 0, 0, 0, 0, 0, 0);
+    sdp_store(&st[0], LZ0_INITIAL_OFFSET, 0, 0, 0);
     /* rows are only read below their live count; clearing the rest of the
      * first two rows keeps GCC's -Wmaybe-uninitialized analysis quiet */
     memset(&st[1], 0, (n >= 1 ? 3u : 1u) * sizeof(sdp_st));
@@ -1463,23 +1498,28 @@ static int lz0_parse_sdp_k2(lz0_finder *f, lz0_toklist *tl) {
         double t2 = timed ? sdp_now_ms() : 0;
         sdp_st *row = st + (size_t)i * 2u;
         for (int s = 0; s < nsi; s++) {
-            sdp_st *cur = &row[s];
-            uint32_t last_off = cur->last_off;
-            int can_last = cur->can_last;
+            const sdp_st *cur = &row[s];
+            uint32_t key = cur->key;
+            uint32_t last_off = key & ~SDP_LIT_FLAG;
+            int can_last = (key & SDP_LIT_FLAG) != 0;
             int cost = cur->cost;
             uint8_t slot = (uint8_t)s;
             double tl0 = timed ? sdp_now_ms() : 0;
             if (!can_last && max_left >= 1) {
-                sdp_relax2(st + (size_t)(i + 1) * 2u, &ns[i + 1], last_off, 1,
-                           cost + lz0_cost_literal(1), i, slot, 1, 0, NULL);
+                sdp_relax2(st + (size_t)(i + 1) * 2u, &ns[i + 1], key | SDP_LIT_FLAG,
+                           cost + lz0_cost_literal(1), i, slot, NULL);
                 if (cen)
                     cen->n_trans_lit++;
             }
-            if (can_last && max_left >= 1 && cur->tok_off == 0 && cur->tok_len > 0) {
-                sdp_st *origin = &st[(size_t)cur->prev_pos * 2u + cur->prev_slot];
-                sdp_relax2(st + (size_t)(i + 1) * 2u, &ns[i + 1], last_off, 1,
-                           origin->cost + lz0_cost_literal((int)(cur->tok_len + 1)),
-                           cur->prev_pos, cur->prev_slot, cur->tok_len + 1, 0, NULL);
+            /* a literal-run state (tok_off == 0) extends its run from the
+             * origin: tok_len = i - prev_pos (always >= 1 here) */
+            uint32_t opos = sdp_pp_pos(cur->pp);
+            if (can_last && max_left >= 1 && opos < i) {
+                uint8_t oslot = sdp_pp_slot(cur->pp);
+                const sdp_st *origin = &st[(size_t)opos * 2u + oslot];
+                sdp_relax2(st + (size_t)(i + 1) * 2u, &ns[i + 1], key,
+                           origin->cost + lz0_cost_literal((int)(i - opos + 1)), opos,
+                           oslot, NULL);
                 if (cen)
                     cen->n_trans_lit++;
             }
@@ -1506,7 +1546,8 @@ static int lz0_parse_sdp_k2(lz0_finder *f, lz0_toklist *tl) {
                 b = 1;
             int b2 = -1;
             for (int s2 = 0; s2 < nsi; s2++) {
-                if (row[s2].last_off != row[b].last_off && (b2 < 0 || row[s2].cost < row[b2].cost))
+                if (((row[s2].key ^ row[b].key) & ~SDP_LIT_FLAG) != 0 &&
+                    (b2 < 0 || row[s2].cost < row[b2].cost))
                     b2 = s2;
             }
             for (int k = 0; k < nc; k++) {
@@ -1517,7 +1558,7 @@ static int lz0_parse_sdp_k2(lz0_finder *f, lz0_toklist *tl) {
                 if (L == 2 && !lz0_is_len2_allowed(f, off))
                     continue;
                 int src = b;
-                if (off == row[b].last_off) {
+                if (off == (row[b].key & ~SDP_LIT_FLAG)) {
                     if (b2 < 0)
                         continue;
                     src = b2;
@@ -1539,13 +1580,13 @@ static int lz0_parse_sdp_k2(lz0_finder *f, lz0_toklist *tl) {
             if ((uint32_t)nsi > cen->max_states)
                 cen->max_states = (uint32_t)nsi;
             cen->sum_distinct_last +=
-                (nsi > 1 && row[0].last_off != row[1].last_off) ? 2u : 1u;
+                (nsi > 1 && ((row[0].key ^ row[1].key) & ~SDP_LIT_FLAG) != 0) ? 2u : 1u;
         }
     }
     double t_back0 = timed ? sdp_now_ms() : 0;
     if (cen) {
         cen->n_pos = n;
-        cen->ram = (size_t)(n + 1) * 2u * sizeof(sdp_st) + (size_t)(n + 1);
+        cen->ram = lz0_ram_sdp(n, 2);
         cen->ms_insert = ms_insert;
         cen->ms_find = ms_find;
         cen->ms_trans = ms_trans;
@@ -1559,7 +1600,7 @@ static int lz0_parse_sdp_k2(lz0_finder *f, lz0_toklist *tl) {
                 cen->max_states = (uint32_t)ns[n];
         }
     }
-    int rc = sdp_backtrack(st, ns, 2, n, tl);
+    int rc = sdp_backtrack(st, ns, n, tl);
     free(st);
     free(ns);
     if (cen && timed)
@@ -1588,8 +1629,6 @@ static int lz0_parse_sdp_k2(lz0_finder *f, lz0_toklist *tl) {
  * highest cost, best/second-best source) is identical to the former AoS
  * implementation, so the token list and the bitstream are unchanged.
  */
-#define SDP_LIT_FLAG 0x80000000u
-
 typedef struct {
     int K;
     uint32_t *key;      /* [pos*K + s] last_off | SDP_LIT_FLAG after a literal run */
@@ -1710,36 +1749,36 @@ static int sdp_rows_backtrack(const sdp_rows *d, uint32_t n, lz0_toklist *tl) {
         if (endcost[s] < endcost[best])
             best = s;
     }
-    lz0_token *rev = (lz0_token *)malloc(((size_t)n + 2) * sizeof(lz0_token));
-    if (!rev)
-        return -1;
+    /* pass 1: validate the chain and count its tokens (no reversed copy) */
     uint32_t m = 0;
     uint32_t p = n;
     size_t slot = (size_t)best;
     while (p > 0) {
         size_t c = (size_t)p * K + slot;
         uint32_t prev = d->prev_pos[c];
-        if (prev >= p) {
-            free(rev);
+        if (prev >= p)
             return -1;
-        }
-        uint32_t key = d->key[c];
-        rev[m].pos = prev;
-        rev[m].length = p - prev;
-        rev[m].offset = (key & SDP_LIT_FLAG) ? 0 : key;
         slot = d->prev_slot[c];
         p = prev;
         m++;
     }
-    int rc = 0;
+    /* pass 2: same walk, tokens written back to front in place */
+    lz0_token *out = lz0_toklist_extend(tl, m);
+    if (!out)
+        return -1;
+    p = n;
+    slot = (size_t)best;
     for (uint32_t k = m; k-- > 0;) {
-        if (lz0_toklist_push(tl, rev[k].pos, rev[k].length, rev[k].offset) < 0) {
-            rc = -1;
-            break;
-        }
+        size_t c = (size_t)p * K + slot;
+        uint32_t prev = d->prev_pos[c];
+        uint32_t key = d->key[c];
+        out[k].pos = prev;
+        out[k].length = p - prev;
+        out[k].offset = (key & SDP_LIT_FLAG) ? 0 : key;
+        slot = d->prev_slot[c];
+        p = prev;
     }
-    free(rev);
-    return rc;
+    return 0;
 }
 
 int lz0_parse_sdp(lz0_finder *f, lz0_toklist *tl) {

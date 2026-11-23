@@ -267,7 +267,7 @@ static void run_one(const char *kind, size_t n, const unsigned char *in) {
     size_t ram_head = (size_t)LZ0_HASH_SIZE * sizeof(uint32_t);
     size_t ram_sa_only = (size_t)nn * sizeof(uint32_t);
     size_t ram_rank = (size_t)nn * sizeof(uint32_t);
-    size_t ram_sdp_st = (size_t)(nn + 1) * 2u * 24u;
+    size_t ram_sdp_st = (size_t)(nn + 1) * 2u * 12u;
     size_t ram_sdp_ns = (size_t)(nn + 1);
     printf("  ram   peak=%.0fKB hash=%zuKB(prev=%zu jmp=%zu head=%zu) sa=%zuKB(sa=%zu rank=%zu) sdp=%zuKB(st=%zu ns=%zu) rss0=%ld rss1=%ld\n",
            st.peak_ram / 1024.0, ram_hash / 1024, ram_prev / 1024, ram_jmp / 1024, ram_head / 1024,

@@ -156,8 +156,8 @@ size_t lz0_ram_sdp(uint32_t n, int k) {
         k = 4;
     if (k > 32)
         k = 32;
-    if (k == 2) /* K = 2 parser: 24-byte AoS states + live count */
-        return (size_t)(n + 1) * 2u * 24u + (size_t)(n + 1);
+    if (k == 2) /* K = 2 parser: 12-byte AoS states (key, cost, prev_pos|slot) + live count */
+        return (size_t)(n + 1) * 2u * 12u + (size_t)(n + 1);
     /* generic parser: 13-byte SoA states (key, cost, prev_pos, prev_slot)
      * + live count, cached worst slot and 64-bit key filter per position */
     return (size_t)(n + 1) * (size_t)k * 13u + (size_t)(n + 1) * 10u;

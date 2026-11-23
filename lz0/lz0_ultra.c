@@ -306,39 +306,40 @@ int lz0_parse_ultra(lz0_finder *f, lz0_toklist *tl) {
     for (int s = 1; s < d.ns[n]; s++)
         if (d.cost[nb + s] < d.cost[nb + best])
             best = s;
-    lz0_token *rev = (lz0_token *)malloc(((size_t)n + 2) * sizeof(lz0_token));
-    if (!rev) {
-        u_free(&d);
-        return -1;
-    }
+    /* pass 1: validate the chain and count its tokens (no reversed copy) */
     uint32_t m = 0;
     uint32_t p = n;
     uint32_t slot = (uint32_t)best;
     while (p > 0) {
+        uint32_t pp = d.pp[(size_t)p * (size_t)K + slot];
+        uint32_t prev = pp & U_POS_MASK;
+        if (prev >= p) {
+            u_free(&d);
+            return -1;
+        }
+        p = prev;
+        slot = pp >> 24;
+        m++;
+    }
+    /* pass 2: same walk, tokens written back to front in place */
+    lz0_token *out = lz0_toklist_extend(tl, m);
+    if (!out) {
+        u_free(&d);
+        return -1;
+    }
+    p = n;
+    slot = (uint32_t)best;
+    for (uint32_t k = m; k-- > 0;) {
         size_t c = (size_t)p * (size_t)K + slot;
         uint32_t key = d.key[c];
         uint32_t pp = d.pp[c];
         uint32_t prev = pp & U_POS_MASK;
-        if (prev >= p) {
-            free(rev);
-            u_free(&d);
-            return -1;
-        }
-        rev[m].pos = prev;
-        rev[m].length = p - prev;
-        rev[m].offset = (key & U_LIT_FLAG) ? 0 : key;
-        m++;
+        out[k].pos = prev;
+        out[k].length = p - prev;
+        out[k].offset = (key & U_LIT_FLAG) ? 0 : key;
         p = prev;
         slot = pp >> 24;
     }
-    int rc = 0;
-    for (uint32_t k = m; k-- > 0;) {
-        if (lz0_toklist_push(tl, rev[k].pos, rev[k].length, rev[k].offset) < 0) {
-            rc = -1;
-            break;
-        }
-    }
-    free(rev);
     u_free(&d);
-    return rc;
+    return 0;
 }

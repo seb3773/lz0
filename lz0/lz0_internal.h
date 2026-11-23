@@ -125,6 +125,7 @@ int lz0_sa_debug_build_algo(const unsigned char *in, size_t n, int algo,
 void lz0_toklist_init(lz0_toklist *tl);
 void lz0_toklist_free(lz0_toklist *tl);
 int lz0_toklist_push(lz0_toklist *tl, uint32_t pos, uint32_t length, uint32_t offset);
+lz0_token *lz0_toklist_extend(lz0_toklist *tl, uint32_t m);
 
 int lz0_parse_greedy(lz0_finder *f, lz0_toklist *tl);
 int lz0_parse_lazy(lz0_finder *f, lz0_toklist *tl);
