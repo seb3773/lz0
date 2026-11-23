@@ -92,6 +92,23 @@ void lz0_mru_batch_c(uint32_t *mru, int *n_mru, const lz0_match *m, int n) {
             mru_add_c(mru, n_mru, m[i].offset);
 }
 
+int lz0_matchlen_c(const unsigned char *a, const unsigned char *b, int max) {
+    int n = 0;
+#if defined(LZ0_MATCHLEN_LE64)
+    while (n + 8 <= max) {
+        uint64_t xa, xb;
+        memcpy(&xa, a + n, 8);
+        memcpy(&xb, b + n, 8);
+        if (xa != xb)
+            return n + (int)(__builtin_ctzll(xa ^ xb) >> 3);
+        n += 8;
+    }
+#endif
+    while (n < max && a[n] == b[n])
+        n++;
+    return n;
+}
+
 static int lz0_simd_detect(void) {
 #if defined(LZ0_SIMD_X86_64)
     unsigned a, b, c, d;

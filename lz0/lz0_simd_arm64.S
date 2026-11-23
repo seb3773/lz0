@@ -479,6 +479,106 @@ ENDF(lz0_mru_batch_neon)
         .word   0, 1, 2, 3, 4, 5, 6, 7
         .text
 
+/* ------------------------------------------------------------------------
+ * int lz0_matchlen_neon(const uint8_t *a = x0, const uint8_t *b = x1,
+ *                       int max = w2)
+ * Number of identical leading bytes, in [0, max] (0 if max <= 0).
+ * 32 bytes per iteration: EOR of the two inputs (non-zero byte = mismatch),
+ * ORR of both halves, UMAXP reduction to 64 bits, one CBNZ. On a hit the
+ * XOR qwords are scanned in order; RBIT + CLZ of the first non-zero qword
+ * gives the bit index, /8 the byte. Then one 16-byte block, then an
+ * overlapping in-bounds block ending at max. max < 16: two 8-byte words
+ * (the second overlapping) or a byte loop. Never reads a[max] / b[max].
+ * ---------------------------------------------------------------------- */
+FUNC(lz0_matchlen_neon)
+        sxtw    x2, w2
+        mov     x3, #0                      /* n */
+        cmp     x2, #16
+        b.lt    .Lml_lt16
+        sub     x4, x2, #32                 /* last start of a 32-byte block */
+.Lml_loop32:
+        cmp     x3, x4
+        b.gt    .Lml_16
+        add     x5, x0, x3
+        add     x6, x1, x3
+        ldp     q0, q1, [x5]
+        ldp     q2, q3, [x6]
+        eor     v0.16b, v0.16b, v2.16b
+        eor     v1.16b, v1.16b, v3.16b
+        orr     v4.16b, v0.16b, v1.16b
+        umaxp   v4.4s, v4.4s, v4.4s
+        fmov    x7, d4
+        cbnz    x7, .Lml_hit32
+        add     x3, x3, #32
+        b       .Lml_loop32
+.Lml_hit32:
+        umaxp   v4.4s, v0.4s, v0.4s
+        fmov    x7, d4
+        cbnz    x7, .Lml_hit16              /* mismatch in the first half */
+        add     x3, x3, #16
+        mov     v0.16b, v1.16b
+.Lml_hit16:                                 /* v0 = a ^ b at n, non-zero */
+        fmov    x7, d0
+        cbnz    x7, .Lml_hitq
+        mov     x7, v0.d[1]
+        add     x3, x3, #8
+.Lml_hitq:                                  /* x7 = a ^ b at n, non-zero */
+        rbit    x7, x7
+        clz     x7, x7
+        add     x0, x3, x7, lsr #3
+        ret
+.Lml_16:                                    /* 0..31 left, max >= 16 */
+        sub     x4, x2, #16                 /* max - 16 (>= 0) */
+        cmp     x3, x4
+        b.gt    .Lml_tail
+        ldr     q0, [x0, x3]
+        ldr     q2, [x1, x3]
+        eor     v0.16b, v0.16b, v2.16b
+        umaxp   v4.4s, v0.4s, v0.4s
+        fmov    x7, d4
+        cbnz    x7, .Lml_hit16
+        add     x3, x3, #16
+.Lml_tail:                                  /* 0..15 left: overlap at max - 16 */
+        cmp     x3, x2
+        b.ge    .Lml_full
+        mov     x3, x4
+        ldr     q0, [x0, x3]
+        ldr     q2, [x1, x3]
+        eor     v0.16b, v0.16b, v2.16b
+        umaxp   v4.4s, v0.4s, v0.4s
+        fmov    x7, d4
+        cbnz    x7, .Lml_hit16
+.Lml_full:
+        mov     w0, w2
+        ret
+.Lml_lt16:                                  /* max < 16 */
+        cmp     x2, #8
+        b.lt    .Lml_bytes
+        ldr     x5, [x0]
+        ldr     x6, [x1]
+        eor     x7, x5, x6
+        cbnz    x7, .Lml_hitq
+        sub     x3, x2, #8                  /* overlapping word at max - 8 */
+        ldr     x5, [x0, x3]
+        ldr     x6, [x1, x3]
+        eor     x7, x5, x6
+        cbnz    x7, .Lml_hitq
+        mov     w0, w2
+        ret
+.Lml_bytes:                                 /* max < 8 (possibly <= 0) */
+        cmp     x3, x2
+        b.ge    .Lml_bret
+        ldrb    w5, [x0, x3]
+        ldrb    w6, [x1, x3]
+        cmp     w5, w6
+        b.ne    .Lml_bret
+        add     x3, x3, #1
+        b       .Lml_bytes
+.Lml_bret:
+        mov     w0, w3
+        ret
+ENDF(lz0_matchlen_neon)
+
 #endif /* __aarch64__ && !_WIN32 */
 
 #if defined(__ELF__)

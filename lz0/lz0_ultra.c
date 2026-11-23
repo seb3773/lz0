@@ -263,7 +263,7 @@ int lz0_parse_ultra(lz0_finder *f, lz0_toklist *tl) {
                     }
                 if (dup)
                     continue;
-                int ml = lz0_matchlen(f->in + i, f->in + i - off, max_left);
+                int ml = lz0_simd_matchlen(f->in + i, f->in + i - off, max_left);
                 if (ml >= 2) {
                     cands[nc].offset = off;
                     cands[nc].length = (uint32_t)ml;

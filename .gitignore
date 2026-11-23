@@ -17,6 +17,7 @@ tests/test_boundary
 tests/test_malformed
 tests/test_fuzz
 tests/test_guard
+tests/test_simd
 tests/*_arm64
 tests/*_riscv64
 

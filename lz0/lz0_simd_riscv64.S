@@ -285,6 +285,39 @@ FUNC(lz0_mru_batch_rvv)
         ret
 ENDF(lz0_mru_batch_rvv)
 
+/* ------------------------------------------------------------------------
+ * int lz0_matchlen_rvv(const uint8_t *a = a0, const uint8_t *b = a1,
+ *                      int max = a2)
+ * Number of identical leading bytes, in [0, max] (0 if max <= 0).
+ * Strip-mined over bytes (e8, LMUL=4: 4 * VLEN / 8 bytes per strip, e.g.
+ * 64 bytes at VLEN=128): VMSNE builds the mismatch mask, VFIRST returns the
+ * first mismatching element (or -1). VL never exceeds the bytes left, so
+ * nothing past a[max] / b[max] is loaded, on any VLEN.
+ * ---------------------------------------------------------------------- */
+FUNC(lz0_matchlen_rvv)
+        sext.w  a2, a2
+        li      t3, 0                       /* n */
+        blez    a2, 2f
+1:
+        sub     t0, a2, t3                  /* remaining */
+        vsetvli t1, t0, e8, m4, ta, ma
+        add     t2, a0, t3
+        vle8.v  v8, (t2)
+        add     t2, a1, t3
+        vle8.v  v16, (t2)
+        vmsne.vv v0, v8, v16
+        vfirst.m t4, v0
+        bgez    t4, 3f
+        add     t3, t3, t1
+        blt     t3, a2, 1b
+2:
+        mv      a0, t3
+        ret
+3:
+        add     a0, t3, t4
+        ret
+ENDF(lz0_matchlen_rvv)
+
 #endif /* GCC >= 12 || Clang >= 14 */
 #endif /* __riscv && __riscv_xlen == 64 && !_WIN32 */
 

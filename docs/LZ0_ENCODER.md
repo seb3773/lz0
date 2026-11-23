@@ -86,6 +86,22 @@ Level 9 uses `lz0_parse_ultra` (`lz0/lz0_ultra.c`) instead of the generic SDP:
 An exhaustive ZX0-style reference parser (`bench/ultra/lz0_opt_ref.c`) shows
 the remaining gap to optimal is about 0.05 % on 32 KiB samples.
 
+## Speed-only paths
+
+These change speed, never output. Every variant gives a bit-identical stream.
+
+- `lz0_simd_matchlen` (`lz0/lz0_simd.h`): one inline 64-bit compare covers the
+  first 8 bytes, then the active vector tier runs (AVX2 64/32 B, SSE2 and NEON
+  32/16 B, RVV strip-mined, C fallback). Tails use overlapping in-bounds loads,
+  so nothing past `max` is read. `make simd` checks every tier against a byte
+  loop, with both operands ending on `PROT_NONE` pages.
+- SA probe run-ahead (`sa_probe_neighbors`, `lz0/lz0_find.c`): while distance
+  `d` is compared, the input bytes for `d + LZ0_SA_PF_K` (default 8) are
+  prefetched. The run-ahead never passes the next adaptive stop (d = 4, 8)
+  before that stop is ruled out. It is only used from `LZ0_SA_PF_MIN_INPUT`
+  (default 2 MiB) up, since on cache-resident inputs it costs more than it
+  hides. Probe order and results are unchanged.
+
 ## API
 
 ```c

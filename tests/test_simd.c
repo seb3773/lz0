@@ -5,6 +5,12 @@
  * random inputs of every length 0..300 (heavy ties, duplicates, extreme
  * values). Inputs are placed right before a PROT_NONE guard page so any
  * read past the last element faults immediately.
+ *
+ * matchlen: both operands end on their own guard page; exhaustive sweep of
+ * every max in [-2, 160] x every mismatch position, then random cases up to
+ * 32 KiB (full matches, mismatches near either end, several mismatches,
+ * aliased operands as in an overlapping copy). The vector tier, the inline
+ * wrapper and the C reference are each checked against a byte loop.
  */
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -23,23 +29,29 @@ static uint32_t rnd(void) {
     return (uint32_t)(rs >> 16);
 }
 
-static unsigned char *guard_base;
+/* Two independent guarded regions (slot 0 and 1), 8 pages each, every one
+ * followed by a PROT_NONE page. */
+static unsigned char *guard_base[2];
 static size_t guard_len;
 
-/* Returns a pointer such that [p, p + bytes) ends exactly at a guard page. */
-static void *guarded(size_t bytes) {
+/* Returns a pointer such that [p, p + bytes) ends exactly at the guard page
+ * of the given slot. */
+static void *guarded_slot(int slot, size_t bytes) {
     long pg = sysconf(_SC_PAGESIZE);
-    if (!guard_base) {
+    if (!guard_base[slot]) {
         guard_len = (size_t)pg * 8;
-        guard_base = mmap(NULL, guard_len + (size_t)pg, PROT_READ | PROT_WRITE,
-                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (guard_base == MAP_FAILED || mprotect(guard_base + guard_len, (size_t)pg, PROT_NONE)) {
+        unsigned char *g = mmap(NULL, guard_len + (size_t)pg, PROT_READ | PROT_WRITE,
+                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (g == MAP_FAILED || mprotect(g + guard_len, (size_t)pg, PROT_NONE)) {
             perror("mmap/mprotect");
             exit(2);
         }
+        guard_base[slot] = g;
     }
-    return guard_base + guard_len - bytes;
+    return guard_base[slot] + guard_len - bytes;
 }
+
+static void *guarded(size_t bytes) { return guarded_slot(0, bytes); }
 
 static uint32_t pick(uint32_t range) {
     switch (rnd() % 4) {
@@ -136,6 +148,75 @@ static void run_tier(int iters) {
     }
 }
 
+/* Byte-at-a-time reference, independent of lz0_matchlen_c. */
+static int matchlen_ref(const unsigned char *a, const unsigned char *b, int max) {
+    int n = 0;
+    while (n < max && a[n] == b[n])
+        n++;
+    return n;
+}
+
+static void check_matchlen(const unsigned char *a, const unsigned char *b, int max,
+                           const char *what) {
+    int want = matchlen_ref(a, b, max);
+    int c = lz0_matchlen_c(a, b, max);
+    int tier = LZ0_SIMD_CALL(lz0_matchlen, a, b, max);
+    int wrap = lz0_simd_matchlen(a, b, max);
+    CHECK(c == want && tier == want && wrap == want,
+          "matchlen %s max=%d want=%d c=%d tier=%d wrapper=%d", what, max, want, c, tier,
+          wrap);
+}
+
+/* a and b both end exactly at a guard page (b may also alias a). */
+static void matchlen_case(int max, int mism, int extra, int alias) {
+    size_t sz = max > 0 ? (size_t)max : 0;
+    unsigned char *a = guarded_slot(0, sz);
+    unsigned char *b = guarded_slot(1, sz);
+    for (size_t i = 0; i < sz; i++)
+        a[i] = (unsigned char)rnd();
+    memcpy(b, a, sz);
+    if (mism >= 0 && mism < max)
+        b[mism] ^= (unsigned char)(1u + rnd() % 255u); /* any bit, incl. bit 7 */
+    for (int e = 0; e < extra && max > 0; e++)        /* later mismatches too */
+        b[rnd() % sz] ^= (unsigned char)(1u << (rnd() % 8));
+    check_matchlen(a, b, max, "two-buf");
+    check_matchlen(b, a, max, "swapped");
+    if (alias && max > 1) {
+        /* overlapping operands, as for an offset-d copy: a + d vs a */
+        int d = 1 + (int)(rnd() % (unsigned)(max - 1 < 40 ? max - 1 : 40));
+        int per = 1 + (int)(rnd() % 4);
+        for (int i = 0; i < max; i++)
+            a[i] = (unsigned char)(i % per);
+        if (rnd() % 2)
+            a[rnd() % sz] ^= 0x80;
+        check_matchlen(a + d, a, max - d, "alias");
+    }
+}
+
+static void run_matchlen(int iters) {
+    /* exhaustive: every max in [-2, 160], every mismatch position */
+    for (int max = -2; max <= 160; max++)
+        for (int p = 0; p <= (max > 0 ? max : 0); p++)
+            matchlen_case(max, p, 0, 0);
+    /* random: long matches (up to 8 pages), multiple mismatches, aliasing */
+    for (int it = 0; it < iters; it++) {
+        int max;
+        switch (rnd() % 4) {
+        case 0: max = (int)(rnd() % 64); break;
+        case 1: max = (int)(rnd() % 600); break;
+        default: max = (int)(rnd() % 32769); break;
+        }
+        int mism;
+        switch (rnd() % 4) {
+        case 0: mism = max; break;                            /* full match */
+        case 1: mism = max - 1 - (int)(rnd() % 40); break;    /* near the end */
+        case 2: mism = (int)(rnd() % 40); break;              /* near the start */
+        default: mism = max > 0 ? (int)(rnd() % (unsigned)max) : 0; break;
+        }
+        matchlen_case(max, mism, (int)(rnd() % 3), (int)(rnd() % 2));
+    }
+}
+
 int main(int argc, char **argv) {
     int iters = argc > 1 ? atoi(argv[1]) : 200000;
     int max = lz0_simd_init();
@@ -143,7 +224,8 @@ int main(int argc, char **argv) {
         lz0_simd_force = lvl;
         lz0_simd_init();
         run_tier(iters);
-        printf("tier %-5s: %d random cases x 6 kernels OK\n", lz0_simd_name(), iters);
+        run_matchlen(iters / 10 + 1);
+        printf("tier %-5s: %d random cases x 7 kernels OK\n", lz0_simd_name(), iters);
     }
     if (fails) {
         printf("test_simd: %d failure(s)\n", fails);

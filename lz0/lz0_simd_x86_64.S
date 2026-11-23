@@ -36,6 +36,10 @@
  *            move-to-front of every non-zero m[i].offset with length >= 4,
  *            or length >= 3 and offset <= 512, into the 8-entry MRU list
  *            (SSE2 only: the whole list fits in two XMM registers).
+ *   int      lz0_matchlen_{sse2,avx2}  (const uint8_t *a, const uint8_t *b,
+ *                                      int max)
+ *            -> number of identical leading bytes, in [0, max] (0 if
+ *               max <= 0); reads only a[0..max) and b[0..max).
  */
 
 #if defined(__x86_64__) && !defined(_WIN32)
@@ -779,6 +783,169 @@ FUNC(lz0_mru_batch_sse2)
         movl    %r8d, (%rsi)
         ret
 ENDF(lz0_mru_batch_sse2)
+
+/* ------------------------------------------------------------------------
+ * int lz0_matchlen_sse2(a=rdi, b=rsi, max=edx) -> eax
+ * Number of identical leading bytes, in [0, max] (0 if max <= 0).
+ * 32 bytes per iteration (2 x PCMPEQB, PAND, one PMOVMSKB), then one
+ * 16-byte block, then an overlapping in-bounds block ending at max (its
+ * leading bytes are already known equal, so the first mismatch it reports
+ * is at or after the current position). max < 16: two 8-byte words (the
+ * second overlapping) or a byte loop. Never reads a[max] / b[max].
+ * The mismatch masks fed to TZCNT are never zero; on pre-BMI1 CPUs TZCNT
+ * decodes as BSF, which returns the same index for a non-zero source.
+ * ---------------------------------------------------------------------- */
+FUNC(lz0_matchlen_sse2)
+        movslq  %edx, %rdx
+        xorl    %eax, %eax                  /* n = 0 */
+        cmpq    $16, %rdx
+        jl      .Lml_s_lt16
+        leaq    -32(%rdx), %rcx             /* last start of a 32-byte block */
+        cmpq    %rcx, %rax
+        jg      .Lml_s_16
+.Lml_s_loop32:
+        movdqu  (%rdi,%rax), %xmm0
+        movdqu  16(%rdi,%rax), %xmm1
+        movdqu  (%rsi,%rax), %xmm2
+        movdqu  16(%rsi,%rax), %xmm3
+        pcmpeqb %xmm2, %xmm0
+        pcmpeqb %xmm3, %xmm1
+        movdqa  %xmm0, %xmm2
+        pand    %xmm1, %xmm2
+        pmovmskb %xmm2, %r8d
+        cmpl    $0xffff, %r8d
+        jne     .Lml_s_hit32
+        addq    $32, %rax
+        cmpq    %rcx, %rax
+        jle     .Lml_s_loop32
+.Lml_s_16:                                  /* 0..31 bytes left, max >= 16 */
+        leaq    -16(%rdx), %rcx             /* rcx = max - 16 (>= 0) */
+        cmpq    %rcx, %rax
+        jg      .Lml_s_tail
+        movdqu  (%rdi,%rax), %xmm0
+        movdqu  (%rsi,%rax), %xmm2
+        pcmpeqb %xmm2, %xmm0
+        pmovmskb %xmm0, %r8d
+        xorl    $0xffff, %r8d               /* NOT (16 lanes) */
+        jnz     .Lml_s_hit
+        addq    $16, %rax
+.Lml_s_tail:                                /* 0..15 left: overlap at max - 16 */
+        cmpq    %rdx, %rax
+        jge     .Lml_s_full
+        movq    %rcx, %rax
+        movdqu  (%rdi,%rax), %xmm0
+        movdqu  (%rsi,%rax), %xmm2
+        pcmpeqb %xmm2, %xmm0
+        pmovmskb %xmm0, %r8d
+        xorl    $0xffff, %r8d
+        jnz     .Lml_s_hit
+.Lml_s_full:
+        movl    %edx, %eax
+        ret
+.Lml_s_hit32:
+        pmovmskb %xmm0, %r8d
+        xorl    $0xffff, %r8d
+        jnz     .Lml_s_hit
+        pmovmskb %xmm1, %r8d
+        xorl    $0xffff, %r8d
+        addq    $16, %rax
+.Lml_s_hit:
+        tzcntl  %r8d, %r8d
+        addl    %r8d, %eax
+        ret
+.Lml_s_lt16:                                /* max < 16 */
+        cmpq    $8, %rdx
+        jl      .Lml_s_bytes
+        movq    (%rdi), %r8
+        xorq    (%rsi), %r8
+        jnz     .Lml_s_qhit
+        leaq    -8(%rdx), %rax              /* overlapping word at max - 8 */
+        movq    (%rdi,%rax), %r8
+        xorq    (%rsi,%rax), %r8
+        jnz     .Lml_s_qhit
+        movl    %edx, %eax
+        ret
+.Lml_s_qhit:
+        tzcntq  %r8, %r8
+        shrl    $3, %r8d
+        addl    %r8d, %eax
+        ret
+.Lml_s_bytes:                               /* max < 8 (possibly <= 0) */
+        cmpq    %rdx, %rax
+        jge     .Lml_s_ret
+        movzbl  (%rdi,%rax), %r8d
+        cmpb    (%rsi,%rax), %r8b
+        jne     .Lml_s_ret
+        incl    %eax
+        jmp     .Lml_s_bytes
+.Lml_s_ret:
+        ret
+ENDF(lz0_matchlen_sse2)
+
+/* ------------------------------------------------------------------------
+ * int lz0_matchlen_avx2(a=rdi, b=rsi, max=edx) -> eax
+ * 64 bytes per iteration (2 x VPCMPEQB with memory operands, VPAND, one
+ * VPMOVMSKB; an all-equal mask is 0xffffffff, so INC sets ZF), then one
+ * 32-byte block, then an overlapping in-bounds block ending at max.
+ * Mismatch index = TZCNT(NOT mask). max < 32 tail-jumps to the SSE2 kernel
+ * before any YMM register is touched.
+ * ---------------------------------------------------------------------- */
+FUNC(lz0_matchlen_avx2)
+        cmpl    $32, %edx
+        jl      lz0_matchlen_sse2
+        movslq  %edx, %rdx
+        xorl    %eax, %eax
+        leaq    -64(%rdx), %rcx             /* last start of a 64-byte block */
+        cmpq    %rcx, %rax
+        jg      .Lml_a_32
+.Lml_a_loop64:
+        vmovdqu (%rdi,%rax), %ymm0
+        vmovdqu 32(%rdi,%rax), %ymm1
+        vpcmpeqb (%rsi,%rax), %ymm0, %ymm0
+        vpcmpeqb 32(%rsi,%rax), %ymm1, %ymm1
+        vpand   %ymm1, %ymm0, %ymm2
+        vpmovmskb %ymm2, %r8d
+        incl    %r8d                        /* 0xffffffff -> 0 */
+        jnz     .Lml_a_hit64
+        addq    $64, %rax
+        cmpq    %rcx, %rax
+        jle     .Lml_a_loop64
+.Lml_a_32:                                  /* 0..63 left, max >= 32 */
+        leaq    -32(%rdx), %rcx             /* rcx = max - 32 (>= 0) */
+        cmpq    %rcx, %rax
+        jg      .Lml_a_tail
+        vmovdqu (%rdi,%rax), %ymm0
+        vpcmpeqb (%rsi,%rax), %ymm0, %ymm0
+        vpmovmskb %ymm0, %r8d
+        xorl    $-1, %r8d                   /* NOT, setting ZF */
+        jnz     .Lml_a_hit
+        addq    $32, %rax
+.Lml_a_tail:                                /* 0..31 left: overlap at max - 32 */
+        cmpq    %rdx, %rax
+        jge     .Lml_a_full
+        movq    %rcx, %rax
+        vmovdqu (%rdi,%rax), %ymm0
+        vpcmpeqb (%rsi,%rax), %ymm0, %ymm0
+        vpmovmskb %ymm0, %r8d
+        xorl    $-1, %r8d
+        jnz     .Lml_a_hit
+.Lml_a_full:
+        movl    %edx, %eax
+        vzeroupper
+        ret
+.Lml_a_hit64:
+        vpmovmskb %ymm0, %r8d
+        xorl    $-1, %r8d
+        jnz     .Lml_a_hit
+        vpmovmskb %ymm1, %r8d
+        xorl    $-1, %r8d
+        addq    $32, %rax
+.Lml_a_hit:
+        tzcntl  %r8d, %r8d
+        addl    %r8d, %eax
+        vzeroupper
+        ret
+ENDF(lz0_matchlen_avx2)
 
         .section .rodata
         .p2align 5

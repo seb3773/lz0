@@ -18,23 +18,11 @@ static inline uint32_t hash4(const unsigned char *p) {
             ((uint32_t)p[3] << 24)) * 2654435761u >> (32 - LZ0_HASH_BITS);
 }
 
+/* Out-of-line entry point for other translation units; the finder itself
+ * calls the inline lz0_simd_matchlen() (8-byte scalar probe, then the
+ * active vector tier). */
 int lz0_matchlen(const unsigned char *a, const unsigned char *b, int max) {
-    int n = 0;
-#if defined(__GNUC__)
-    while (n + 8 <= max) {
-        uint64_t xa, xb;
-        memcpy(&xa, a + n, 8);
-        memcpy(&xb, b + n, 8);
-        if (xa != xb) {
-            n += (int)(__builtin_ctzll(xa ^ xb) >> 3);
-            return n;
-        }
-        n += 8;
-    }
-#endif
-    while (n < max && a[n] == b[n])
-        n++;
-    return n;
+    return lz0_simd_matchlen(a, b, max);
 }
 
 int lz0_force_chain_walk = 0;
@@ -1175,9 +1163,9 @@ static int sa_probe_side(lz0_finder *f, uint32_t pos, uint32_t src, int known,
     if (known >= maxl)
         ml = maxl;
     else if (known > 0)
-        ml = known + lz0_matchlen(in + pos + known, in + src + known, maxl - known);
+        ml = known + lz0_simd_matchlen(in + pos + known, in + src + known, maxl - known);
     else
-        ml = lz0_matchlen(in + pos, in + src, maxl);
+        ml = lz0_simd_matchlen(in + pos, in + src, maxl);
     if (cen) {
         census_ml(cen, ml);
         cen->n_chain_check++;
@@ -1211,11 +1199,111 @@ static int sa_probe_side(lz0_finder *f, uint32_t pos, uint32_t src, int known,
     return ml;
 }
 
-static void sa_probe_neighbors(lz0_finder *f, uint32_t pos, int minm, int maxl,
-                               int *best_len, lz0_match *out, int *nout,
-                               lz0_sdp_census *cen) {
-    if (lz0_sa_win <= 0 || !f->sa || !f->rank)
-        return;
+/* ---- suffix-array neighbour probe -------------------------------------
+ *
+ * For d = 1, 2, ... the probe reads src = sa[r - d] and sa[r + d] (r is the
+ * rank of pos) and compares in + pos with in + src. The comparison is
+ * latency-bound: in + src is a random earlier position of the input, so its
+ * first bytes are usually a cache miss. While distance d is compared, the
+ * probe runs LZ0_SA_PF_K distances ahead: it reads sa[r -/+ (d + K)] (the
+ * same or the next cache line of sa[], already streaming in) and issues a
+ * read prefetch for in + src. The run-ahead only covers the unit-stride part
+ * of the d schedule and, with lz0_sa_adapt, never crosses the next early
+ * stop checkpoint (d = 4, then d = 8) until that stop has been ruled out.
+ *
+ * Prefetches are hints only: every SA index is bounds-checked against
+ * [0, sa_n) and every source against [0, n) before use, and the
+ * comparisons, their order, the candidate list and the adapt stops are
+ * exactly those of the plain loop, so the bitstream is unchanged.
+ *
+ * The run-ahead only pays off once the input, sa[] and rank[] (9n bytes)
+ * outgrow the private caches: on cache-resident inputs the out-of-order
+ * core already overlaps these loads and the extra instructions cost more
+ * than they hide. It is therefore enabled from LZ0_SA_PF_MIN_INPUT (>= 1)
+ * bytes of input on. LZ0_SA_PF_K = 0 compiles the run-ahead out. */
+#ifndef LZ0_SA_PF_K
+#define LZ0_SA_PF_K 8
+#endif
+#ifndef LZ0_SA_PF_MIN_INPUT
+#define LZ0_SA_PF_MIN_INPUT (2u << 20)
+#endif
+
+#if defined(__GNUC__) || defined(__clang__)
+/* prefetcht0 on x86-64, prfm pldl1keep on AArch64, prefetch.r with Zicbop on
+ * RISC-V (nothing otherwise). */
+#define LZ0_PREFETCH_R(p) __builtin_prefetch((const void *)(p), 0, 3)
+#define LZ0_ALWAYS_INLINE inline __attribute__((always_inline))
+#else
+#define LZ0_PREFETCH_R(p) ((void)(p))
+#define LZ0_ALWAYS_INLINE inline
+#endif
+
+/* Next probe distance (lz0_sa_multiscale stride schedule). */
+static inline int sa_next_d(int d, int ms) {
+    if (ms == 0)
+        return d + 1;
+    if (ms == 1)
+        return d < 128 ? d + 1 : d < 256 ? d + 32 : d + 64;
+    return d < 48 ? d + 1 : d < 128 ? d + 8 : d < 256 ? d + 16 : d < 512 ? d + 32 : d + 64;
+}
+
+/* Prefetch the input bytes both neighbours at distance d point to. Only
+ * sources that will actually be compared (src < pos) are fetched; any other
+ * value (later positions, or out of range, which a valid SA never produces)
+ * is replaced by hot = pos (clamped into [0, n)), whose line is already in
+ * L1, so neither a branch nor a wasted L1 fill is spent on it. */
+static inline void sa_pf_payload(const uint32_t *sa, const unsigned char *in, uint32_t hot,
+                                 int r, int ns, int d) {
+    int L = r - d, R = r + d;
+    if (L >= 0) {
+        uint32_t s = sa[L];
+        LZ0_PREFETCH_R(in + (s < hot ? s : hot));
+    }
+    if (R < ns) {
+        uint32_t s = sa[R];
+        LZ0_PREFETCH_R(in + (s < hot ? s : hot));
+    }
+}
+
+/* One side of distance d (rk = r - d or r + d, lcp_ix the LCP slot between
+ * rk and its neighbour towards r). with_cen is a compile-time constant at
+ * both call sites, so the census-free path carries no census branches. */
+static LZ0_ALWAYS_INLINE void sa_probe_one(lz0_finder *f, uint32_t pos, int rk, int lcp_ix,
+                                           int *acc, int use_lcp, int minm, int maxl,
+                                           int *best_len, lz0_match *out, int *nout,
+                                           lz0_sdp_census *cen, const int with_cen) {
+    uint32_t src = f->sa[rk];
+    if (with_cen)
+        cen->n_sa_cmp++;
+    if (use_lcp) {
+        int v = (int)f->lcp[lcp_ix];
+        if (v < *acc)
+            *acc = v;
+    }
+    if (src < pos) {
+        int known = 0;
+        if (use_lcp) {
+            known = *acc;
+            if (known < 0)
+                known = 0;
+            if (known > maxl)
+                known = maxl;
+        }
+        sa_probe_side(f, pos, src, known, minm, maxl, best_len, out, nout,
+                      with_cen ? cen : NULL);
+    } else if (with_cen) {
+        cen->n_sa_src_skip++;
+    }
+}
+
+/* with_cen and with_pf are compile-time constants at every call site: the
+ * census-free path carries no census branches, and inputs below
+ * LZ0_SA_PF_MIN_INPUT run a loop with no prefetch code at all. */
+static LZ0_ALWAYS_INLINE void sa_probe_core(lz0_finder *f, uint32_t pos, int minm, int maxl,
+                                            int *best_len, lz0_match *out, int *nout,
+                                            lz0_sdp_census *cen, const int with_cen,
+                                            const int with_pf) {
+    (void)with_pf; /* unused when LZ0_SA_PF_K == 0 */
     uint32_t n = f->n;
     int win = f->sa_win;
     uint32_t qpos = pos;
@@ -1233,96 +1321,64 @@ static void sa_probe_neighbors(lz0_finder *f, uint32_t pos, int minm, int maxl,
     int accR = INT_MAX;
     int use_lcp = (lz0_sa_lcp && f->lcp && f->sa_sample <= 1);
     int adapt = lz0_sa_adapt;
+    int ms = lz0_sa_multiscale;
     int stop_at = 0;
-    if (cen)
+    if (with_cen)
         cen->n_sa_invoke++;
-    int d = 1;
     int max_d = win;
-    if (lz0_sa_multiscale == 1 && max_d < 512)
+    if (ms == 1 && max_d < 512)
         max_d = 512;
-    if (lz0_sa_multiscale == 2 && max_d < 1024)
+    if (ms == 2 && max_d < 1024)
         max_d = 1024;
 
+    int d = 1;
+#if LZ0_SA_PF_K > 0
+    const uint32_t *sa = f->sa;
+    const unsigned char *in = f->in;
+    const uint32_t hot = pos < n ? pos : 0; /* every prefetch stays in [0, n) */
+    /* last distance of the unit-stride part of the schedule */
+    int unit_d = ms == 0 ? max_d : ms == 1 ? 128 : 48;
+    if (unit_d > max_d)
+        unit_d = max_d;
+    /* with adapt, the probe may stop right after d = 4 or d = 8: run ahead
+     * only up to the next checkpoint until that stop is ruled out */
+    int pf_lim = (adapt && unit_d > 4) ? 4 : unit_d;
+    /* prologue: distances 2 .. K (d = 1 is used immediately) */
+    if (with_pf)
+        for (int k = 2; k <= LZ0_SA_PF_K && k <= pf_lim; k++)
+            sa_pf_payload(sa, in, hot, r, ns, k);
+#endif
+
     while (d <= max_d) {
-        int rkL = r - d;
-        int rkR = r + d;
-        if (rkL >= 0) {
-            uint32_t src = f->sa[rkL];
-            if (cen)
-                cen->n_sa_cmp++;
-            if (use_lcp) {
-                int v = (int)f->lcp[rkL + 1];
-                if (v < accL)
-                    accL = v;
-            }
-            if (src < pos) {
-                int known = 0;
-                if (use_lcp) {
-                    known = accL;
-                    if (known < 0)
-                        known = 0;
-                    if (known > maxl)
-                        known = maxl;
-                }
-                sa_probe_side(f, pos, src, known, minm, maxl, best_len, out, nout, cen);
-            } else if (cen)
-                cen->n_sa_src_skip++;
-        }
-        if (rkR < ns) {
-            uint32_t src = f->sa[rkR];
-            if (cen)
-                cen->n_sa_cmp++;
-            if (use_lcp) {
-                int v = (int)f->lcp[rkR];
-                if (v < accR)
-                    accR = v;
-            }
-            if (src < pos) {
-                int known = 0;
-                if (use_lcp) {
-                    known = accR;
-                    if (known < 0)
-                        known = 0;
-                    if (known > maxl)
-                        known = maxl;
-                }
-                sa_probe_side(f, pos, src, known, minm, maxl, best_len, out, nout, cen);
-            } else if (cen)
-                cen->n_sa_src_skip++;
-        }
-        if (adapt) {
-            if (d == 4 && *best_len >= 16) {
-                stop_at = 4;
+#if LZ0_SA_PF_K > 0
+        if (with_pf && d + LZ0_SA_PF_K <= pf_lim)
+            sa_pf_payload(sa, in, hot, r, ns, d + LZ0_SA_PF_K);
+#endif
+        if (r - d >= 0)
+            sa_probe_one(f, pos, r - d, r - d + 1, &accL, use_lcp, minm, maxl, best_len, out,
+                         nout, cen, with_cen);
+        if (r + d < ns)
+            sa_probe_one(f, pos, r + d, r + d, &accR, use_lcp, minm, maxl, best_len, out, nout,
+                         cen, with_cen);
+        if (adapt && (d == 4 || d == 8)) {
+            if (*best_len >= 16) {
+                stop_at = d;
                 break;
             }
-            if (d == 8 && *best_len >= 16) {
-                stop_at = 8;
-                break;
+#if LZ0_SA_PF_K > 0
+            if (with_pf) {
+                /* no early stop: widen the run-ahead to the next checkpoint
+                 * and catch up on the distances skipped meanwhile */
+                int lim = (d == 4 && unit_d > 8) ? 8 : unit_d;
+                for (int k = pf_lim + 1; k <= d + LZ0_SA_PF_K && k <= lim; k++)
+                    sa_pf_payload(sa, in, hot, r, ns, k);
+                pf_lim = lim;
             }
+#endif
         }
-        if (lz0_sa_multiscale == 0) {
-            d++;
-        } else if (lz0_sa_multiscale == 1) {
-            if (d < 128)
-                d++;
-            else if (d < 256)
-                d += 32;
-            else
-                d += 64;
-        } else {
-            if (d < 48)
-                d++;
-            else if (d < 128)
-                d += 8;
-            else if (d < 256)
-                d += 16;
-            else if (d < 512)
-                d += 32;
-            else
-                d += 64;
-        }
+        d = sa_next_d(d, ms);
     }
-    if (cen) {
+    if (with_cen) {
         if (stop_at == 4)
             cen->n_sa_stop4++;
         else if (stop_at == 8)
@@ -1330,6 +1386,19 @@ static void sa_probe_neighbors(lz0_finder *f, uint32_t pos, int minm, int maxl,
         else
             cen->n_sa_stop16++;
     }
+}
+
+static void sa_probe_neighbors(lz0_finder *f, uint32_t pos, int minm, int maxl,
+                               int *best_len, lz0_match *out, int *nout,
+                               lz0_sdp_census *cen) {
+    if (lz0_sa_win <= 0 || !f->sa || !f->rank)
+        return;
+    if (cen)
+        sa_probe_core(f, pos, minm, maxl, best_len, out, nout, cen, 1, 0);
+    else if (LZ0_SA_PF_K > 0 && f->n >= LZ0_SA_PF_MIN_INPUT)
+        sa_probe_core(f, pos, minm, maxl, best_len, out, nout, NULL, 0, 1);
+    else
+        sa_probe_core(f, pos, minm, maxl, best_len, out, nout, NULL, 0, 0);
 }
 
 static void sa_probe_neighbors_timed(lz0_finder *f, uint32_t pos, int minm, int maxl,
@@ -1360,7 +1429,7 @@ int lz0_find_last_len(lz0_finder *f, uint32_t pos, uint32_t last_offset) {
             census_ml(cen, ml);
             return ml;
         }
-        int ml = lz0_matchlen(f->in + pos, f->in + pos - last_offset, max_left);
+        int ml = lz0_simd_matchlen(f->in + pos, f->in + pos - last_offset, max_left);
         census_ml(cen, ml);
         return ml;
     }
@@ -1385,7 +1454,7 @@ static int bt_update(lz0_finder *f, uint32_t pos, lz0_match *out, int maxout) {
         uint32_t c2 = f->bt_head2[h2];
         f->bt_head2[h2] = pos;
         if (out && c2 != LZ0_CHAIN_NIL && maxout > 0) {
-            int ml = lz0_matchlen(in + pos, in + c2, (int)(n - pos));
+            int ml = lz0_simd_matchlen(in + pos, in + c2, (int)(n - pos));
             if (ml >= 2 && (ml > 2 || lz0_is_len2_allowed(f, pos - c2))) {
                 out[nout].offset = pos - c2;
                 out[nout].length = (uint32_t)ml;
@@ -1414,7 +1483,7 @@ static int bt_update(lz0_finder *f, uint32_t pos, lz0_match *out, int maxout) {
         int len = len0 < len1 ? len0 : len1;
         if (len < maxl && in[cur + len] == in[pos + len]) {
             len++;
-            len += lz0_matchlen(in + pos + len, in + cur + len, maxl - len);
+            len += lz0_simd_matchlen(in + pos + len, in + cur + len, maxl - len);
         }
         if (len > best) {
             best = len;
@@ -1479,7 +1548,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
     if (pos < f->rle_end) {
         rlen = (int)(f->rle_end - pos);
     } else if (pos > 0 && in[pos] == in[pos - 1]) {
-        rlen = lz0_matchlen(in + pos, in + pos - 1, maxl);
+        rlen = lz0_simd_matchlen(in + pos, in + pos - 1, maxl);
         if (rlen >= 16)
             f->rle_end = pos + (uint32_t)rlen;
     }
@@ -1492,7 +1561,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
             *last_len = ml;
             census_ml(cen, ml);
         } else {
-            int ml = lz0_matchlen(in + pos, in + pos - last_offset, max_left);
+            int ml = lz0_simd_matchlen(in + pos, in + pos - last_offset, max_left);
             *last_len = ml;
             census_ml(cen, ml);
         }
@@ -1523,7 +1592,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
         if (in[src] == in[pos]) {
             int probe = best_len > 0 ? best_len : (minm - 1);
             if (!(probe > 0 && probe < maxl && in[src + probe] != in[pos + probe])) {
-                int ml = lz0_matchlen(in + pos, in + src, maxl);
+                int ml = lz0_simd_matchlen(in + pos, in + src, maxl);
                 census_ml(cen, ml);
                 if (cen) {
                     cen->n_pow2_ml++;
@@ -1562,7 +1631,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
             if (in[src] == in[pos]) {
                 int probe = best_len > 0 ? best_len : (minm - 1);
                 if (!(probe > 0 && probe < maxl && in[src + probe] != in[pos + probe])) {
-                    int ml = lz0_matchlen(in + pos, in + src, maxl);
+                    int ml = lz0_simd_matchlen(in + pos, in + src, maxl);
                     census_ml(cen, ml);
                     if (ml >= minm) {
                         lz0_match m;
@@ -1590,7 +1659,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
             if (in[src] == in[pos]) {
                 int probe = best_len > 0 ? best_len : (minm - 1);
                 if (!(probe > 0 && probe < maxl && in[src + probe] != in[pos + probe])) {
-                    int ml = lz0_matchlen(in + pos, in + src, maxl);
+                    int ml = lz0_simd_matchlen(in + pos, in + src, maxl);
                     census_ml(cen, ml);
                     if (ml >= minm) {
                         lz0_match m;
@@ -1623,7 +1692,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
         if (in[src] == in[pos]) {
             int probe = best_len > 0 ? best_len : (minm - 1);
             if (!(probe > 0 && probe < maxl && in[src + probe] != in[pos + probe])) {
-                int ml = lz0_matchlen(in + pos, in + src, maxl);
+                int ml = lz0_simd_matchlen(in + pos, in + src, maxl);
                 census_ml(cen, ml);
                 if (ml >= minm) {
                     lz0_match match;
@@ -1645,7 +1714,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
             if (in[c3] == in[pos]) {
                 int probe = best_len > 0 ? best_len : (minm - 1);
                 if (!(probe > 0 && probe < maxl && in[c3 + probe] != in[pos + probe])) {
-                    int ml = lz0_matchlen(in + pos, in + c3, maxl);
+                    int ml = lz0_simd_matchlen(in + pos, in + c3, maxl);
                     census_ml(cen, ml);
                     if (cen)
                         cen->n_chain_check++;
@@ -1715,10 +1784,10 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
                         ml = cheap;
                         used_matchlen = 0;
                     } else {
-                        ml = lz0_matchlen(in + pos, in + cur, maxl);
+                        ml = lz0_simd_matchlen(in + pos, in + cur, maxl);
                     }
                 } else {
-                    ml = lz0_matchlen(in + pos, in + cur, maxl);
+                    ml = lz0_simd_matchlen(in + pos, in + cur, maxl);
                 }
                 if (used_matchlen)
                     census_ml(cen, ml);
@@ -1823,7 +1892,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
                     if (cur < pos && in[cur] == in[pos]) {
                         int probe = best_len > 0 ? best_len : (minm - 1);
                         if (!(probe > 0 && probe < maxl && in[cur + probe] != in[pos + probe])) {
-                            int ml = lz0_matchlen(in + pos, in + cur, maxl);
+                            int ml = lz0_simd_matchlen(in + pos, in + cur, maxl);
                             census_ml(cen, ml);
                             if (cen)
                                 cen->n_chain_check++;
@@ -1853,7 +1922,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
                 if (in[c4] == in[pos]) {
                     int probe = best_len > 0 ? best_len : (minm - 1);
                     if (!(probe > 0 && probe < maxl && in[c4 + probe] != in[pos + probe])) {
-                        int ml = lz0_matchlen(in + pos, in + c4, maxl);
+                        int ml = lz0_simd_matchlen(in + pos, in + c4, maxl);
                         census_ml(cen, ml);
                         if (cen)
                             cen->n_chain_check++;
