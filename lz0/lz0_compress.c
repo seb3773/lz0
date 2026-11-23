@@ -4,7 +4,8 @@
 #include <string.h>
 #include <time.h>
 
-/* Skip-list depth for levels 7..9 (4 bytes per level per input byte). */
+/* Skip-list depth for levels 7..9 (4 bytes per level per input byte, built
+ * on demand by the finder only when long hash-chain walks happen). */
 #ifndef LZ0_SKIP_LEVELS_HIGH
 #define LZ0_SKIP_LEVELS_HIGH 12
 #endif
@@ -164,7 +165,9 @@ int lz0_compress(const unsigned char *in, size_t in_sz,
     lz0_finder f;
     if (lz0_finder_init(&f, in, (uint32_t)in_sz, cfg) < 0)
         return -1;
-    stats->peak_ram = lz0_ram_finder((uint32_t)in_sz, cfg->jump_levels);
+    /* finder RAM without the skip list: it is only built on demand (see
+     * lz0_find.c) and added below if it was */
+    stats->peak_ram = lz0_ram_finder((uint32_t)in_sz, 0);
     if (cfg->parser == LZ0_PARSE_DP)
         stats->peak_ram += lz0_ram_dp((uint32_t)in_sz);
     if (cfg->parser == LZ0_PARSE_SDP) {
@@ -204,6 +207,8 @@ int lz0_compress(const unsigned char *in, size_t in_sz,
     else
         rc = lz0_parse_lazy(&f, &tl);
     double t2 = now_ms();
+    if (f.jmp)
+        stats->peak_ram += (size_t)in_sz * (size_t)f.jump_levels * sizeof(uint32_t);
     if (rc < 0 || !lz0_tokens_valid(&tl, (uint32_t)in_sz)) {
         lz0_toklist_free(&tl);
         lz0_finder_free(&f);

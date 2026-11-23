@@ -34,7 +34,8 @@ typedef struct {
     int max_candidates;
     int score_k;
     int max_states;
-    int jump_levels;
+    int jump_levels;     /* skip-list depth (0 = plain prev[] walks) */
+    uint64_t jmp_walked; /* prev[] links walked by multi-step walks while jmp == NULL */
     uint32_t last_insert;
     uint32_t rle_end;
     int num_strides;

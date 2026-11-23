@@ -42,6 +42,12 @@ int lz0_chain_prune = 0;
 int lz0_chain_noskip = 0;
 int lz0_skip_thresh = 0;
 int lz0_skip_stride = 0;
+
+/* Inputs shorter than this never build the hash-chain skip list (see
+ * skip_activate()); larger ones build it on demand. */
+#ifndef LZ0_SKIP_MIN_INPUT
+#define LZ0_SKIP_MIN_INPUT 4096u
+#endif
 int lz0_hash4_probe = 0;
 int lz0_deep_probe = 0;
 int lz0_sa_win = 0;
@@ -787,6 +793,9 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
         f->jump_levels = 0;
     if (f->jump_levels > LZ0_JUMP_LEVELS)
         f->jump_levels = LZ0_JUMP_LEVELS;
+    if (n < LZ0_SKIP_MIN_INPUT)
+        f->jump_levels = 0;
+    f->jmp_walked = 0;
     f->last_insert = 0;
     f->prev = NULL;
     f->head = NULL;
@@ -821,13 +830,8 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
             }
             memset(f->head3, 0xff, (size_t)LZ0_HASH_SIZE * sizeof(uint32_t));
         }
-        if (f->jump_levels > 0) {
-            f->jmp = (uint32_t *)malloc((size_t)n * (size_t)f->jump_levels * sizeof(uint32_t));
-            if (!f->jmp) {
-                lz0_finder_free(f);
-                return -1;
-            }
-        }
+        /* The skip list (jmp) is not allocated here: chain_skip() builds it
+         * on demand, see skip_activate(). */
         if (!f->prev || !f->head) {
             lz0_finder_free(f);
             return -1;
@@ -953,6 +957,40 @@ void lz0_finder_insert_upto(lz0_finder *f, uint32_t pos) {
     f->last_insert = i;
 }
 
+/*
+ * Adaptive skip list. The table costs jump_levels words per input byte and
+ * jump_levels - 1 extra loads per insertion, and only pays off when long
+ * hash-chain walks happen (redundant data). Small or low-redundancy inputs
+ * mostly walk 1-step links and never need it. So the table starts absent and
+ * multi-step walks follow prev[] while counting the links they cross; once
+ * that count exceeds what building the table for the positions inserted so
+ * far costs (jump_levels words each), the table is allocated and back-filled
+ * (ski-rental rule: at most ~2x the cost of the better static choice).
+ *
+ * Exactness: chain_skip() returns the same node and step count with or without
+ * the table, and the back-filled rows equal the incrementally built ones (row i
+ * only depends on prev[i] and rows of earlier positions), so this never
+ * changes the matches found, only how fast they are reached.
+ */
+static void skip_activate(lz0_finder *f) {
+    int L = f->jump_levels;
+    uint32_t *jmp = (uint32_t *)malloc((size_t)f->n * (size_t)L * sizeof(uint32_t));
+    if (!jmp) {
+        f->jump_levels = 0; /* plain walks give the same result */
+        return;
+    }
+    for (uint32_t i = 0; i < f->last_insert; i++) {
+        uint32_t *row = jmp + (size_t)i * (size_t)L;
+        row[0] = f->prev[i];
+        for (int k = 1; k < L; k++) {
+            uint32_t src = row[k - 1];
+            row[k] = src != LZ0_CHAIN_NIL ? jmp[(size_t)src * (size_t)L + (size_t)(k - 1)]
+                                          : LZ0_CHAIN_NIL;
+        }
+    }
+    f->jmp = jmp;
+}
+
 /* Follows `steps` prev[] links from cur. Result and *taken are exactly those
  * of the plain walk:
  *     while (t < steps && cur != NIL) { cur = prev[cur]; t++; }
@@ -969,6 +1007,11 @@ static uint32_t chain_skip(lz0_finder *f, uint32_t cur, int steps, int *taken) {
             t++;
         }
         *taken = t;
+        if (steps >= 2 && f->jump_levels > 0 && !f->jmp) {
+            f->jmp_walked += (uint64_t)t;
+            if (f->jmp_walked > (uint64_t)f->jump_levels * f->last_insert)
+                skip_activate(f);
+        }
         return cur;
     }
     const uint32_t *jmp = f->jmp;
