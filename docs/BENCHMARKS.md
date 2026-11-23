@@ -1,6 +1,6 @@
 # LZ0 Benchmarks & Performance Guide
 
-This document presents an exhaustive comparative evaluation of the **LZ0** compressor (version v0.4.0) against state-of-the-art baselines: **UPKR** (an asymmetric compressor using a rANS bitstream), **LZ4 / LZ4HC** (the industrial standard for ultra-fast decompression and its optimal parser variant), and **ZX0** (the reference for backward-compatible optimal parsing).
+This document compares **LZ0** (release tag 0.4.0 in the Makefile; bitstream v0.1) with **UPKR** (LZ plus an adaptive rANS coder), **LZ4 / LZ4HC**, and **ZX0**. ZX0 is a different bitstream. Its decoder is small and its parser is optimal; it does not read LZ0.
 
 All benchmarks in this document were measured on an **Intel(R) Core(TM) i3-9100 CPU @ 3.60GHz (Coffee Lake Refresh, 4 cores / 4 threads, 6 MiB L3 cache)** running Linux x86_64 (GCC `-O3`). Reproducible via `make bench_all`, `make bench_blobs`, and `make bench_dec`.  
 All LZ0 decompressions reported below were verified **100% bit-exact** using both reference and high-performance decoders (`lz0dec_fast`, `lz0dec_compact`, `lz0dec_min`, `lz0dec_ref`).
@@ -36,20 +36,20 @@ Multi-compressor evaluation across diverse real-world formats: machine code (ELF
 
 In many embedded environments (microcontrollers, firmware, game loaders, packed executables), resources are grouped into a **single monolithic blob** resulting from concatenating disparate files (machine code, images, tables, texts).
 
-Under **Approach A**, the compressed data remains **one continuous standard LZ0 stream**, decompressed in one pass by standard freestanding decoders (<300 bytes in C / ASM), without any intermediate container.
+Under **Approach A**, the compressed data remains **one continuous LZ0 stream**, decompressed in one pass by the freestanding decoders (`lz0dec_min` or the compact assembly), with no container between the concatenated files.
 
 ### Comparative Results on Blobs (256 KiB to 5 MiB, 3 to 15 sub-files)
 
 | Target / Contents | Raw Size | LZ0 Normal (`-6`) | LZ0 Ultra (`-9`) | UPKR | LZ4 (default) | LZ4HC (`-9`) | Decomp. Throughput `lz0dec_fast` vs UPKR |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| **`blob_png_256k`**<br>(4 PNGs) | 262 144 B | 247 444 B (94.39%) | **246 192 B (93.91%)** | 247 888 B (94.56%) [-6] | 252 446 B (96.30%) | 248 420 B (94.76%) | **1 625 MB/s** vs 17.6 MB/s (**92×**) |
-| **`blob_mix_256k`**<br>(5 files: ELF, PE, XLS, PNG, txt) | 262 144 B | 128 308 B (48.95%) | 124 976 B (47.67%) | **110 904 B (42.31%)** [-6] | 168 178 B (64.15%) | 149 335 B (56.97%) | **673 MB/s** vs 37.9 MB/s (**18×**) |
-| **`blob_png_512k`**<br>(8 PNGs) | 524 288 B | 504 340 B (96.20%) | **502 292 B (95.80%)** | 508 723 B (97.03%) [-2] | 511 352 B (97.53%) | 505 646 B (96.44%) | **2 160 MB/s** vs 17.1 MB/s (**126×**) |
-| **`blob_mix_512k`**<br>(7 files: ELF, PE, 2 PNGs, XLS, C, txt) | 524 288 B | 286 813 B (54.71%) | 281 539 B (53.70%) | **260 451 B (49.68%)** [-2] | 352 088 B (67.16%) | 318 022 B (60.66%) | **767 MB/s** vs 32.2 MB/s (**24×**) |
-| **`blob_png_2m`**<br>(8 distinct PNGs > 200 KiB) | 2 097 152 B | 2 057 017 B (98.09%) | **2 051 622 B (97.83%)** | 2 089 034 B (99.61%) [-1] | 2 067 355 B (98.58%) | 2 053 832 B (97.93%) | **4 042 MB/s** vs ~15 MB/s (**269×**) |
-| **`blob_mix_2m`**<br>(9 files: ELF, PE, 3 PNGs, XLS, txt, C, HTML) | 2 097 152 B | 1 204 218 B (57.42%) | 1 181 308 B (56.33%) | **1 125 643 B (53.67%)** [-1] | 1 484 306 B (70.78%) | 1 308 970 B (62.42%) | **681 MB/s** vs ~15 MB/s (**45×**) |
-| **`blob_png_5m`**<br>(15 distinct PNGs) | 5 242 880 B | **4 362 141 B (83.20%)** | **4 353 045 B (83.03%)** | *(excluded >20 min)* | 5 210 986 B (99.39%) | 5 183 917 B (98.88%) | **3 606 MB/s** vs - |
-| **`blob_mix_5m`**<br>(15 distinct real-world files) | 5 242 880 B | 2 219 217 B (42.33%) | **2 157 767 B (41.16%)** | *(excluded >30 min)* | 3 093 616 B (59.01%) | 2 554 646 B (48.73%) | **733 MB/s** vs - |
+| **`blob_png_256k`**<br>(4 PNGs) | 262 144 B | 247 405 B (94.38%) | **246 192 B (93.91%)** | 247 888 B (94.56%) [-6] | 252 446 B (96.30%) | 248 420 B (94.76%) | **1 625 MB/s** vs 17.6 MB/s (**92×**) |
+| **`blob_mix_256k`**<br>(5 files: ELF, PE, XLS, PNG, txt) | 262 144 B | 128 155 B (48.89%) | 124 976 B (47.67%) | **110 904 B (42.31%)** [-6] | 168 178 B (64.15%) | 149 335 B (56.97%) | **673 MB/s** vs 37.9 MB/s (**18×**) |
+| **`blob_png_512k`**<br>(8 PNGs) | 524 288 B | 504 320 B (96.19%) | **502 292 B (95.80%)** | 508 723 B (97.03%) [-2] | 511 352 B (97.53%) | 505 646 B (96.44%) | **2 160 MB/s** vs 17.1 MB/s (**126×**) |
+| **`blob_mix_512k`**<br>(7 files: ELF, PE, 2 PNGs, XLS, C, txt) | 524 288 B | 286 374 B (54.62%) | 281 539 B (53.70%) | **260 451 B (49.68%)** [-2] | 352 088 B (67.16%) | 318 022 B (60.66%) | **767 MB/s** vs 32.2 MB/s (**24×**) |
+| **`blob_png_2m`**<br>(8 distinct PNGs > 200 KiB) | 2 097 152 B | 2 056 945 B (98.08%) | **2 051 622 B (97.83%)** | 2 089 034 B (99.61%) [-1] | 2 067 355 B (98.58%) | 2 053 832 B (97.93%) | **4 042 MB/s** vs ~15 MB/s (**269×**) |
+| **`blob_mix_2m`**<br>(9 files: ELF, PE, 3 PNGs, XLS, txt, C, HTML) | 2 097 152 B | 1 198 585 B (57.15%) | 1 181 308 B (56.33%) | **1 125 643 B (53.67%)** [-1] | 1 484 306 B (70.78%) | 1 308 970 B (62.42%) | **681 MB/s** vs ~15 MB/s (**45×**) |
+| **`blob_png_5m`**<br>(15 distinct PNGs) | 5 242 880 B | **4 362 024 B (83.20%)** | **4 353 045 B (83.03%)** | *(excluded >20 min)* | 5 210 986 B (99.39%) | 5 183 917 B (98.88%) | **3 606 MB/s** vs - |
+| **`blob_mix_5m`**<br>(15 distinct real-world files) | 5 242 880 B | 2 191 126 B (41.79%) | **2 157 767 B (41.16%)** | *(excluded >30 min)* | 3 093 616 B (59.01%) | 2 554 646 B (48.73%) | **733 MB/s** vs - |
 
 ---
 
@@ -99,15 +99,15 @@ While standard LZ4 prioritizes extreme single-pass encoding throughput, **LZ4HC*
 ### Technical Analysis: Why LZ4HC Cannot Reach LZ0 Density
 
 1. **The 64 KiB Window Ceiling**:  
-   LZ4 offsets are structurally restricted to `uint16_t` (65,535 bytes maximum distance). On inputs $\ge 1$ MiB, repetitions distant by more than 64 KiB are completely invisible to LZ4HC. LZ0 uses unbounded prefix codes (Elias gamma MSB + 8-bit LSB), allowing it to match across megabytes. On `blob_png_5m.bin`, LZ0 Ultra saves **830 KiB** over LZ4HC.
+   LZ4 offsets are structurally restricted to `uint16_t` (65,535 bytes maximum distance). On inputs $\ge 1$ MiB, repetitions distant by more than 64 KiB are completely invisible to LZ4HC. LZ0 uses unbounded prefix codes (Elias gamma MSB + 8-bit LSB), allowing it to match across megabytes. On `blob_png_5m.bin`, LZ0 Ultra saves **830,872 bytes** over LZ4HC.
 2. **Byte-Aligned Token Tax**:  
    LZ4 requires 1 full byte for its token (run lengths) plus 2 full bytes for offset, establishing a minimum match overhead of 24 bits. In LZ0, a single control bit dictates token type, and `MatchLast` reuses the previous offset for only 1 bit plus length code.
 3. **No Inflation on High Entropy**:  
-   LZ4 expands non-compressible files by 0.3% to 1.0%. LZ0 avoids inflation via exact dynamic programming cost margins.
+   On the raw textures and `star.png` in this set, LZ4 grows the file by about 0.3% to 0.4%. LZ0 -9 stays at or under the original size on `avatar.jpg` and grows `star.png` by 0.21%.
 4. **Minimal Decoder Equivalence**:  
    While a bare-metal unsafe LZ4 decompressor can be written in ~150–200 bytes of assembly (or ~1–2 KiB safe), LZ0's standalone compact assembly decoders achieve a minimal footprint (~1.1–1.3 KiB code size, 0 heap, 0 stack) despite decoding variable-bit Elias gamma codes and unbounded window offsets. The minimal C99 decoder (`lz0dec_min.c`) compiles to only ~800–900 bytes with `-Os` (806–894 B on RV32IMC).
 5. **Decompression Throughput**:  
-   While LZ4's pure byte alignment enables 2,000–3,500 MB/s decompression, LZ0 FAST ASM provides 400–1,350 MB/s on code/text and 1,500–4,000+ MB/s on multimedia, outperforming ZX0 (10–30 MB/s) and UPKR (15–40 MB/s) by 10× to 100×.
+   In section 4, LZ4 decompresses text and binaries at about 1.9–3.4 GB/s, and faster on the images. The fast LZ0 decoder is the 400–1,350 MB/s band on those text and binary files. UPKR's C unpacker in the same table spans 16–175 MB/s. ZX0 decode speed was not measured here.
 
 ---
 
@@ -186,7 +186,7 @@ make bench_dec_riscv64  # RISC-V 64 throughput micro-benchmarks (QEMU)
 ### Strict Length-2 Profitability Filtering
 In high-entropy streams (JPEG, MP3, PNG, encrypted binaries), emitting a 2-byte LZ77 match with a large offset costs more command bits than emitting 2 raw literals.
 - LZ0 enforces a strict filter in default modes: length-2 matches are only permitted if the offset is tiny ($\le 32$) or if it is a **repeat offset** (zero offset bits).
-- Result: total elimination of residual inflation on pre-compressed streams (`avatar.jpg` stays below 100%).
+- On `avatar.jpg`, both -6 and -9 stay under the original size (99.82% and 99.56%). `star.png` still grows: 100.46% at -6, 100.21% at -9.
 
 ### Audio & Multimedia Periodicity Detection (Parity-Safe Strides)
 - **Audio MP3 CBR**: MPEG Layer III frame headers are synchronized via a strict filter validating the sync word `0xFF 0xE0`, exact 4-byte header repetition (`memcmp(win+i, win+i-p, 4) == 0`), the Layer III bit, and valid bitrates, eliminating 100% of false positives on graphic textures.
@@ -194,8 +194,6 @@ In high-entropy streams (JPEG, MP3, PNG, encrypted binaries), emitting a 2-byte 
 
 ### Dedicated SoA Ultra Parser ($K=128..12$) and Multi-Scale SA-IS
 - In Ultra mode (`-9`), the dedicated `lz0_parse_ultra` parser uses a compact Structure-of-Arrays representation (12 bytes per state), a 64-bit Bloom filter, and cost-margin pruning:
-  - **$K=128$** for files $\le 512$ KiB (maximum capture of offset interactions).
-  - **$K=64$** around 1 MiB (keeps DP RAM usage calibrated to `lz0_ultra_budget`).
-  - **$K=32$** at 2 MiB and **$K=12$** at 5 MiB (prevents memory explosion on multi-megabyte streams).
+  - **K=128** below 512 KiB, **K=63** at 1 MiB, **K=31** at 2 MiB, **K=12** at 5 MiB. The count is `budget / ((n + 1) * 12)` with a 768 MiB budget, a cap of 128, and a floor of 12. At 16 MiB the ultra parser stops and the generic SDP parser runs with K=32.
 - Length-2 matches are evaluated without offset restrictions (`lz0_len2_max_off = 0`), unlocking massive gains on tabular and multimedia formats (RGB24 textures, RGBA32, XLS) without degrading high-entropy data thanks to margin pruning.
-- Suffix Array window sampling combines a dense linear window $1 \dots 128$ and geometric jumps $\{160, 192, 256, 320, 384, 512\}$, capturing distant dependencies on large files without increasing comparison overhead.
+- Suffix-array probing at level 9 walks ranks 1 through 128, then steps by 32 and by 64: 160, 192, 224, 256, 320, 384, 448, 512.

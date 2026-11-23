@@ -62,7 +62,7 @@ if bit_mask == 0:
 return (bit_value & bit_mask) != 0
 ```
 
-LSB=8 uses no backtrack. After `read_byte` for a literal or offset LSB, later bits come from a new control byte via the `bit_mask == 0` refill above.
+LSB=8 uses no backtrack. `read_byte` does not change `bit_mask`. Control bits still waiting in the current control byte are consumed next. A new control byte is read only when `bit_mask` has shifted down to 0. The low bit of an offset remainder byte is not reused as a flag.
 
 ## Elias gamma
 

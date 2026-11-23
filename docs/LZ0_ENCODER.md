@@ -69,14 +69,19 @@ Level 9 uses `lz0_parse_ultra` (`lz0/lz0_ultra.c`) instead of the generic SDP:
 
 - States `(last_offset, after_literal)` stored as compact 12-byte
   structure-of-arrays rows, with a 64-bit key filter and a cached worst slot.
-- State count is set by a memory budget (`lz0_ultra_budget`, 768 MiB):
-  up to 128 states for small inputs, 64 at 1 MiB, 32 at 2 MiB, 12 minimum.
+- State count follows `lz0_ultra_budget` (768 MiB) at 12 bytes per state
+  per input position: `K = budget / ((n + 1) * 12)`, capped at 128 and
+  floored at 12. That is 128 below 512 KiB, 63 at 1 MiB, 31 at 2 MiB,
+  and 12 at 5 MiB.
 - Margin prune: a state costing more than `row_best + 32 + elias(msb(offset))`
   bits is dropped (a single repeat match cannot win that back in practice).
 - Length-2 matches are allowed at any offset (`lz0_len2_max_off = 0`).
 - Inside long byte runs the finder still searches the last 64 positions
   (`lz0_rle_tail`), so matches that continue past a run are found.
-- Inputs of 16 MiB or more fall back to the generic SDP parser.
+- From 16 MiB (`n > 0x00ffffff`) `lz0_parse_ultra` calls the generic SDP
+  parser, because the position no longer fits in the packed state. The
+  level-9 finder is unchanged. SDP uses `max_states`, which level 9 sets
+  to 32.
 
 An exhaustive ZX0-style reference parser (`bench/ultra/lz0_opt_ref.c`) shows
 the remaining gap to optimal is about 0.05 % on 32 KiB samples.

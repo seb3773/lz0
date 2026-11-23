@@ -70,10 +70,10 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "  %s -h, --help                           Show this help message\n", prog);
     fprintf(stderr, "  %s -v, --version                        Show version\n\n", prog);
     fprintf(stderr, "Available engines on this platform:\n");
-    fprintf(stderr, "  min      : Minimal C99 micro-decoder (~40 lines, ~200 bytes)\n");
-#if (defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)) && !defined(_WIN32)
-    fprintf(stderr, "  compact  : Compact table-free ASM decoder (~1.3 KiB, 0 tables)\n");
-    fprintf(stderr, "  fast     : High-throughput dual-engine FAST ASM decoder (~2.7 KiB, 1+ GB/s)\n");
+    fprintf(stderr, "  min      : Minimal C decoder (lz0dec_min), no heap\n");
+#if (defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64) || (defined(__riscv) && __riscv_xlen == 64)) && !defined(_WIN32)
+    fprintf(stderr, "  compact  : Compact table-free ASM decoder\n");
+    fprintf(stderr, "  fast     : High-throughput ASM decoder\n");
 #endif
 }
 
@@ -104,7 +104,7 @@ static int run_benchmark(const char *path, const unsigned char *pay, size_t psz,
         dec_fn fn;
     } engines[] = {
         { "min",     "C minimal (lz0dec_min)",            lz0dec_min },
-#if (defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)) && !defined(_WIN32)
+#if (defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64) || (defined(__riscv) && __riscv_xlen == 64)) && !defined(_WIN32)
         { "compact", "ASM Compact (lz0dec_compact)",      lz0dec_compact },
         { "fast",    "ASM FAST (lz0dec_fast)",            lz0dec_fast },
 #endif
