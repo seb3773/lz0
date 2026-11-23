@@ -19,7 +19,7 @@ LZ0DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.S lz0/lz0dec_fa
 
 VERSION ?= 0.4.0
 
-.PHONY: all bench clean test smoke bounds diag lite32 state sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz guard simd enc_bench enc_tiers lz0 lz0dec cli sanitize valgrind bench_all bench_ratio bench_dec bench_dec_arm64 bench_dec_riscv64 bench_blobs test_arm64 arm64 test_riscv64 riscv64 windows dist dist_linux dist_arm64 dist_riscv64 dist_windows
+.PHONY: all bench clean test smoke bounds diag lite32 state sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz guard simd enc_bench enc_tiers find_bench lz0 lz0dec cli sanitize valgrind bench_all bench_ratio bench_dec bench_dec_arm64 bench_dec_riscv64 bench_blobs test_arm64 arm64 test_riscv64 riscv64 windows dist dist_linux dist_arm64 dist_riscv64 dist_windows
 
 all: bench/lz0_bench bench/lz0_smoke bench/lz0_bounds bench/lz0_diag_rep bench/lz0_lite32 bench/lz0_diag_state bench/lz0_sdp32 bench/lz0_scale bench/lz0_prof bench/lz0_cmpfind bench/lz0_jumpsweep bench/lz0_pruneab bench/lz0_bits bench/lz0_final
 
@@ -293,6 +293,17 @@ enc_bench: bench/lz0_enc_bench
 # Same streams with each SIMD tier forced: hashes must be identical.
 enc_tiers: bench/lz0_enc_bench
 	@for t in 2 1 0; do echo "== LZ0_SIMD=$$t"; LZ0_SIMD=$$t ./bench/lz0_enc_bench 1 1,6,9 bench/corpus/cp.html bench/corpus/fields.c bench/corpus/sum | grep -v TOTAL; done
+
+bench/lz0_find_bench: bench/find_bench.c $(LZ0_SRC)
+	$(CC) $(CFLAGS) -o $@ bench/find_bench.c $(LZ0_SRC)
+
+FIND_BENCH_LEVELS ?= 1,6,8,9
+
+# Match-finder alone (insert + find_matches at every position): best-of-N
+# time and an FNV-1a hash of every candidate list. Two builds return the
+# same candidates iff all hashes match.
+find_bench: bench/lz0_find_bench
+	./bench/lz0_find_bench $(ENC_BENCH_REPS) $(FIND_BENCH_LEVELS) $(ENC_BENCH_FILES)
 
 SANITIZE_CFLAGS = -fsanitize=address,undefined -fno-omit-frame-pointer -g -O2 -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Wno-unused-parameter -Izx0_compressor -Izx0_decompressor -Ilz0
 

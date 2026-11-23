@@ -1085,9 +1085,25 @@ int lz0_is_len2_allowed(const lz0_finder *f, uint32_t off) {
 static inline int is_valid_candidate(const lz0_finder *f, uint32_t len, uint32_t off) {
     if (len < 2 || off == 0)
         return 0;
-    if (len == 2 && !lz0_is_len2_allowed(f, off))
-        return 0;
+    /* lz0_is_len2_allowed() with its two early accepts folded into a single
+     * (mostly not taken) branch in front of the stride scan */
+    int mo = lz0_len2_max_off;
+    if ((len == 2) & (mo > 0) & (off > (uint32_t)mo))
+        return lz0_is_len2_allowed(f, off);
     return 1;
+}
+
+static inline int lz0_kc_ctz32(uint32_t v) {
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_ctz(v);
+#else
+    int k = 0;
+    while (!(v & 1u)) {
+        v >>= 1;
+        k++;
+    }
+    return k;
+#endif
 }
 
 /* Candidate lists up to this size are searched with inline scalar code. */
@@ -1109,11 +1125,16 @@ static int keep_candidate(lz0_finder *f, lz0_match *out, int *n, int max_c, lz0_
     int cnt = *n;
     int i;
     if (cnt <= LZ0_KC_SCALAR_MAX) {
-        /* short lists (fast levels): an inline scan beats a kernel call */
-        for (i = 0; i < cnt && f->kc_off[i] != m.offset; i++)
-            ;
-        if (i == cnt)
-            i = -1;
+        /* short lists (fast levels): an inline scan beats a kernel call.
+         * Branch-free over the whole fixed-size window (no data-dependent
+         * exit), masked to the live entries: same first match index as an
+         * early-exit loop. Slots >= cnt hold stale but initialised offsets
+         * (the finder is zeroed at init). */
+        uint32_t eq = 0;
+        for (int j = 0; j < LZ0_KC_SCALAR_MAX; j++)
+            eq |= (uint32_t)(f->kc_off[j] == m.offset) << j;
+        eq &= (uint32_t)((1ull << cnt) - 1u);
+        i = eq ? lz0_kc_ctz32(eq) : -1;
     } else {
         i = lz0_simd_find_u32(f->kc_off, cnt, m.offset);
     }
@@ -1524,6 +1545,542 @@ static int bt_update(lz0_finder *f, uint32_t pos, lz0_match *out, int maxout) {
     return nout;
 }
 
+/*
+ * Fixed-offset and hash-chain probing (power-of-two, binary-aligned, stride,
+ * MRU, hash-chain walk, deep and hash4 probes).
+ *
+ * Exactness contract: the candidate list, best_len and every census counter
+ * are those of the straightforward per-source loop
+ *
+ *     if (in[src] == in[pos] && probe byte matches) { ml = matchlen; keep }
+ *
+ * run over the same sources in the same order (bit-exact streams, v0.4.0).
+ * The transformations used:
+ *
+ *  - Early-reject prefix test on a 16-bit word (bytes 0 and 1) instead of
+ *    byte 0 alone. min_match is >= 2 (lz0_finder_init clamps it), so a source
+ *    whose first two bytes differ has ml < 2 <= minm: the baseline computes
+ *    its matchlen and drops it without touching best_len or the list. The
+ *    census path (with_cen) keeps the byte-0-only test so that the matchlen
+ *    counters it reports are unchanged.
+ *  - Batching: for fixed offset lists (power-of-two, binary, stride, MRU) the
+ *    source list never depends on probe results, so all prefix tests run
+ *    first, branch-free (independent loads, no mispredicts), into a hit mask.
+ *    Hits then take the order-dependent part (probe byte from the current
+ *    best_len, matchlen, keep_candidate) in increasing list order, which is
+ *    the baseline order.
+ *  - Chain-walk run-ahead: the next prev[] link is loaded, and the payload it
+ *    points to prefetched, before the data-dependent checks of the current
+ *    node; the chain head slot of pos + 1 is prefetched for the next call.
+ *  - Deep probe from checkpoints: the deep probe needs the nodes 31..255
+ *    links behind the head, which the chain walk has (mostly) just crossed.
+ *    The walk records, per deep target, its last node at or before that
+ *    link depth; the deep probe resumes from there (skip list if present)
+ *    instead of re-walking up to 255 dependent links from the head.
+ */
+static inline uint32_t lz0_ld16(const unsigned char *p) {
+    uint16_t v;
+    memcpy(&v, p, sizeof(v));
+    return v;
+}
+
+/* lz0_ld16() mask of the early-reject prefix test (see above). */
+static inline uint32_t lz0_prefix_mask(const int with_cen) {
+    if (!with_cen)
+        return 0xffffu;
+    const unsigned char b0[2] = {0xff, 0x00};
+    uint16_t m;
+    memcpy(&m, b0, sizeof(m));
+    return m;
+}
+
+static inline int lz0_ctz64(uint64_t v) {
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_ctzll(v);
+#else
+    int k = 0;
+    while (!(v & 1u)) {
+        v >>= 1;
+        k++;
+    }
+    return k;
+#endif
+}
+
+/* Number of powers of two <= pos (0 for pos == 0). */
+static inline int lz0_pow2_count(uint32_t pos) {
+#if defined(__GNUC__) || defined(__clang__)
+    return pos ? 32 - __builtin_clz(pos) : 0;
+#else
+    int k = 0;
+    while (pos) {
+        pos >>= 1;
+        k++;
+    }
+    return k;
+#endif
+}
+
+/* Order-dependent tail of one probe, for a source that passed the prefix
+ * test: probe byte at the current best_len, matchlen, keep. Returns ml, or
+ * -1 when the probe byte rejected the source. */
+static LZ0_ALWAYS_INLINE int probe_tail(lz0_finder *f, const unsigned char *in, uint32_t pos,
+                                        uint32_t src, uint32_t off, int minm, int maxl,
+                                        int *best_len, lz0_match *out, int *nout,
+                                        lz0_sdp_census *cen) {
+    int probe = *best_len > 0 ? *best_len : (minm - 1);
+    if (probe > 0 && probe < maxl && in[src + probe] != in[pos + probe])
+        return -1;
+    int ml = lz0_simd_matchlen(in + pos, in + src, maxl);
+    census_ml(cen, ml);
+    if (ml >= minm) {
+        lz0_match m;
+        m.offset = off;
+        m.length = (uint32_t)ml;
+        if (ml > *best_len)
+            *best_len = ml;
+        /* keep_candidate() starts with this test and returns at once when it
+         * fails (nothing touched): skip the call for those candidates */
+        if (is_valid_candidate(f, m.length, m.offset))
+            keep_candidate(f, out, nout, f->max_candidates, m);
+    }
+    return ml;
+}
+
+/* Stride multiplier schedules: 1..L step 1, then doubling up to 1024. */
+#define LZ0_STRIDE_NM8 15
+#define LZ0_STRIDE_NM32 37
+static const uint16_t lz0_stride_mul8[LZ0_STRIDE_NM8] = {
+    1, 2, 3, 4, 5, 6, 7, 8, 16, 32, 64, 128, 256, 512, 1024
+};
+static const uint16_t lz0_stride_mul32[LZ0_STRIDE_NM32] = {
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+    17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
+    64, 128, 256, 512, 1024
+};
+
+static const uint16_t lz0_bin_offsets[40] = {
+    4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64,
+    72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176,
+    184, 192, 200, 208, 216, 224, 232, 240, 248, 256
+};
+
+/* Node `steps` prev[] links behind cur (NIL when the chain is shorter):
+ * the plain walk  while (steps-- && cur != NIL) cur = prev[cur];  computed
+ * with the skip list when it exists. Read-only: unlike chain_skip() it
+ * never feeds the skip-list build heuristic, so callers that did not walk
+ * in the baseline do not change when the table gets built. */
+static uint32_t chain_node_at(const lz0_finder *f, uint32_t cur, int steps) {
+    const uint32_t *jmp = f->jmp;
+    if (!jmp || steps < 2) {
+        while (steps > 0 && cur != LZ0_CHAIN_NIL) {
+            cur = f->prev[cur];
+            steps--;
+        }
+        return cur;
+    }
+    const int L = f->jump_levels;
+    for (int k = L - 1; k >= 0 && cur != LZ0_CHAIN_NIL; k--) {
+        while (steps >= (1 << k) && cur != LZ0_CHAIN_NIL) {
+            cur = jmp[(size_t)cur * (size_t)L + (size_t)k];
+            steps -= 1 << k;
+        }
+    }
+    return cur;
+}
+
+/* Deep-probe depths (lz0_deep_probe = 1..4): the node at depth d is the
+ * one d - 1 links behind the chain head. */
+static const int lz0_deep_d1[] = {64};
+static const int lz0_deep_d2[] = {64, 128};
+static const int lz0_deep_d3[] = {32, 64, 128};
+static const int lz0_deep_d4[] = {32, 64, 128, 256};
+
+static inline int deep_depths(const int **ds) {
+    switch (lz0_deep_probe) {
+    case 1: *ds = lz0_deep_d1; return 1;
+    case 2: *ds = lz0_deep_d2; return 2;
+    case 3: *ds = lz0_deep_d3; return 3;
+    case 4: *ds = lz0_deep_d4; return 4;
+    default: *ds = NULL; return 0;
+    }
+}
+
+/* Deep-probe checkpoints recorded by the hash-chain walk: for each deep
+ * target t[i] (links behind the head), node[i] is the walk's last node at
+ * link depth links[i] <= t[i]. The deep probe then resumes from there
+ * instead of re-walking the chain from the head. */
+typedef struct {
+    int nd, dt;
+    int t[4];
+    int links[4];
+    uint32_t node[4];
+} deep_track;
+
+static LZ0_ALWAYS_INLINE void deep_track_at(deep_track *d, uint32_t cur, int links) {
+    while (d->dt < d->nd && links > d->t[d->dt]) {
+        d->dt++;
+        if (d->dt < d->nd) {
+            d->node[d->dt] = d->node[d->dt - 1];
+            d->links[d->dt] = d->links[d->dt - 1];
+        }
+    }
+    if (d->dt < d->nd) {
+        d->node[d->dt] = cur;
+        d->links[d->dt] = links;
+    }
+}
+
+/* with_cen is a compile-time constant at both call sites (see
+ * lz0_find_matches): the census-free path carries no census code. */
+static LZ0_ALWAYS_INLINE void hash_probe_core(lz0_finder *f, uint32_t pos, int minm, int maxl,
+                                              int *best_len_io, lz0_match *out, int *nout_io,
+                                              lz0_sdp_census *cen, const int with_cen) {
+    const unsigned char *in = f->in;
+    const uint32_t n = f->n;
+    int best_len = *best_len_io;
+    int nout = *nout_io;
+    lz0_sdp_census *cc = with_cen ? cen : NULL;
+    const uint32_t pm = lz0_prefix_mask(with_cen);
+    /* pos + minm <= n and minm >= 2: both prefix bytes of pos are in range,
+     * and so are those of every source src < pos */
+    const uint32_t w0 = lz0_ld16(in + pos) & pm;
+
+    /* Deep-probe targets, tracked by the chain walk (census-free path; the
+     * census path runs the deep probe's own walk so its counters stay). */
+    deep_track dtk;
+    const int *ds = NULL;
+    int nd = f->head ? deep_depths(&ds) : 0;
+    const int track = !with_cen && nd > 0;
+    uint32_t chain_head = LZ0_CHAIN_NIL;
+    int have_ck = 0;
+    dtk.nd = nd;
+    dtk.dt = 0;
+    for (int i = 0; i < nd; i++)
+        dtk.t[i] = ds[i] - 1;
+
+    /* Run-ahead for the next position (the parsers query every position in
+     * order): its chain head slot is a likely miss of the next call. */
+    if (!with_cen && f->head && pos + 1 < n)
+        LZ0_PREFETCH_R(&f->head[hash_at(f, pos + 1)]);
+
+    double t_pow0 = 0, t_ch0 = 0;
+    if (with_cen)
+        t_pow0 = sa_now_ms();
+    if (lz0_sa_win <= 0 || lz0_sa_hybrid) {
+        /* power-of-two offsets 1, 2, 4, ... <= pos */
+        int np = lz0_pow2_count(pos);
+        uint64_t hits = 0;
+        for (int k = 0; k < np; k++)
+            hits |= (uint64_t)((lz0_ld16(in + pos - (1u << k)) & pm) == w0) << k;
+        if (with_cen)
+            cen->n_pow2 += (uint64_t)np;
+        while (hits) {
+            uint32_t off = 1u << lz0_ctz64(hits);
+            hits &= hits - 1;
+            int ml = probe_tail(f, in, pos, pos - off, off, minm, maxl, &best_len, out, &nout, cc);
+            if (with_cen && ml >= 0) {
+                cen->n_pow2_ml++;
+                if (ml >= minm)
+                    cen->n_pow2_ok++;
+            }
+        }
+    }
+    if (with_cen)
+        cen->ms_hash_pow2 += sa_now_ms() - t_pow0;
+
+    /* Levier 2: 4-byte and 8-byte aligned small offset probes for executable binaries */
+    if (f->max_candidates >= 32) {
+        uint64_t hits = 0;
+        if (pos >= 256u) {
+            /* every offset of the table is in range: fixed trip count */
+            for (int b = 0; b < 40; b++)
+                hits |= (uint64_t)((lz0_ld16(in + pos - lz0_bin_offsets[b]) & pm) == w0) << b;
+        } else {
+            for (int b = 0; b < 40 && (uint32_t)lz0_bin_offsets[b] <= pos; b++)
+                hits |= (uint64_t)((lz0_ld16(in + pos - lz0_bin_offsets[b]) & pm) == w0) << b;
+        }
+        while (hits) {
+            uint32_t off = lz0_bin_offsets[lz0_ctz64(hits)];
+            hits &= hits - 1;
+            probe_tail(f, in, pos, pos - off, off, minm, maxl, &best_len, out, &nout, cc);
+        }
+    }
+
+    /* Levier 1: Periodic stride match probing. Offsets are stride times
+     * the multipliers 1, 2, .., L (L = 8, or 32 for strides >= 512), then
+     * 2L, 4L, .., 1024, up to pos. */
+    for (int s = 0; s < f->num_strides; s++) {
+        uint32_t stride = f->strides[s];
+        if (stride < 2)
+            continue;
+        const uint16_t *mul = stride >= 512 ? lz0_stride_mul32 : lz0_stride_mul8;
+        const int nm = stride >= 512 ? LZ0_STRIDE_NM32 : LZ0_STRIDE_NM8;
+        uint64_t hits = 0;
+        /* exactly the former loop: it stopped at the first product (as a
+         * uint32_t) beyond pos */
+        for (int i = 0; i < nm; i++) {
+            uint32_t off = (uint32_t)mul[i] * stride;
+            if (off > pos)
+                break;
+            hits |= (uint64_t)((lz0_ld16(in + pos - off) & pm) == w0) << i;
+        }
+        while (hits) {
+            uint32_t off = (uint32_t)mul[lz0_ctz64(hits)] * stride;
+            hits &= hits - 1;
+            probe_tail(f, in, pos, pos - off, off, minm, maxl, &best_len, out, &nout, cc);
+        }
+    }
+
+    /* Levier 2: Bridge matching via MRU cache of recent match offsets. The
+     * fixed 8-slot window is tested branch-free; slots past n_mru, empty
+     * (0) or beyond pos are masked out (their test reads pos itself). */
+    {
+        uint32_t hits = 0;
+        for (int m = 0; m < 8; m++) {
+            uint32_t off = f->mru[m];
+            uint32_t ok = (uint32_t)((m < f->n_mru) & (off != 0) & (off <= pos));
+            uint32_t src = ok ? pos - off : pos;
+            hits |= (ok & (uint32_t)((lz0_ld16(in + src) & pm) == w0)) << m;
+        }
+        while (hits) {
+            uint32_t off = f->mru[lz0_ctz64(hits)];
+            hits &= hits - 1;
+            probe_tail(f, in, pos, pos - off, off, minm, maxl, &best_len, out, &nout, cc);
+        }
+    }
+
+    if (lz0_chain_prune == 4 && f->head3 && pos + 2 < n) {
+        uint32_t c3 = f->head3[hash3(in + pos)];
+        if (c3 != LZ0_CHAIN_NIL && c3 < pos) {
+            if (with_cen)
+                cen->n_chain_visit++;
+            if ((lz0_ld16(in + c3) & pm) == w0) {
+                int ml = probe_tail(f, in, pos, c3, pos - c3, minm, maxl, &best_len, out, &nout, cc);
+                if (with_cen && ml >= 0)
+                    cen->n_chain_check++;
+            }
+        }
+    }
+
+    if ((lz0_sa_win <= 0 || lz0_sa_hybrid) && f->head) {
+        if (with_cen)
+            t_ch0 = sa_now_ms();
+        const uint32_t *prev = f->prev;
+        uint32_t h = hash_at(f, pos);
+        uint32_t cur = f->head[h];
+        chain_head = cur;
+        have_ck = 1;
+        dtk.node[0] = cur;
+        dtk.links[0] = 0;
+        int links = 0; /* prev[] links from the head to cur */
+        if (with_cen) {
+            cen->n_hash_comp++;
+            cen->n_head++;
+        }
+        int checks = 0;
+        int gap = 1;
+        int near = 4;
+        int visited = 0;
+        int visit_lim = 1 << 16;
+
+        while (cur != LZ0_CHAIN_NIL && checks < f->max_chain && visited < visit_lim) {
+            if (track)
+                deep_track_at(&dtk, cur, links);
+            if (cur >= pos) {
+                cur = prev[cur];
+                links++;
+                visited++;
+                if (with_cen) {
+                    cen->n_chain_visit++;
+                    cen->n_prev++;
+                }
+                continue;
+            }
+            visited++;
+            if (with_cen)
+                cen->n_chain_visit++;
+            if (lz0_chain_prune == 2) {
+                int hit4 = 0;
+                if (maxl >= 4 &&
+                    in[cur] == in[pos] &&
+                    in[cur + 1] == in[pos + 1] &&
+                    in[cur + 2] == in[pos + 2] &&
+                    in[cur + 3] == in[pos + 3])
+                    hit4 = 1;
+                if (!hit4) {
+                    cur = prev[cur];
+                    links++;
+                    continue;
+                }
+            }
+            /* Run-ahead: issue the next link (always the first step of the
+             * advance below: cur != NIL) and the payload of the node it
+             * points to before the data-dependent checks, so the dependent
+             * chain load overlaps them instead of following a mispredict.
+             * A NIL link prefetches the current (hot) line instead. */
+            uint32_t nxt = prev[cur];
+            LZ0_PREFETCH_R(in + (nxt < pos ? nxt : cur));
+            if ((lz0_ld16(in + cur) & pm) == w0) {
+                int probe = best_len > 0 ? best_len : (minm - 1);
+                if (!(probe > 0 && probe < maxl && in[cur + probe] != in[pos + probe])) {
+                    int ml;
+                    int used_matchlen = 1;
+                    if (lz0_chain_prune == 1) {
+                        int cheap = cheap_ml_a(in, cur, pos, maxl);
+                        if (cheap >= 0) {
+                            ml = cheap;
+                            used_matchlen = 0;
+                        } else {
+                            ml = lz0_simd_matchlen(in + pos, in + cur, maxl);
+                        }
+                    } else {
+                        ml = lz0_simd_matchlen(in + pos, in + cur, maxl);
+                    }
+                    if (used_matchlen)
+                        census_ml(cc, ml);
+                    if (with_cen) {
+                        cen->n_chain_check++;
+                        cen->n_chain_ml++;
+                        if (ml >= minm)
+                            cen->n_chain_ok++;
+                    }
+                    if (ml >= minm) {
+                        lz0_match m;
+                        m.offset = pos - cur;
+                        m.length = (uint32_t)ml;
+                        if (ml > best_len)
+                            best_len = ml;
+                        keep_candidate(f, out, &nout, f->max_candidates, m);
+                        if (best_len >= 65536 && nout >= 2)
+                            break;
+                    }
+                } else if (with_cen)
+                    cen->n_chain_rej_probe++;
+            } else if (with_cen)
+                cen->n_chain_rej_b0++;
+            checks++;
+            if (lz0_chain_noskip || (lz0_skip_thresh > 0 && best_len < lz0_skip_thresh)) {
+                cur = nxt;
+                links++;
+                visited++;
+                if (with_cen) {
+                    cen->n_chain_visit++;
+                    cen->n_prev++;
+                }
+            } else if (lz0_skip_stride > 0) {
+                int taken = 0;
+                cur = chain_skip(f, cur, lz0_skip_stride, &taken);
+                links += taken;
+                visited += taken;
+                if (with_cen) {
+                    cen->n_chain_visit += (uint64_t)taken;
+                    cen->n_prev += (uint64_t)taken;
+                }
+            } else {
+                int jmpn = (near > 0) ? 1 : gap;
+                if (near > 0)
+                    near--;
+                else if (gap < (1 << 20))
+                    gap <<= 1;
+                if (jmpn == 1) {
+                    /* one plain link: what both walks below do */
+                    cur = nxt;
+                    links++;
+                    visited++;
+                    if (with_cen) {
+                        cen->n_chain_visit++;
+                        cen->n_prev++;
+                    }
+                } else if (lz0_force_chain_walk) {
+                    for (int j = 0; j < jmpn; j++) {
+                        if (cur == LZ0_CHAIN_NIL)
+                            break;
+                        cur = prev[cur];
+                        links++;
+                        visited++;
+                        if (with_cen) {
+                            cen->n_chain_visit++;
+                            cen->n_prev++;
+                        }
+                    }
+                } else {
+                    int taken = 0;
+                    cur = chain_skip(f, cur, jmpn, &taken);
+                    links += taken;
+                    visited += taken;
+                    if (with_cen) {
+                        cen->n_chain_visit += (uint64_t)taken;
+                        cen->n_prev += (uint64_t)taken;
+                    }
+                }
+            }
+        }
+        if (track)
+            deep_track_at(&dtk, cur, links); /* final state (cur may be NIL) */
+        if (with_cen)
+            cen->ms_hash_chain += sa_now_ms() - t_ch0;
+    }
+    if (nd > 0 && with_cen) {
+        uint32_t cur = f->head[hash_at(f, pos)];
+        int depth = 0;
+        int next_i = 0;
+        int maxd = ds[nd - 1];
+        while (cur != LZ0_CHAIN_NIL && depth < maxd && next_i < nd) {
+            depth++;
+            cen->n_deep_visit++;
+            if (depth == ds[next_i]) {
+                if (cur < pos && (lz0_ld16(in + cur) & pm) == w0) {
+                    int ml = probe_tail(f, in, pos, cur, pos - cur, minm, maxl, &best_len, out, &nout, cc);
+                    if (ml >= 0)
+                        cen->n_chain_check++;
+                }
+                next_i++;
+            }
+            cur = f->prev[cur];
+        }
+    } else if (nd > 0) {
+        /* Same nodes as the walk above (the one d - 1 links behind the head
+         * for each depth d, in order, stopping at the end of the chain),
+         * reached from the chain walk's checkpoints: exact, and the 64..256
+         * link pointer chase is mostly gone. */
+        uint32_t pc = have_ck ? chain_head : f->head[hash_at(f, pos)];
+        int pl = 0;
+        for (int i = 0; i < nd; i++) {
+            int t = dtk.t[i];
+            if (have_ck) {
+                int j = i < dtk.dt ? i : dtk.dt;
+                if (j < nd && dtk.links[j] > pl) {
+                    pc = dtk.node[j];
+                    pl = dtk.links[j];
+                }
+            }
+            uint32_t c = chain_node_at(f, pc, t - pl);
+            if (c == LZ0_CHAIN_NIL)
+                break;
+            if (c < pos && (lz0_ld16(in + c) & pm) == w0)
+                probe_tail(f, in, pos, c, pos - c, minm, maxl, &best_len, out, &nout, cc);
+            pc = c;
+            pl = t;
+        }
+    }
+    if (lz0_hash4_probe != 0 && f->head4 && pos + 3 < n) {
+        int trig = (lz0_hash4_probe == 1) || (best_len >= lz0_hash4_probe);
+        if (trig) {
+            if (with_cen)
+                cen->n_hash4_probe++;
+            uint32_t c4 = f->head4[hash4(in + pos)];
+            if (c4 != LZ0_CHAIN_NIL && c4 < pos && (lz0_ld16(in + c4) & pm) == w0) {
+                int ml = probe_tail(f, in, pos, c4, pos - c4, minm, maxl, &best_len, out, &nout, cc);
+                if (with_cen && ml >= 0)
+                    cen->n_chain_check++;
+            }
+        }
+    }
+    *best_len_io = best_len;
+    *nout_io = nout;
+}
+
 int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
                      lz0_match *out, int *last_len) {
     int nout = 0;
@@ -1581,364 +2138,10 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
 
     int best_len = minm - 1;
 
-    double t_pow0 = 0, t_ch0 = 0;
     if (cen)
-        t_pow0 = sa_now_ms();
-    if (lz0_sa_win <= 0 || lz0_sa_hybrid)
-    for (uint32_t off = 1; off <= pos; ) {
-        if (cen)
-            cen->n_pow2++;
-        uint32_t src = pos - off;
-        if (in[src] == in[pos]) {
-            int probe = best_len > 0 ? best_len : (minm - 1);
-            if (!(probe > 0 && probe < maxl && in[src + probe] != in[pos + probe])) {
-                int ml = lz0_simd_matchlen(in + pos, in + src, maxl);
-                census_ml(cen, ml);
-                if (cen) {
-                    cen->n_pow2_ml++;
-                    if (ml >= minm)
-                        cen->n_pow2_ok++;
-                }
-                if (ml >= minm) {
-                    lz0_match m;
-                    m.offset = off;
-                    m.length = (uint32_t)ml;
-                    if (ml > best_len)
-                        best_len = ml;
-                    keep_candidate(f, out, &nout, f->max_candidates, m);
-                }
-            }
-        }
-        if (off > (pos >> 1))
-            break;
-        off <<= 1;
-    }
-    if (cen)
-        cen->ms_hash_pow2 += sa_now_ms() - t_pow0;
-
-    /* Levier 2: 4-byte and 8-byte aligned small offset probes for executable binaries */
-    if (f->max_candidates >= 32) {
-        static const uint16_t bin_offsets[] = {
-            4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64,
-            72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176,
-            184, 192, 200, 208, 216, 224, 232, 240, 248, 256
-        };
-        for (int b = 0; b < 40; b++) {
-            uint32_t off = (uint32_t)bin_offsets[b];
-            if (off > pos)
-                break;
-            uint32_t src = pos - off;
-            if (in[src] == in[pos]) {
-                int probe = best_len > 0 ? best_len : (minm - 1);
-                if (!(probe > 0 && probe < maxl && in[src + probe] != in[pos + probe])) {
-                    int ml = lz0_simd_matchlen(in + pos, in + src, maxl);
-                    census_ml(cen, ml);
-                    if (ml >= minm) {
-                        lz0_match m;
-                        m.offset = off;
-                        m.length = (uint32_t)ml;
-                        if (ml > best_len)
-                            best_len = ml;
-                        keep_candidate(f, out, &nout, f->max_candidates, m);
-                    }
-                }
-            }
-        }
-    }
-
-    /* Levier 1: Periodic stride match probing */
-    for (int s = 0; s < f->num_strides; s++) {
-        uint32_t stride = f->strides[s];
-        if (stride < 2)
-            continue;
-        uint32_t off = stride;
-        int step_mult = 1;
-        int max_linear_mult = (stride >= 512) ? 32 : 8;
-        while (off <= pos) {
-            uint32_t src = pos - off;
-            if (in[src] == in[pos]) {
-                int probe = best_len > 0 ? best_len : (minm - 1);
-                if (!(probe > 0 && probe < maxl && in[src + probe] != in[pos + probe])) {
-                    int ml = lz0_simd_matchlen(in + pos, in + src, maxl);
-                    census_ml(cen, ml);
-                    if (ml >= minm) {
-                        lz0_match m;
-                        m.offset = off;
-                        m.length = (uint32_t)ml;
-                        if (ml > best_len)
-                            best_len = ml;
-                        keep_candidate(f, out, &nout, f->max_candidates, m);
-                    }
-                }
-            }
-            if (step_mult < max_linear_mult) {
-                step_mult++;
-                off = (uint32_t)step_mult * stride;
-            } else if (step_mult < 1024) {
-                step_mult *= 2;
-                off = (uint32_t)step_mult * stride;
-            } else {
-                break;
-            }
-        }
-    }
-
-    /* Levier 2: Bridge matching via MRU cache of recent match offsets */
-    for (int m = 0; m < f->n_mru; m++) {
-        uint32_t off = f->mru[m];
-        if (off == 0 || off > pos)
-            continue;
-        uint32_t src = pos - off;
-        if (in[src] == in[pos]) {
-            int probe = best_len > 0 ? best_len : (minm - 1);
-            if (!(probe > 0 && probe < maxl && in[src + probe] != in[pos + probe])) {
-                int ml = lz0_simd_matchlen(in + pos, in + src, maxl);
-                census_ml(cen, ml);
-                if (ml >= minm) {
-                    lz0_match match;
-                    match.offset = off;
-                    match.length = (uint32_t)ml;
-                    if (ml > best_len)
-                        best_len = ml;
-                    keep_candidate(f, out, &nout, f->max_candidates, match);
-                }
-            }
-        }
-    }
-
-    if (lz0_chain_prune == 4 && f->head3 && pos + 2 < n) {
-        uint32_t c3 = f->head3[hash3(in + pos)];
-        if (c3 != LZ0_CHAIN_NIL && c3 < pos) {
-            if (cen)
-                cen->n_chain_visit++;
-            if (in[c3] == in[pos]) {
-                int probe = best_len > 0 ? best_len : (minm - 1);
-                if (!(probe > 0 && probe < maxl && in[c3 + probe] != in[pos + probe])) {
-                    int ml = lz0_simd_matchlen(in + pos, in + c3, maxl);
-                    census_ml(cen, ml);
-                    if (cen)
-                        cen->n_chain_check++;
-                    if (ml >= minm) {
-                        lz0_match m;
-                        m.offset = pos - c3;
-                        m.length = (uint32_t)ml;
-                        if (ml > best_len)
-                            best_len = ml;
-                        keep_candidate(f, out, &nout, f->max_candidates, m);
-                    }
-                }
-            }
-        }
-    }
-
-    if (lz0_sa_win <= 0 || lz0_sa_hybrid) {
-    if (f->head) {
-    if (cen)
-        t_ch0 = sa_now_ms();
-    uint32_t h = hash_at(f, pos);
-    uint32_t cur = f->head[h];
-    if (cen) {
-        cen->n_hash_comp++;
-        cen->n_head++;
-    }
-    int checks = 0;
-    int gap = 1;
-    int near = 4;
-    int visited = 0;
-    int visit_lim = 1 << 16;
-
-    while (cur != 0xffffffffu && checks < f->max_chain && visited < visit_lim) {
-        if (cur >= pos) {
-            cur = f->prev[cur];
-            visited++;
-            if (cen) {
-                cen->n_chain_visit++;
-                cen->n_prev++;
-            }
-            continue;
-        }
-        visited++;
-        if (cen)
-            cen->n_chain_visit++;
-        if (lz0_chain_prune == 2) {
-            int hit4 = 0;
-            if (maxl >= 4 &&
-                in[cur] == in[pos] &&
-                in[cur + 1] == in[pos + 1] &&
-                in[cur + 2] == in[pos + 2] &&
-                in[cur + 3] == in[pos + 3])
-                hit4 = 1;
-            if (!hit4) {
-                cur = f->prev[cur];
-                continue;
-            }
-        }
-        if (in[cur] == in[pos]) {
-            int probe = best_len > 0 ? best_len : (minm - 1);
-            if (!(probe > 0 && probe < maxl && in[cur + probe] != in[pos + probe])) {
-                int ml;
-                int used_matchlen = 1;
-                if (lz0_chain_prune == 1) {
-                    int cheap = cheap_ml_a(in, cur, pos, maxl);
-                    if (cheap >= 0) {
-                        ml = cheap;
-                        used_matchlen = 0;
-                    } else {
-                        ml = lz0_simd_matchlen(in + pos, in + cur, maxl);
-                    }
-                } else {
-                    ml = lz0_simd_matchlen(in + pos, in + cur, maxl);
-                }
-                if (used_matchlen)
-                    census_ml(cen, ml);
-                if (cen) {
-                    cen->n_chain_check++;
-                    cen->n_chain_ml++;
-                    if (ml >= minm)
-                        cen->n_chain_ok++;
-                }
-                if (ml >= minm) {
-                    lz0_match m;
-                    m.offset = pos - cur;
-                    m.length = (uint32_t)ml;
-                    if (ml > best_len)
-                        best_len = ml;
-                    keep_candidate(f, out, &nout, f->max_candidates, m);
-                    if (best_len >= 65536 && nout >= 2)
-                        break;
-                }
-            } else if (cen)
-                cen->n_chain_rej_probe++;
-        } else if (cen)
-            cen->n_chain_rej_b0++;
-        checks++;
-        if (lz0_chain_noskip || (lz0_skip_thresh > 0 && best_len < lz0_skip_thresh)) {
-            cur = f->prev[cur];
-            visited++;
-            if (cen) {
-                cen->n_chain_visit++;
-                cen->n_prev++;
-            }
-        } else if (lz0_skip_stride > 0) {
-            int taken = 0;
-            cur = chain_skip(f, cur, lz0_skip_stride, &taken);
-            visited += taken;
-            if (cen) {
-                cen->n_chain_visit += (uint64_t)taken;
-                cen->n_prev += (uint64_t)taken;
-            }
-        } else {
-            int jmpn = (near > 0) ? 1 : gap;
-            if (near > 0)
-                near--;
-            else if (gap < (1 << 20))
-                gap <<= 1;
-            if (lz0_force_chain_walk) {
-                for (int j = 0; j < jmpn; j++) {
-                    if (cur == LZ0_CHAIN_NIL)
-                        break;
-                    cur = f->prev[cur];
-                    visited++;
-                    if (cen) {
-                        cen->n_chain_visit++;
-                        cen->n_prev++;
-                    }
-                }
-            } else {
-                int taken = 0;
-                cur = chain_skip(f, cur, jmpn, &taken);
-                visited += taken;
-                if (cen) {
-                    cen->n_chain_visit += (uint64_t)taken;
-                    cen->n_prev += (uint64_t)taken;
-                }
-            }
-        }
-    }
-    if (cen)
-        cen->ms_hash_chain += sa_now_ms() - t_ch0;
-    }
-    }
-    if (lz0_deep_probe > 0 && f->head) {
-        static const int d1[] = {64};
-        static const int d2[] = {64, 128};
-        static const int d3[] = {32, 64, 128};
-        static const int d4[] = {32, 64, 128, 256};
-        const int *ds = NULL;
-        int nd = 0;
-        if (lz0_deep_probe == 1) {
-            ds = d1;
-            nd = 1;
-        } else if (lz0_deep_probe == 2) {
-            ds = d2;
-            nd = 2;
-        } else if (lz0_deep_probe == 3) {
-            ds = d3;
-            nd = 3;
-        } else if (lz0_deep_probe == 4) {
-            ds = d4;
-            nd = 4;
-        }
-        if (nd > 0) {
-            uint32_t cur = f->head[hash_at(f, pos)];
-            int depth = 0;
-            int next_i = 0;
-            int maxd = ds[nd - 1];
-            while (cur != LZ0_CHAIN_NIL && depth < maxd && next_i < nd) {
-                depth++;
-                if (cen)
-                    cen->n_deep_visit++;
-                if (depth == ds[next_i]) {
-                    if (cur < pos && in[cur] == in[pos]) {
-                        int probe = best_len > 0 ? best_len : (minm - 1);
-                        if (!(probe > 0 && probe < maxl && in[cur + probe] != in[pos + probe])) {
-                            int ml = lz0_simd_matchlen(in + pos, in + cur, maxl);
-                            census_ml(cen, ml);
-                            if (cen)
-                                cen->n_chain_check++;
-                            if (ml >= minm) {
-                                lz0_match m;
-                                m.offset = pos - cur;
-                                m.length = (uint32_t)ml;
-                                if (ml > best_len)
-                                    best_len = ml;
-                                keep_candidate(f, out, &nout, f->max_candidates, m);
-                            }
-                        }
-                    }
-                    next_i++;
-                }
-                cur = f->prev[cur];
-            }
-        }
-    }
-    if (lz0_hash4_probe != 0 && f->head4 && pos + 3 < n) {
-        int trig = (lz0_hash4_probe == 1) || (best_len >= lz0_hash4_probe);
-        if (trig) {
-            if (cen)
-                cen->n_hash4_probe++;
-            uint32_t c4 = f->head4[hash4(in + pos)];
-            if (c4 != LZ0_CHAIN_NIL && c4 < pos) {
-                if (in[c4] == in[pos]) {
-                    int probe = best_len > 0 ? best_len : (minm - 1);
-                    if (!(probe > 0 && probe < maxl && in[c4 + probe] != in[pos + probe])) {
-                        int ml = lz0_simd_matchlen(in + pos, in + c4, maxl);
-                        census_ml(cen, ml);
-                        if (cen)
-                            cen->n_chain_check++;
-                        if (ml >= minm) {
-                            lz0_match m;
-                            m.offset = pos - c4;
-                            m.length = (uint32_t)ml;
-                            if (ml > best_len)
-                                best_len = ml;
-                            keep_candidate(f, out, &nout, f->max_candidates, m);
-                        }
-                    }
-                }
-            }
-        }
-    }
+        hash_probe_core(f, pos, minm, maxl, &best_len, out, &nout, cen, 1);
+    else
+        hash_probe_core(f, pos, minm, maxl, &best_len, out, &nout, NULL, 0);
     if (cen)
         cen->n_cand_hash += (uint64_t)nout;
     int do_sa = (lz0_sa_win > 0 && f->sa && f->rank);
