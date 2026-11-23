@@ -42,7 +42,7 @@
  *               max <= 0); reads only a[0..max) and b[0..max).
  */
 
-#if defined(__x86_64__) && !defined(_WIN32)
+#if defined(__ELF__) && defined(__x86_64__) && !defined(_WIN32)
 
         .text
 
@@ -960,8 +960,8 @@ ENDF(lz0_matchlen_avx2)
         .byte   1, 0, 0, 0
         .endr
 
-#endif /* __x86_64__ && !_WIN32 */
-
 #if defined(__ELF__)
         .section .note.GNU-stack, "", @progbits
 #endif
+
+#endif /* __ELF__ && __x86_64__ && !_WIN32 */

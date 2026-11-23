@@ -1,6 +1,10 @@
+#if defined(__ELF__) && defined(__aarch64__) && !defined(_WIN32)
+
 .text
 .globl lz0dec_arm64
+#if defined(__ELF__)
 .type lz0dec_arm64, %function
+#endif
 .p2align 4
 
 /*
@@ -506,3 +510,11 @@ lz0dec_arm64:
 .fail:
     mov x0, #-1
     ret
+
+#if defined(__ELF__)
+.size lz0dec_arm64, .-lz0dec_arm64
+.section .note.GNU-stack,"",@progbits
+#endif
+
+#endif /* __aarch64__ && !_WIN32 */
+

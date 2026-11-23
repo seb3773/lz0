@@ -1,3 +1,5 @@
+#if defined(__ELF__) && defined(__aarch64__) && !defined(_WIN32)
+
 /*
  * int lz0dec_fast_arm64(const unsigned char *in, int in_size,
  *                  unsigned char *out, int out_max);
@@ -205,7 +207,9 @@
 
     .text
     .globl lz0dec_fast_arm64
+#if defined(__ELF__)
     .type lz0dec_fast_arm64, %function
+#endif
     .p2align 5
 lz0dec_fast_arm64:
     cbz x0, .Lfail
@@ -551,7 +555,9 @@ lz0dec_fast_arm64:
 .Lfail:
     mov x0, #-1
     ret
+#if defined(__ELF__)
     .size lz0dec_fast_arm64, .-lz0dec_fast_arm64
+#endif
 
     .section .rodata
     .p2align 6
@@ -575,4 +581,9 @@ lz0dec_fast_arm64:
 .Le_tab:                        /* .Lunzip + 256 */
     .byte 0, 0, 8, 9, 8, 10, 12, 14
 
+#if defined(__ELF__)
     .section .note.GNU-stack,"",%progbits
+#endif
+
+#endif /* __aarch64__ && !_WIN32 */
+

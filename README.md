@@ -122,8 +122,8 @@ The scalar C kernels and the x86-64, AArch64, and RISC-V vector kernels are chec
 | `lz0/lz0_decompress.c` | Library decoder, `lz0_decompress_to` |
 | `lz0/lz0dec_ref.c` | Reference, read beside the format document |
 | `lz0/lz0dec_min.c` | One C function, no heap, written to compile small |
-| `lz0/lz0dec_x86_64.s`, `lz0dec_arm64.s`, `lz0dec_riscv64.s` | Compact assembly |
-| `lz0/lz0dec_fast_x86_64.s`, `lz0dec_fast_arm64.s`, `lz0dec_fast_riscv64.s` | Larger assembly, aimed at throughput |
+| `lz0/lz0dec_x86_64.S`, `lz0dec_arm64.S`, `lz0dec_riscv64.S` | Compact assembly |
+| `lz0/lz0dec_fast_x86_64.S`, `lz0dec_fast_arm64.S`, `lz0dec_fast_riscv64.S` | Larger assembly, aimed at throughput |
 
 The compact AArch64 and RV64 decoders are leaves with no stack frame. The x86-64 compact decoder uses a 32-byte frame. The fast decoders keep a small constant table, copy wider in the middle of the buffer, and take a checked path for the tail. `tests/test_guard.c` maps a `PROT_NONE` page immediately after the input and the output.
 

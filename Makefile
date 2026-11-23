@@ -15,7 +15,7 @@ LZ0_SRC = lz0/lz0_cost.c lz0/lz0_find.c lz0/lz0_parse.c \
           lz0/lz0_emit.c lz0/lz0_decompress.c lz0/lz0_compress.c lz0/lz0_ultra.c \
           $(LZ0_SIMD_SRC)
 
-LZ0DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.s lz0/lz0dec_fast_x86_64.s
+LZ0DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.S lz0/lz0dec_fast_x86_64.S
 
 VERSION ?= 0.4.0
 
@@ -164,9 +164,9 @@ bin/lz0: lz0/lz0_cli.c $(LZ0_SRC) $(LZ0DEC_SRC)
 	mkdir -p bin
 	$(CC) $(CFLAGS) -o $@ lz0/lz0_cli.c $(LZ0_SRC) $(LZ0DEC_SRC)
 
-bin/lz0dec: lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.s lz0/lz0dec_fast_x86_64.s
+bin/lz0dec: lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.S lz0/lz0dec_fast_x86_64.S
 	mkdir -p bin
-	$(CC) $(CFLAGS) -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.s lz0/lz0dec_fast_x86_64.s
+	$(CC) $(CFLAGS) -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.S lz0/lz0dec_fast_x86_64.S
 
 lz0: bin/lz0 bin/lz0dec
 
@@ -176,17 +176,17 @@ bin/lz0_arm64: lz0/lz0_cli.c $(LZ0_SRC) $(ARM64_DEC_SRC)
 	mkdir -p bin
 	$(ARM64_CC) $(ARM64_CFLAGS) -s -o $@ lz0/lz0_cli.c $(LZ0_SRC) $(ARM64_DEC_SRC)
 
-bin/lz0dec_arm64: lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_arm64.s lz0/lz0dec_fast_arm64.s
+bin/lz0dec_arm64: lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_arm64.S lz0/lz0dec_fast_arm64.S
 	mkdir -p bin
-	$(ARM64_CC) $(ARM64_CFLAGS) -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_arm64.s lz0/lz0dec_fast_arm64.s
+	$(ARM64_CC) $(ARM64_CFLAGS) -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_arm64.S lz0/lz0dec_fast_arm64.S
 
 bin/lz0_riscv64: lz0/lz0_cli.c $(LZ0_SRC) $(RISCV64_DEC_SRC)
 	mkdir -p bin
 	$(RISCV64_CC) $(RISCV64_CFLAGS) -s -o $@ lz0/lz0_cli.c $(LZ0_SRC) $(RISCV64_DEC_SRC)
 
-bin/lz0dec_riscv64: lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_riscv64.s lz0/lz0dec_fast_riscv64.s
+bin/lz0dec_riscv64: lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_riscv64.S lz0/lz0dec_fast_riscv64.S
 	mkdir -p bin
-	$(RISCV64_CC) $(RISCV64_CFLAGS) -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_riscv64.s lz0/lz0dec_fast_riscv64.s
+	$(RISCV64_CC) $(RISCV64_CFLAGS) -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_riscv64.S lz0/lz0dec_fast_riscv64.S
 
 MINGW_CC = x86_64-w64-mingw32-gcc
 
@@ -322,9 +322,9 @@ test: smoke bounds bench/lz0_bench vectors boundary malformed guard simd
 ARM64_CC = aarch64-linux-gnu-gcc
 ARM64_EMU = qemu-aarch64-static
 ARM64_CFLAGS = -O3 -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Izx0_compressor -Izx0_decompressor -Ilz0 -static
-ARM64_DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_arm64.s lz0/lz0dec_fast_arm64.s
+ARM64_DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_arm64.S lz0/lz0dec_fast_arm64.S
 
-test_arm64: lz0/lz0dec_arm64.s lz0/lz0dec_fast_arm64.s
+test_arm64: lz0/lz0dec_arm64.S lz0/lz0dec_fast_arm64.S
 	@echo "=== Cross-compiling and running ARM64 / AArch64 tests under QEMU ==="
 	$(ARM64_CC) $(ARM64_CFLAGS) -o tests/test_vectors_arm64 tests/test_vectors.c $(LZ0_SRC) $(ARM64_DEC_SRC)
 	$(ARM64_EMU) ./tests/test_vectors_arm64
@@ -347,9 +347,9 @@ RISCV64_EMU ?= qemu-riscv64-static
 # Same emulator with the V extension enabled (exercises the RVV encoder tier).
 RISCV64_EMU_V ?= $(RISCV64_EMU) -cpu rv64,v=true,vlen=128
 RISCV64_CFLAGS = -O3 -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Izx0_compressor -Izx0_decompressor -Ilz0 -static
-RISCV64_DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_riscv64.s lz0/lz0dec_fast_riscv64.s
+RISCV64_DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_riscv64.S lz0/lz0dec_fast_riscv64.S
 
-test_riscv64: lz0/lz0dec_riscv64.s lz0/lz0dec_fast_riscv64.s
+test_riscv64: lz0/lz0dec_riscv64.S lz0/lz0dec_fast_riscv64.S
 	@echo "=== Cross-compiling and running RISC-V 64 tests under QEMU ==="
 	$(RISCV64_CC) $(RISCV64_CFLAGS) -o tests/test_vectors_riscv64 tests/test_vectors.c $(LZ0_SRC) $(RISCV64_DEC_SRC)
 	$(RISCV64_EMU) ./tests/test_vectors_riscv64

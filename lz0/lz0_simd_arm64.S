@@ -15,7 +15,7 @@
  * RBIT + CLZ gives the bit position of the lowest matching lane.
  */
 
-#if defined(__aarch64__) && !defined(_WIN32)
+#if defined(__ELF__) && defined(__aarch64__) && !defined(_WIN32)
 
         .text
 
@@ -579,8 +579,8 @@ FUNC(lz0_matchlen_neon)
         ret
 ENDF(lz0_matchlen_neon)
 
-#endif /* __aarch64__ && !_WIN32 */
-
 #if defined(__ELF__)
         .section .note.GNU-stack, "", %progbits
 #endif
+
+#endif /* __ELF__ && __aarch64__ && !_WIN32 */

@@ -27,9 +27,13 @@
 #   a7 : last_offset (initialized to 1)
 #   t0..t6 : temporaries (scratch, length, copy pointers)
 
+#if defined(__ELF__) && (defined(__riscv) && __riscv_xlen == 64) && !defined(_WIN32)
+
 .text
 .globl lz0dec_fast_riscv64
+#if defined(__ELF__)
 .type lz0dec_fast_riscv64, @function
+#endif
 .p2align 4
 
 lz0dec_fast_riscv64:
@@ -589,3 +593,11 @@ lz0dec_fast_riscv64:
 .Lfail:
     li a0, -1
     ret
+
+#if defined(__ELF__)
+.size lz0dec_fast_riscv64, .-lz0dec_fast_riscv64
+.section .note.GNU-stack,"",@progbits
+#endif
+
+#endif /* __riscv && __riscv_xlen == 64 && !_WIN32 */
+

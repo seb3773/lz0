@@ -1,7 +1,11 @@
+#if defined(__ELF__) && defined(__x86_64__) && !defined(_WIN32)
+
 .intel_syntax noprefix
 .text
 .globl lz0dec_x86_64
+#if defined(__ELF__)
 .type lz0dec_x86_64, @function
+#endif
 
 /*
  * int lz0dec_x86_64(const unsigned char *in, int in_size,
@@ -531,3 +535,11 @@ lz0dec_x86_64:
 .fail_early:
     mov rax, -1
     ret
+
+#if defined(__ELF__)
+.size lz0dec_x86_64, .-lz0dec_x86_64
+.section .note.GNU-stack,"",@progbits
+#endif
+
+#endif /* __x86_64__ && !_WIN32 */
+

@@ -19,7 +19,7 @@
  * (a0-a7, t0-t6, v0-v31).
  */
 
-#if defined(__riscv) && __riscv_xlen == 64 && !defined(_WIN32)
+#if defined(__ELF__) && defined(__riscv) && __riscv_xlen == 64 && !defined(_WIN32)
 #if (!defined(__clang__) && __GNUC__ >= 12) || (defined(__clang__) && __clang_major__ >= 14)
 
         .option arch, +v
@@ -319,8 +319,8 @@ FUNC(lz0_matchlen_rvv)
 ENDF(lz0_matchlen_rvv)
 
 #endif /* GCC >= 12 || Clang >= 14 */
-#endif /* __riscv && __riscv_xlen == 64 && !_WIN32 */
-
 #if defined(__ELF__)
         .section .note.GNU-stack, "", @progbits
 #endif
+
+#endif /* __ELF__ && __riscv && __riscv_xlen == 64 && !_WIN32 */
