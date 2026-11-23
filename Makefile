@@ -6,14 +6,20 @@ ZX0_SRC = zx0_compressor/compress.c zx0_compressor/optimize.c \
           zx0_compressor/memory.c zx0_compressor/zx0_compress_wrapper.c \
           zx0_decompressor/zx0_decompress.c
 
+# Encoder SIMD kernels: every architecture file is guarded by #if, so all of
+# them can be listed for every target (foreign ones assemble to nothing; Win64
+# and other targets fall back to the portable C tier in lz0_simd.c).
+LZ0_SIMD_SRC = lz0/lz0_simd.c lz0/lz0_simd_x86_64.S lz0/lz0_simd_arm64.S lz0/lz0_simd_riscv64.S
+
 LZ0_SRC = lz0/lz0_cost.c lz0/lz0_find.c lz0/lz0_parse.c \
-          lz0/lz0_emit.c lz0/lz0_decompress.c lz0/lz0_compress.c lz0/lz0_ultra.c
+          lz0/lz0_emit.c lz0/lz0_decompress.c lz0/lz0_compress.c lz0/lz0_ultra.c \
+          $(LZ0_SIMD_SRC)
 
 LZ0DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.s lz0/lz0dec_fast_x86_64.s
 
 VERSION ?= 0.4.0
 
-.PHONY: all bench clean test smoke bounds diag lite32 state sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz guard lz0 lz0dec cli sanitize valgrind bench_all bench_ratio bench_dec bench_dec_arm64 bench_dec_riscv64 bench_blobs test_arm64 arm64 test_riscv64 riscv64 windows dist dist_linux dist_arm64 dist_riscv64 dist_windows
+.PHONY: all bench clean test smoke bounds diag lite32 state sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz guard simd enc_bench enc_tiers lz0 lz0dec cli sanitize valgrind bench_all bench_ratio bench_dec bench_dec_arm64 bench_dec_riscv64 bench_blobs test_arm64 arm64 test_riscv64 riscv64 windows dist dist_linux dist_arm64 dist_riscv64 dist_windows
 
 all: bench/lz0_bench bench/lz0_smoke bench/lz0_bounds bench/lz0_diag_rep bench/lz0_lite32 bench/lz0_diag_state bench/lz0_sdp32 bench/lz0_scale bench/lz0_prof bench/lz0_cmpfind bench/lz0_jumpsweep bench/lz0_pruneab bench/lz0_bits bench/lz0_final
 
@@ -264,6 +270,30 @@ tests/test_fuzz: tests/test_fuzz.c $(LZ0_SRC) $(LZ0DEC_SRC)
 fuzz: tests/test_fuzz
 	./tests/test_fuzz
 
+tests/test_simd: tests/test_simd.c $(LZ0_SIMD_SRC) lz0/lz0_simd.h
+	$(CC) $(CFLAGS) -o $@ tests/test_simd.c $(LZ0_SIMD_SRC)
+
+# Differential test: every SIMD tier of every encoder kernel against the C
+# reference, inputs placed against a PROT_NONE guard page.
+simd: tests/test_simd
+	./tests/test_simd
+
+bench/lz0_enc_bench: bench/enc_bench.c $(LZ0_SRC) $(LZ0DEC_SRC)
+	$(CC) $(CFLAGS) -o $@ bench/enc_bench.c $(LZ0_SRC) $(LZ0DEC_SRC) -lm
+
+ENC_BENCH_FILES ?= bench/corpus/*
+ENC_BENCH_LEVELS ?= 1,3,6,8,9
+ENC_BENCH_REPS ?= 3
+
+# Encoder speed + bit-exactness: per file/level size, FNV-1a hash of the
+# compressed stream, best-of-N time; every stream is decoded by three decoders.
+enc_bench: bench/lz0_enc_bench
+	./bench/lz0_enc_bench $(ENC_BENCH_REPS) $(ENC_BENCH_LEVELS) $(ENC_BENCH_FILES)
+
+# Same streams with each SIMD tier forced: hashes must be identical.
+enc_tiers: bench/lz0_enc_bench
+	@for t in 2 1 0; do echo "== LZ0_SIMD=$$t"; LZ0_SIMD=$$t ./bench/lz0_enc_bench 1 1,6,9 bench/corpus/cp.html bench/corpus/fields.c bench/corpus/sum | grep -v TOTAL; done
+
 SANITIZE_CFLAGS = -fsanitize=address,undefined -fno-omit-frame-pointer -g -O2 -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Wno-unused-parameter -Izx0_compressor -Izx0_decompressor -Ilz0
 
 sanitize:
@@ -275,6 +305,8 @@ sanitize:
 	./tests/test_malformed
 	$(CC) $(SANITIZE_CFLAGS) -o tests/test_fuzz tests/test_fuzz.c $(LZ0_SRC) $(LZ0DEC_SRC)
 	./tests/test_fuzz
+	$(CC) $(SANITIZE_CFLAGS) -o tests/test_simd tests/test_simd.c $(LZ0_SIMD_SRC)
+	./tests/test_simd 50000
 	@echo "All tests passed cleanly under ASan + UBSan."
 
 valgrind: bin/lz0
@@ -284,7 +316,7 @@ valgrind: bin/lz0
 	rm -f /tmp/lz0_vg.lz0 /tmp/lz0_vg.out
 	@echo "Valgrind: zero leaks detected."
 
-test: smoke bounds bench/lz0_bench vectors boundary malformed guard
+test: smoke bounds bench/lz0_bench vectors boundary malformed guard simd
 	./bench/lz0_bench --quick
 
 ARM64_CC = aarch64-linux-gnu-gcc
@@ -304,12 +336,16 @@ test_arm64: lz0/lz0dec_arm64.s lz0/lz0dec_fast_arm64.s
 	$(ARM64_EMU) ./tests/test_fuzz_arm64
 	$(ARM64_CC) $(ARM64_CFLAGS) -o tests/test_guard_arm64 tests/test_guard.c $(LZ0_SRC) $(ARM64_DEC_SRC)
 	$(ARM64_EMU) ./tests/test_guard_arm64
+	$(ARM64_CC) $(ARM64_CFLAGS) -o tests/test_simd_arm64 tests/test_simd.c $(LZ0_SIMD_SRC)
+	$(ARM64_EMU) ./tests/test_simd_arm64 50000
 	@echo "All ARM64 (AArch64) tests passed cleanly under QEMU!"
 
 arm64: test_arm64
 
 RISCV64_CC ?= riscv64-linux-gnu-gcc
 RISCV64_EMU ?= qemu-riscv64-static
+# Same emulator with the V extension enabled (exercises the RVV encoder tier).
+RISCV64_EMU_V ?= $(RISCV64_EMU) -cpu rv64,v=true,vlen=128
 RISCV64_CFLAGS = -O3 -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Izx0_compressor -Izx0_decompressor -Ilz0 -static
 RISCV64_DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_riscv64.s lz0/lz0dec_fast_riscv64.s
 
@@ -325,11 +361,16 @@ test_riscv64: lz0/lz0dec_riscv64.s lz0/lz0dec_fast_riscv64.s
 	$(RISCV64_EMU) ./tests/test_fuzz_riscv64
 	$(RISCV64_CC) $(RISCV64_CFLAGS) -o tests/test_guard_riscv64 tests/test_guard.c $(LZ0_SRC) $(RISCV64_DEC_SRC)
 	$(RISCV64_EMU) ./tests/test_guard_riscv64
+	$(RISCV64_CC) $(RISCV64_CFLAGS) -o tests/test_simd_riscv64 tests/test_simd.c $(LZ0_SIMD_SRC)
+	$(RISCV64_EMU) ./tests/test_simd_riscv64 20000
+	$(RISCV64_EMU_V) ./tests/test_simd_riscv64 20000
+	$(RISCV64_EMU_V) ./tests/test_vectors_riscv64
+	$(RISCV64_EMU_V) ./tests/test_fuzz_riscv64
 	@echo "All RISC-V 64 tests passed cleanly under QEMU!"
 
 riscv64: test_riscv64
 
 clean:
 	rm -f bench/lz0_* bench/dump_rep bench/debug_a3 bench/count_bench bench/scatter_bench
-	rm -f bin/lz0* tests/test_vectors tests/test_boundary tests/test_malformed tests/test_fuzz tests/test_guard tests/*_arm64 tests/*_riscv64
+	rm -f bin/lz0* tests/test_vectors tests/test_boundary tests/test_malformed tests/test_fuzz tests/test_guard tests/test_simd tests/*_arm64 tests/*_riscv64
 	rm -rf dist build

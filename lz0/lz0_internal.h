@@ -48,6 +48,11 @@ typedef struct {
     int bt_depth;
     int bt_hbits;
     int kc_score[64];
+    /* Mirror of out[i].offset for the current candidate list (contiguous,
+     * for vector search) and cached index of the worst slot (-1 = stale).
+     * Both are maintained by keep_candidate() only. */
+    uint32_t kc_off[64];
+    int kc_worst;
 } lz0_finder;
 
 typedef struct {

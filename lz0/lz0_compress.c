@@ -4,6 +4,11 @@
 #include <string.h>
 #include <time.h>
 
+/* Skip-list depth for levels 7..9 (4 bytes per level per input byte). */
+#ifndef LZ0_SKIP_LEVELS_HIGH
+#define LZ0_SKIP_LEVELS_HIGH 12
+#endif
+
 void lz0_config_default(lz0_config *cfg, lz0_parse_t parser) {
     cfg->min_match = 2;
     cfg->max_chain = 8;
@@ -59,7 +64,8 @@ void lz0_config_level(lz0_config *cfg, int level) {
         cfg->parser = LZ0_PARSE_SDP;
         cfg->score_k = 8;
         cfg->max_states = 8;
-        cfg->jump_levels = 0;
+        /* hash-chain skip list: exact, turns long chain walks into jumps */
+        cfg->jump_levels = LZ0_SKIP_LEVELS_HIGH;
         cfg->bt_depth = 0;
         lz0_sa_win = 64;
         lz0_sa_adapt = 1;
@@ -74,7 +80,7 @@ void lz0_config_level(lz0_config *cfg, int level) {
         cfg->parser = LZ0_PARSE_ULTRA;
         cfg->score_k = 8;
         cfg->max_states = 32;
-        cfg->jump_levels = 0;
+        cfg->jump_levels = LZ0_SKIP_LEVELS_HIGH;
         cfg->bt_depth = 32;
         lz0_sa_win = 128;
         lz0_sa_multiscale = 1;

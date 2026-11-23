@@ -172,6 +172,23 @@ Instead of a greedy heuristic or a memory-intensive full DP lattice, LZ0 maintai
 - **Pareto New-Match Pruning (NEWBEST):** Because `MatchNew` bit-cost is invariant to the source state, emitting new matches from every live state produces strictly dominated states that are immediately discarded by relaxation. The parser emits `MatchNew` only from the lowest-cost Pareto state at each position (and the secondary state if matching the previous offset), halving SDP parsing time while preserving identical optimal compression paths.
 - **Elias Plateau Stepping** (`next_len_plateau`): Because Elias gamma lengths remain constant across powers-of-two intervals ($[2^k, 2^{k+1}-1]$), evaluating intermediate lengths inside a plateau incurs the same bit-cost as the maximum length. The parser skips redundant transitions and only tests plateau upper bounds, dramatically pruning search branches.
 
+### 5.3 Multi-Architecture SIMD Acceleration & Binary-Lifting Skip List
+The encoder integrates hand-crafted SIMD micro-kernels and algorithmic skip lists with automatic runtime dispatch, guaranteeing **100% bit-exact compressed output** across all platforms:
+
+* **Cross-Architecture Vector Kernels:**
+  * **x86-64:** AVX2 + SSE2 hand-crafted vector kernels (`lz0/lz0_simd_x86_64.S`) with runtime CPUID/XGETBV tiering.
+  * **ARM64 (AArch64):** Native AdvSIMD / NEON kernels (`lz0/lz0_simd_arm64.S`).
+  * **RISC-V 64 (RV64):** Vector-length agnostic RVV 1.0 kernels (`lz0/lz0_simd_riscv64.S`), auto-detected via `AT_HWCAP`.
+  * **Portable C Fallback:** Bit-identical reference implementation (`lz0/lz0_simd.c`) serving Windows and baseline targets.
+* **Vectorized Bottlenecks:**
+  * **Row State Lookup (`lz0_simd_find_u32`):** Accelerates the 128-state `u_relax` key search in the Ultra DP parser.
+  * **Worst-State Eviction (`lz0_simd_argmax_i32` / `lz0_simd_kc_worst`):** Vectorized lexicographical argmin/argmax with contiguous offset mirrors (`kc_off[]`) and cached worst-slot tracking.
+  * **Stride Autocorrelation (`lz0_simd_count_eq`):** Vectorized equal-byte accumulation across autocorrelation windows.
+  * **MRU Offset Register Caching (`lz0_simd_mru_batch`):** Vectorized move-to-front offset cache maintained directly in vector registers.
+* **Binary-Lifting Chain Skip List (Levels 7–9):**
+  * Replaces linear pointer-chasing walks through `prev[]` (up to 65,536 sequential links) with exact binary lifting ($2^k$ jumps).
+  * Dramatically accelerates compression of repetitive data (e.g. `kennedy.xls` compresses up to **8.4× faster** in Ultra mode, dropping from 134s to 16s) while remaining 100% bit-exact.
+
 ---
 
 ## 6. Decoder Implementations

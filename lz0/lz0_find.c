@@ -1,4 +1,5 @@
 #include "lz0_internal.h"
+#include "lz0_simd.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -566,11 +567,9 @@ static int lz0_detect_strides_win(const unsigned char *win, uint32_t win_sz,
     for (int k = 0; k < 4; k++) {
         int p = primes[k];
         if (p < (int)M) {
-            for (uint32_t i = (uint32_t)p; i < M; i += 4) {
-                if (win[i] == win[i - p])
-                    base_matches++;
-                base_total++;
-            }
+            uint32_t len = M - (uint32_t)p;
+            base_matches += lz0_simd_count_eq(win + p, win, len, 4);
+            base_total += (len + 3) / 4;
         }
     }
     double baseline = base_total ? (double)base_matches / (double)base_total : 0.05;
@@ -676,13 +675,10 @@ static int lz0_detect_strides_win(const unsigned char *win, uint32_t win_sz,
     int n_cands = 0;
 
     for (uint32_t p = 2; p <= max_p; p++) {
-        size_t matches = 0, total = 0;
-        int step = (p <= 32) ? 1 : 2;
-        for (uint32_t i = p; i < M; i += (uint32_t)step) {
-            if (win[i] == win[i - p])
-                matches++;
-            total++;
-        }
+        uint32_t step = (p <= 32) ? 1 : 2;
+        uint32_t len = M - p; /* p <= M / 2 */
+        size_t matches = lz0_simd_count_eq(win + p, win, len, step);
+        size_t total = (len + step - 1) / step;
         double rate = total ? (double)matches / (double)total : 0;
         if (rate >= thresh && n_cands < 1024) {
             cands[n_cands].p = p;
@@ -700,12 +696,8 @@ static int lz0_detect_strides_win(const unsigned char *win, uint32_t win_sz,
                 uint32_t test_len = win_sz - p;
                 if (test_len > 32768)
                     test_len = 32768;
-                size_t matches = 0, total = 0;
-                for (uint32_t i = p; i < p + test_len; i += 4) {
-                    if (win[i] == win[i - p])
-                        matches++;
-                    total++;
-                }
+                size_t matches = lz0_simd_count_eq(win + p, win, test_len, 4);
+                size_t total = (test_len + 3) / 4;
                 double rate = total ? (double)matches / (double)total : 0;
                 if (rate >= thresh && n_cands < 1024) {
                     cands[n_cands].p = p;
@@ -782,6 +774,7 @@ static int lz0_detect_strides(const unsigned char *in, uint32_t n, uint32_t *str
 int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
                     const lz0_config *cfg) {
     memset(f, 0, sizeof(*f));
+    lz0_simd_init();
     f->in = in;
     f->n = n;
     f->min_match = cfg->min_match < 2 ? 2 : cfg->min_match;
@@ -945,50 +938,63 @@ void lz0_finder_insert_upto(lz0_finder *f, uint32_t pos) {
         if (f->head4 && i + 3 < n)
             f->head4[hash4(f->in + i)] = i;
         if (f->jmp && f->jump_levels > 0) {
-            f->jmp[i] = p;
-            for (int k = 1; k < f->jump_levels; k++) {
-                uint32_t src = f->jmp[(size_t)(k - 1) * n + i];
-                uint32_t nxt = LZ0_CHAIN_NIL;
-                if (src != LZ0_CHAIN_NIL)
-                    nxt = f->jmp[(size_t)(k - 1) * n + src];
-                f->jmp[(size_t)k * n + i] = nxt;
+            /* position-major skip list: jmp[i * L + k] = node 2^k links
+             * behind i on its hash chain (NIL if the chain is shorter) */
+            int L = f->jump_levels;
+            uint32_t *row = f->jmp + (size_t)i * (size_t)L;
+            row[0] = p;
+            for (int k = 1; k < L; k++) {
+                uint32_t src = row[k - 1];
+                row[k] = src != LZ0_CHAIN_NIL ? f->jmp[(size_t)src * (size_t)L + (size_t)(k - 1)]
+                                              : LZ0_CHAIN_NIL;
             }
         }
     }
     f->last_insert = i;
 }
 
+/* Follows `steps` prev[] links from cur. Result and *taken are exactly those
+ * of the plain walk:
+ *     while (t < steps && cur != NIL) { cur = prev[cur]; t++; }
+ * (the link that reaches NIL is counted). With a skip list (jump_levels > 0)
+ * long walks become binary lifting: repeated top-level jumps, then a
+ * descending greedy over the levels that finds the exact end of a short
+ * chain. Every jump of level k equals 2^k plain steps, so both are exact. */
 static uint32_t chain_skip(lz0_finder *f, uint32_t cur, int steps, int *taken) {
-    uint32_t n = f->n;
     int t = 0;
-    int rem = steps;
-    int k = 0;
-    while (rem > 0 && cur != LZ0_CHAIN_NIL) {
-        if ((rem & 1) == 0) {
-            rem >>= 1;
-            k++;
-            continue;
+    int L = f->jmp ? f->jump_levels : 0;
+    if (L <= 0 || steps < 2) {
+        while (t < steps && cur != LZ0_CHAIN_NIL) {
+            cur = f->prev[cur];
+            t++;
         }
-        if (k >= f->jump_levels || !f->jmp) {
-            while (t < steps && cur != LZ0_CHAIN_NIL) {
-                cur = f->prev[cur];
-                t++;
-            }
+        *taken = t;
+        return cur;
+    }
+    const uint32_t *jmp = f->jmp;
+    int top = L - 1;
+    while (cur != LZ0_CHAIN_NIL && steps - t >= (1 << top)) {
+        uint32_t nx = jmp[(size_t)cur * (size_t)L + (size_t)top];
+        if (nx == LZ0_CHAIN_NIL)
             break;
-        }
-        uint32_t next = f->jmp[(size_t)k * n + cur];
-        if (next == LZ0_CHAIN_NIL) {
-            int left = steps - t;
-            for (int j = 0; j < left && cur != LZ0_CHAIN_NIL; j++) {
-                cur = f->prev[cur];
-                t++;
+        cur = nx;
+        t += 1 << top;
+    }
+    if (cur != LZ0_CHAIN_NIL && t < steps) {
+        /* largest s <= steps - t (here s < 2^(top + 1)) landing on a node */
+        const uint32_t *row = jmp + (size_t)cur * (size_t)L;
+        for (int k = top; k >= 0; k--) {
+            if (steps - t >= (1 << k) && row[k] != LZ0_CHAIN_NIL) {
+                cur = row[k];
+                t += 1 << k;
+                row = jmp + (size_t)cur * (size_t)L;
             }
-            break;
         }
-        cur = next;
-        t += 1 << k;
-        rem >>= 1;
-        k++;
+        if (t < steps) {
+            /* the next link is the end of the chain */
+            cur = LZ0_CHAIN_NIL;
+            t++;
+        }
     }
     *taken = t;
     return cur;
@@ -1036,7 +1042,9 @@ int lz0_is_len2_allowed(const lz0_finder *f, uint32_t off) {
     if (f && f->num_strides > 0) {
         for (int i = 0; i < f->num_strides; i++) {
             uint32_t s = f->strides[i];
-            if (s > 0 && (off == s || (off > s && off % s == 0 && off / s <= 8)))
+            /* off is one of s, 2s, ..., 8s; the range test runs first so
+             * the division is only reached for plausible offsets */
+            if (s > 0 && off >= s && (uint64_t)off <= (uint64_t)s * 8u && off % s == 0)
                 return 1;
         }
     }
@@ -1051,44 +1059,66 @@ static inline int is_valid_candidate(const lz0_finder *f, uint32_t len, uint32_t
     return 1;
 }
 
+/* Candidate lists up to this size are searched with inline scalar code. */
+#ifndef LZ0_KC_SCALAR_MAX
+#define LZ0_KC_SCALAR_MAX 8
+#endif
+
 /* Scores of the current candidate list, kept in sync by keep_candidate()
- * inside f->kc_score[]. Every write to the list during a lz0_find_matches()
- * call goes through keep_candidate(), so the cache never goes stale while
- * it is read. Thread-safe per finder instance. */
+ * inside f->kc_score[], together with f->kc_off[] (offsets, contiguous for
+ * vector search) and f->kc_worst (cached worst slot, -1 when stale). Every
+ * write to the list during a lz0_find_matches() call goes through
+ * keep_candidate(), so the caches never go stale while they are read; any
+ * change of a slot's score or length invalidates kc_worst. The list always
+ * restarts empty, so entries beyond *n are never read. Thread-safe per
+ * finder instance. */
 static int keep_candidate(lz0_finder *f, lz0_match *out, int *n, int max_c, lz0_match m) {
     if (!is_valid_candidate(f, m.length, m.offset))
         return 0;
     int cnt = *n;
-    for (int i = 0; i < cnt; i++) {
-        if (out[i].offset == m.offset) {
-            if (m.length > out[i].length) {
-                out[i].length = m.length;
-                f->kc_score[i] = match_score(out[i]);
-            }
-            return 1;
+    int i;
+    if (cnt <= LZ0_KC_SCALAR_MAX) {
+        /* short lists (fast levels): an inline scan beats a kernel call */
+        for (i = 0; i < cnt && f->kc_off[i] != m.offset; i++)
+            ;
+        if (i == cnt)
+            i = -1;
+    } else {
+        i = lz0_simd_find_u32(f->kc_off, cnt, m.offset);
+    }
+    if (i >= 0) {
+        if (m.length > out[i].length) {
+            out[i].length = m.length;
+            f->kc_score[i] = match_score(out[i]);
+            f->kc_worst = -1;
         }
+        return 1;
     }
     if (max_c > 64)
         max_c = 64;
     if (cnt < max_c) {
         out[cnt] = m;
+        f->kc_off[cnt] = m.offset;
         f->kc_score[cnt] = match_score(m);
+        f->kc_worst = -1;
         *n = cnt + 1;
         return 1;
     }
     int m_score = match_score(m);
-    int worst = 0;
-    int worst_score = f->kc_score[0];
-    for (int i = 1; i < cnt; i++) {
-        int sc = f->kc_score[i];
-        if (sc < worst_score || (sc == worst_score && out[i].length < out[worst].length)) {
-            worst = i;
-            worst_score = sc;
-        }
+    /* lowest (score, length) slot, first index on ties; recomputed only
+     * after the list changed */
+    int worst = f->kc_worst;
+    if (worst < 0) {
+        worst = cnt <= LZ0_KC_SCALAR_MAX ? lz0_kc_worst_c(f->kc_score, out, cnt)
+                                         : lz0_simd_kc_worst(f->kc_score, out, cnt);
+        f->kc_worst = worst;
     }
+    int worst_score = f->kc_score[worst];
     if (m_score > worst_score) {
         out[worst] = m;
+        f->kc_off[worst] = m.offset;
         f->kc_score[worst] = m_score;
+        f->kc_worst = -1;
         return 1;
     }
     return 0;
@@ -1294,24 +1324,6 @@ int lz0_find_last_len(lz0_finder *f, uint32_t pos, uint32_t last_offset) {
     return 0;
 }
 
-static void mru_add(lz0_finder *f, uint32_t off) {
-    if (off == 0)
-        return;
-    for (int i = 0; i < f->n_mru; i++) {
-        if (f->mru[i] == off) {
-            for (int j = i; j > 0; j--)
-                f->mru[j] = f->mru[j - 1];
-            f->mru[0] = off;
-            return;
-        }
-    }
-    int limit = f->n_mru < 8 ? f->n_mru : 7;
-    for (int j = limit; j > 0; j--)
-        f->mru[j] = f->mru[j - 1];
-    f->mru[0] = off;
-    if (f->n_mru < 8)
-        f->n_mru++;
-}
 
 /* Binary-tree match finder. The tree for each 3-byte hash bucket is ordered
  * lexicographically and rooted at the most recent position. The search path
@@ -1832,10 +1844,9 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
                 cen->max_cand_len = out[i].length;
         }
     }
-    for (int i = 0; i < nout; i++) {
-        if (out[i].length >= 4 || (out[i].length >= 3 && out[i].offset <= 512))
-            mru_add(f, out[i].offset);
-    }
+    /* move-to-front of the useful offsets into the MRU list (vector kernel,
+     * the list stays in registers for the whole batch) */
+    lz0_simd_mru_batch(f->mru, &f->n_mru, out, nout);
     if (f->bt_son) {
         while (f->bt_next < pos)
             bt_update(f, f->bt_next++, NULL, 0);

@@ -12,6 +12,7 @@
  * Only the token choice changes; the bitstream format is untouched.
  */
 #include "lz0_internal.h"
+#include "lz0_simd.h"
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
@@ -67,16 +68,9 @@ static inline uint32_t u_hbit(uint32_t key) {
 }
 
 static void u_find_worst(u_dp *d, uint32_t pos) {
+    /* first slot holding the highest cost (vector argmax, see lz0_simd.h) */
     size_t base = (size_t)pos * (size_t)d->K;
-    int w = 0;
-    int32_t wc = d->cost[base];
-    for (int s = 1; s < d->K; s++) {
-        if (d->cost[base + s] > wc) {
-            wc = d->cost[base + s];
-            w = s;
-        }
-    }
-    d->worst[pos] = (uint8_t)w;
+    d->worst[pos] = (uint8_t)lz0_simd_argmax_i32(d->cost + base, d->K);
 }
 
 static inline void u_relax(u_dp *d, uint32_t pos, uint32_t key, int cost, uint32_t pp) {
@@ -90,17 +84,16 @@ static inline void u_relax(u_dp *d, uint32_t pos, uint32_t key, int cost, uint32
     int n = d->ns[pos];
     uint64_t bit = 1ull << u_hbit(key);
     if (d->bloom[pos] & bit) {
-        const uint32_t *k = d->key + base;
-        for (int s = 0; s < n; s++) {
-            if (k[s] == key) {
-                if (cost < d->cost[base + s]) {
-                    d->cost[base + s] = cost;
-                    d->pp[base + s] = pp;
-                    if (d->worst[pos] == (uint8_t)s)
-                        d->worst[pos] = 0xff;
-                }
-                return;
+        /* keys are unique within a row: vector search for the slot */
+        int s = lz0_simd_find_u32(d->key + base, n, key);
+        if (s >= 0) {
+            if (cost < d->cost[base + s]) {
+                d->cost[base + s] = cost;
+                d->pp[base + s] = pp;
+                if (d->worst[pos] == (uint8_t)s)
+                    d->worst[pos] = 0xff;
             }
+            return;
         }
     }
     if (n < d->K) {
