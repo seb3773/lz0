@@ -1304,11 +1304,31 @@ static inline void sdp_store(sdp_st *d, uint32_t key, int cost, uint32_t prev_po
     d->pp = prev_pos | ((uint32_t)prev_slot << 31);
 }
 
+/* Decisions are identical to the former form: in a full row (n == 2) a
+ * transition with cost >= max(row[0].cost, row[1].cost) can neither improve a
+ * matching slot (strict "<") nor evict the worst one, so it returns at once;
+ * below that bound, a non-matching key always evicts the worst slot w. */
 static inline void sdp_relax2(sdp_st *row, uint8_t *nslot, uint32_t key, int cost,
-                              uint32_t prev_pos, uint8_t prev_slot, lz0_sdp_census *cen) {
+                              uint32_t prev_pos, uint8_t prev_slot) {
     uint8_t n = *nslot;
-    if (cen)
-        cen->n_relax++;
+    if (n == 2) {
+        int c0 = row[0].cost, c1 = row[1].cost;
+        int max_c = c0 > c1 ? c0 : c1;
+        if (cost >= max_c)
+            return;
+        if (row[0].key == key) {
+            if (cost < c0)
+                sdp_store(&row[0], key, cost, prev_pos, prev_slot);
+            return;
+        }
+        if (row[1].key == key) {
+            if (cost < c1)
+                sdp_store(&row[1], key, cost, prev_pos, prev_slot);
+            return;
+        }
+        sdp_store(&row[c1 > c0 ? 1 : 0], key, cost, prev_pos, prev_slot);
+        return;
+    }
     if (n > 0 && row[0].key == key) {
         if (cost < row[0].cost)
             sdp_store(&row[0], key, cost, prev_pos, prev_slot);
@@ -1319,26 +1339,37 @@ static inline void sdp_relax2(sdp_st *row, uint8_t *nslot, uint32_t key, int cos
             sdp_store(&row[1], key, cost, prev_pos, prev_slot);
         return;
     }
-    if (n < 2) {
-        sdp_store(&row[n], key, cost, prev_pos, prev_slot);
-        *nslot = (uint8_t)(n + 1);
-        return;
-    }
-    int w = row[1].cost > row[0].cost ? 1 : 0;
-    if (cen)
-        cen->n_evicted++;
-    if (cost < row[w].cost)
-        sdp_store(&row[w], key, cost, prev_pos, prev_slot);
+    sdp_store(&row[n], key, cost, prev_pos, prev_slot);
+    *nslot = (uint8_t)(n + 1);
 }
 
 static void sdp_emit_last2(sdp_st *st, uint8_t *ns, uint32_t i, int L,
                            uint32_t last_off, int cost, uint8_t slot) {
     lz0_sdp_census *cen = lz0_sdp_census_out;
+    if (lz0_len_code == 3) {
+        /* last-match cost = 1 + elias(end); Elias plateaus end at 2^k - 1,
+         * where the cost is 1 + (2k - 1) = 2k */
+        uint32_t hi = 1u;
+        int add = 2;
+        for (;;) {
+            int end = hi < (uint32_t)L ? (int)hi : L;
+            sdp_relax2(st + (size_t)(i + (uint32_t)end) * 2u, &ns[i + (uint32_t)end],
+                       last_off, cost + add, i, slot);
+            if (cen) {
+                cen->n_trans_last++;
+                cen->n_last_plat++;
+            }
+            if (end == L)
+                return;
+            hi = (hi << 1) | 1u;
+            add += 2;
+        }
+    }
     int start = 1;
     while (start <= L) {
         int end = lz0_next_plateau_last(start, L);
         sdp_relax2(st + (size_t)(i + (uint32_t)end) * 2u, &ns[i + (uint32_t)end], last_off,
-                   cost + lz0_cost_last(end), i, slot, NULL);
+                   cost + lz0_cost_last(end), i, slot);
         if (cen) {
             cen->n_trans_last++;
             cen->n_last_plat++;
@@ -1357,7 +1388,7 @@ static inline void sdp_emit_one_new2(sdp_st *st, uint8_t *ns, uint32_t i, int en
                                      uint32_t off, int cc, uint8_t slot,
                                      lz0_sdp_census *cen) {
     sdp_relax2(st + (size_t)(i + (uint32_t)end) * 2u, &ns[i + (uint32_t)end], off, cc, i,
-               slot, NULL);
+               slot);
     if (cen)
         cen->n_trans_new++;
 }
@@ -1412,7 +1443,7 @@ static void sdp_emit_new2(const lz0_finder *f, sdp_st *st, uint8_t *ns, uint32_t
     while (start <= L) {
         int end = lz0_next_plateau_new(start, L);
         sdp_relax2(st + (size_t)(i + (uint32_t)end) * 2u, &ns[i + (uint32_t)end], off,
-                   cost + lz0_cost_new((int)off, end), i, slot, NULL);
+                   cost + lz0_cost_new((int)off, end), i, slot);
         if (cen)
             cen->n_trans_new++;
         start = end + 1;
@@ -1482,6 +1513,8 @@ static int lz0_parse_sdp_k2(lz0_finder *f, lz0_toklist *tl) {
     double ms_lit = 0, ms_lastlen = 0, ms_last = 0, ms_new = 0;
     int timed = cen != NULL;
 
+    /* 10 bits (flag + elias(1) + 8) in v0.4.0; hoisted for other codes */
+    const int lit1 = lz0_len_code == 3 ? 10 : lz0_cost_literal(1);
     lz0_match cands[64];
     for (uint32_t i = 0; i < n; i++) {
         int nsi = ns[i];
@@ -1507,7 +1540,7 @@ static int lz0_parse_sdp_k2(lz0_finder *f, lz0_toklist *tl) {
             double tl0 = timed ? sdp_now_ms() : 0;
             if (!can_last && max_left >= 1) {
                 sdp_relax2(st + (size_t)(i + 1) * 2u, &ns[i + 1], key | SDP_LIT_FLAG,
-                           cost + lz0_cost_literal(1), i, slot, NULL);
+                           cost + lit1, i, slot);
                 if (cen)
                     cen->n_trans_lit++;
             }
@@ -1519,7 +1552,7 @@ static int lz0_parse_sdp_k2(lz0_finder *f, lz0_toklist *tl) {
                 const sdp_st *origin = &st[(size_t)opos * 2u + oslot];
                 sdp_relax2(st + (size_t)(i + 1) * 2u, &ns[i + 1], key,
                            origin->cost + lz0_cost_literal((int)(i - opos + 1)), opos,
-                           oslot, NULL);
+                           oslot);
                 if (cen)
                     cen->n_trans_lit++;
             }
@@ -1544,12 +1577,10 @@ static int lz0_parse_sdp_k2(lz0_finder *f, lz0_toklist *tl) {
             int b = 0;
             if (nsi > 1 && row[1].cost < row[0].cost)
                 b = 1;
+            /* nsi <= 2: the second source is the other slot iff its offset differs */
             int b2 = -1;
-            for (int s2 = 0; s2 < nsi; s2++) {
-                if (((row[s2].key ^ row[b].key) & ~SDP_LIT_FLAG) != 0 &&
-                    (b2 < 0 || row[s2].cost < row[b2].cost))
-                    b2 = s2;
-            }
+            if (nsi > 1 && ((row[0].key ^ row[1].key) & ~SDP_LIT_FLAG) != 0)
+                b2 = 1 - b;
             for (int k = 0; k < nc; k++) {
                 int L = (int)cands[k].length;
                 uint32_t off = cands[k].offset;
