@@ -37,7 +37,7 @@
  *       safe: sentinel bit byte (bits 8..63 zero)
  *   rbp fast: bit counter q (segment start = 7 - leftover bits)
  *   rdi fast: bit window
- *   r15 base of .Lunzip (256-byte Elias payload table)
+ *   r15 base of .Lunzip (256-byte Elias payload table, .Ls_tab at +256)
  *   rax rcx rdx rsi : scratch
  */
 
@@ -175,11 +175,16 @@
 8881:
     cmp rbx, 8
     jb 2f
-1:                              /* offset 8..15: 8-byte steps */
+    /* offset 8..15: lo = out[-off..-off+7] and hi = out[-8..-1] together
+       hold the whole period (off <= 16) and both loads end before out, so
+       they never wait on a store of this match. Each step stores lo at q
+       and hi at q+off-8, then q += off. */
     mov rdx, qword ptr [rsi]
+    mov rsi, qword ptr [r12 - 8]
+1:
     mov qword ptr [r12], rdx
-    add rsi, 8
-    add r12, 8
+    mov qword ptr [r12 + rbx - 8], rsi
+    add r12, rbx
     cmp r12, rax
     jb 1b
     mov r12, rax
@@ -199,29 +204,30 @@
     jb 1b
     mov r12, rax
     jmp \cont
-3:                              /* offset 2..7 */
-    lea rcx, [r12 + 8]
-1:                              /* 8 pattern bytes (wild, inside margin) */
-    movzx edx, byte ptr [rsi]
-    mov byte ptr [r12], dl
-    inc rsi
-    inc r12
-    cmp r12, rcx
-    jb 1b
-    cmp r12, rax
-    jae 2f
-    lea rdx, [rip + .Le_tab]    /* e = off*ceil(8/off) in 8..14 */
-    movzx edx, byte ptr [rdx + rbx]
-    mov rsi, r12
-    sub rsi, rdx
-1:                              /* 8-byte steps at distance e (same period) */
+3:  /* offset p = 2..7: build y = p-periodic qword in a register.
+       x = low p bytes of the qword at out-p (shl/shr by 64-8p clears the
+       bytes at out.., read inside the wild margin), then
+       y = x | x<<8p | x<<16p | x<<24p. The shifts accumulate with count
+       8p < 64, so copies past bit 63 drop out instead of wrapping.
+       Store y every s = p*floor(8/p) bytes: no byte loop, one load. */
+    imul ecx, ebx, -8           /* count & 63 = 64 - 8p */
     mov rdx, qword ptr [rsi]
+    shl rdx, cl
+    shr rdx, cl
+    neg ecx                     /* 8p */
+    mov rsi, rdx
+    shl rsi, cl
+    or rdx, rsi
+    shl rsi, cl
+    or rdx, rsi
+    shl rsi, cl
+    or rdx, rsi
+    movzx ecx, byte ptr [r15 + rbx + 256]   /* .Ls_tab[p] = s */
+1:
     mov qword ptr [r12], rdx
-    add rsi, 8
-    add r12, 8
+    add r12, rcx
     cmp r12, rax
     jb 1b
-2:
     mov r12, rax
     jmp \cont
   .subsection 0
@@ -659,8 +665,8 @@ lz0dec_fast_x86_64:
     .byte 12,13,12,13,14,15,14,15,12,13,12,13,14,15,14,15
     .byte 8,9,8,9,10,11,10,11,8,9,8,9,10,11,10,11
     .byte 12,13,12,13,14,15,14,15,12,13,12,13,14,15,14,15
-.Le_tab:
-    .byte 0, 0, 8, 9, 8, 10, 12, 14
+.Ls_tab:                        /* .Lunzip + 256: s = p*floor(8/p) */
+    .byte 0, 0, 8, 6, 8, 5, 6, 7
 
 #if defined(__ELF__)
     .section .note.GNU-stack,"",@progbits
