@@ -124,6 +124,8 @@ static inline uint32_t lz0_simd_count_eq(const unsigned char *a, const unsigned 
 /* Move-to-front of every non-zero m[i].offset with length >= 4, or
  * length >= 3 and offset <= 512, into the 8-entry MRU list mru[0..*n_mru). */
 static inline void lz0_simd_mru_batch(uint32_t *mru, int *n_mru, const lz0_match *m, int n) {
+    if (n <= 0)
+        return;
     LZ0_SIMD_CALL(lz0_mru_batch, mru, n_mru, m, n);
 }
 

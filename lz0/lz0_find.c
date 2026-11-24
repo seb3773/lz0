@@ -1161,7 +1161,25 @@ static inline int lz0_kc_ctz32(uint32_t v) {
 static int keep_candidate(lz0_finder *f, lz0_match *out, int *n, int max_c, lz0_match m) {
     if (!is_valid_candidate(f, m.length, m.offset))
         return 0;
+    if (max_c > 64)
+        max_c = 64;
     int cnt = *n;
+    int m_score = -1;
+    int worst = -1;
+
+    if (cnt == max_c) {
+        worst = f->kc_worst;
+        if (worst < 0) {
+            worst = cnt <= LZ0_KC_SCALAR_MAX ? lz0_kc_worst_c(f->kc_score, out, cnt)
+                                             : lz0_simd_kc_worst(f->kc_score, out, cnt);
+            f->kc_worst = worst;
+        }
+        int worst_score = f->kc_score[worst];
+        m_score = match_score(m);
+        if (m_score <= worst_score)
+            return 0;
+    }
+
     int i;
     if (cnt <= LZ0_KC_SCALAR_MAX) {
         /* short lists (fast levels): an inline scan beats a kernel call.
@@ -1180,39 +1198,25 @@ static int keep_candidate(lz0_finder *f, lz0_match *out, int *n, int max_c, lz0_
     if (i >= 0) {
         if (m.length > out[i].length) {
             out[i].length = m.length;
-            f->kc_score[i] = match_score(out[i]);
+            f->kc_score[i] = (m_score >= 0) ? m_score : match_score(out[i]);
             f->kc_worst = -1;
         }
         return 1;
     }
-    if (max_c > 64)
-        max_c = 64;
     if (cnt < max_c) {
         out[cnt] = m;
         f->kc_off[cnt] = m.offset;
-        f->kc_score[cnt] = match_score(m);
+        f->kc_score[cnt] = (m_score >= 0) ? m_score : match_score(m);
         f->kc_worst = -1;
         *n = cnt + 1;
         return 1;
     }
-    int m_score = match_score(m);
-    /* lowest (score, length) slot, first index on ties; recomputed only
-     * after the list changed */
-    int worst = f->kc_worst;
-    if (worst < 0) {
-        worst = cnt <= LZ0_KC_SCALAR_MAX ? lz0_kc_worst_c(f->kc_score, out, cnt)
-                                         : lz0_simd_kc_worst(f->kc_score, out, cnt);
-        f->kc_worst = worst;
-    }
-    int worst_score = f->kc_score[worst];
-    if (m_score > worst_score) {
-        out[worst] = m;
-        f->kc_off[worst] = m.offset;
-        f->kc_score[worst] = m_score;
-        f->kc_worst = -1;
-        return 1;
-    }
-    return 0;
+    /* When cnt == max_c and i < 0, m_score > worst_score is guaranteed */
+    out[worst] = m;
+    f->kc_off[worst] = m.offset;
+    f->kc_score[worst] = m_score;
+    f->kc_worst = -1;
+    return 1;
 }
 
 /* Unaligned, alias-safe prefix load; shared by SA and hash probing. */
@@ -1529,6 +1533,8 @@ int lz0_find_last_len(lz0_finder *f, uint32_t pos, uint32_t last_offset) {
             census_ml(cen, ml);
             return ml;
         }
+        if (f->in[pos] != f->in[pos - last_offset])
+            return 0;
         int ml = lz0_simd_matchlen(f->in + pos, f->in + pos - last_offset, max_left);
         census_ml(cen, ml);
         return ml;
@@ -1908,7 +1914,7 @@ static LZ0_ALWAYS_INLINE void hash_probe_core(lz0_finder *f, uint32_t pos, int m
     /* Levier 2: Bridge matching via MRU cache of recent match offsets. The
      * fixed 8-slot window is tested branch-free; slots past n_mru, empty
      * (0) or beyond pos are masked out (their test reads pos itself). */
-    {
+    if (f->n_mru > 0) {
         uint32_t hits = 0;
         for (int m = 0; m < 8; m++) {
             uint32_t off = f->mru[m];
@@ -2234,7 +2240,8 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
     }
     /* move-to-front of the useful offsets into the MRU list (vector kernel,
      * the list stays in registers for the whole batch) */
-    lz0_simd_mru_batch(f->mru, &f->n_mru, out, nout);
+    if (nout > 0)
+        lz0_simd_mru_batch(f->mru, &f->n_mru, out, nout);
     if (f->bt_son) {
         while (f->bt_next < pos)
             bt_update(f, f->bt_next++, NULL, 0);
