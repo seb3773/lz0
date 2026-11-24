@@ -971,6 +971,21 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
                 add_diag_offset(f, 2);
                 add_diag_offset(f, 6);
             }
+        } else if (!f->is_high_entropy && f->num_strides > 0) {
+            /* Piste E: Skewed strides & column offsets for tabular and structured data */
+            for (int s = 0; s < f->num_strides && f->num_diag < 12; s++) {
+                uint32_t stride = f->strides[s];
+                if (stride >= 16 && stride <= 4096) {
+                    add_diag_offset(f, stride - 1);
+                    add_diag_offset(f, stride + 1);
+                    add_diag_offset(f, stride - 2);
+                    add_diag_offset(f, stride + 2);
+                    add_diag_offset(f, stride - 3);
+                    add_diag_offset(f, stride + 3);
+                    add_diag_offset(f, stride - 4);
+                    add_diag_offset(f, stride + 4);
+                }
+            }
         }
     }
     return 0;
