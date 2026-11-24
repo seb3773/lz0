@@ -42,6 +42,7 @@ typedef struct {
     uint32_t strides[8];
     uint32_t bpp;
     uint8_t is_stereo_16;
+    uint8_t is_high_entropy;
     int num_diag;
     uint32_t diag_offsets[16];
     int n_mru;

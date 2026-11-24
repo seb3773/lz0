@@ -804,6 +804,24 @@ static int lz0_detect_strides(const unsigned char *in, uint32_t n, uint32_t *str
     return n_out;
 }
 
+static int lz0_detect_high_entropy(const unsigned char *in, uint32_t n) {
+    if (n < 1024)
+        return 0;
+    size_t sample = n < 16384 ? n : 16384;
+    uint32_t counts[256] = {0};
+    for (size_t i = 0; i < sample; i++)
+        counts[in[i]]++;
+    int distinct = 0;
+    uint32_t max_c = 0;
+    for (int i = 0; i < 256; i++) {
+        if (counts[i] > 0)
+            distinct++;
+        if (counts[i] > max_c)
+            max_c = counts[i];
+    }
+    return (distinct >= 250 && (uint64_t)max_c * 1000u < (uint64_t)sample * 18u);
+}
+
 static inline void add_diag_offset(lz0_finder *f, uint32_t off) {
     if (off < 2 || f->num_diag >= 16)
         return;
@@ -917,6 +935,7 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
     f->num_strides = 0;
     f->bpp = 0;
     f->is_stereo_16 = 0;
+    f->is_high_entropy = (uint8_t)lz0_detect_high_entropy(in, n);
     f->num_diag = 0;
     if (cfg->max_candidates >= 16) {
         f->num_strides = lz0_detect_strides(in, n, f->strides, lz0_legacy_single_window_scan ? 4 : 8);
@@ -1155,13 +1174,17 @@ int lz0_is_len2_allowed(const lz0_finder *f, uint32_t off) {
         return 1;
     if (off <= (uint32_t)lz0_len2_max_off)
         return 1;
-    if (f && f->num_strides > 0) {
-        for (int i = 0; i < f->num_strides; i++) {
-            uint32_t s = f->strides[i];
-            /* off is one of s, 2s, ..., 8s; the range test runs first so
-             * the division is only reached for plausible offsets */
-            if (s > 0 && off >= s && (uint64_t)off <= (uint64_t)s * 8u && off % s == 0)
-                return 1;
+    if (f) {
+        if (!f->is_high_entropy && f->bpp == 0 && off <= 256)
+            return 1;
+        if (f->num_strides > 0) {
+            for (int i = 0; i < f->num_strides; i++) {
+                uint32_t s = f->strides[i];
+                /* off is one of s, 2s, ..., 8s; the range test runs first so
+                 * the division is only reached for plausible offsets */
+                if (s > 0 && off >= s && (uint64_t)off <= (uint64_t)s * 8u && off % s == 0)
+                    return 1;
+            }
         }
     }
     return 0;
