@@ -40,6 +40,10 @@ typedef struct {
     uint32_t rle_end;
     int num_strides;
     uint32_t strides[8];
+    uint32_t bpp;
+    uint8_t is_stereo_16;
+    int num_diag;
+    uint32_t diag_offsets[16];
     int n_mru;
     uint32_t mru[8];
     uint32_t *bt_son;

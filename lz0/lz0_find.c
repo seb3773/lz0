@@ -804,6 +804,16 @@ static int lz0_detect_strides(const unsigned char *in, uint32_t n, uint32_t *str
     return n_out;
 }
 
+static inline void add_diag_offset(lz0_finder *f, uint32_t off) {
+    if (off < 2 || f->num_diag >= 16)
+        return;
+    for (int i = 0; i < f->num_diag; i++) {
+        if (f->diag_offsets[i] == off)
+            return;
+    }
+    f->diag_offsets[f->num_diag++] = off;
+}
+
 int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
                     const lz0_config *cfg) {
     memset(f, 0, sizeof(*f));
@@ -905,8 +915,44 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
         f->bt_next = 0;
     }
     f->num_strides = 0;
+    f->bpp = 0;
+    f->is_stereo_16 = 0;
+    f->num_diag = 0;
     if (cfg->max_candidates >= 16) {
         f->num_strides = lz0_detect_strides(in, n, f->strides, lz0_legacy_single_window_scan ? 4 : 8);
+        for (int i = 0; i < f->num_strides; i++) {
+            uint32_t s = f->strides[i];
+            if (s >= 2 && s <= 8 && f->bpp == 0)
+                f->bpp = s;
+            if (s == 4)
+                f->is_stereo_16 = 1;
+        }
+        if (f->bpp > 0) {
+            uint32_t bpp = f->bpp;
+            for (int s = 0; s < f->num_strides && f->num_diag < 12; s++) {
+                uint32_t stride = f->strides[s];
+                if (stride >= 64 && stride > 2 * bpp) {
+                    /* Row 1 diagonals */
+                    add_diag_offset(f, stride - bpp);
+                    add_diag_offset(f, stride + bpp);
+                    if (stride > 4 * bpp) {
+                        add_diag_offset(f, stride - 2 * bpp);
+                        add_diag_offset(f, stride + 2 * bpp);
+                    }
+                    /* Row 2 diagonals */
+                    add_diag_offset(f, 2 * stride - bpp);
+                    add_diag_offset(f, 2 * stride + bpp);
+                    if (stride > 4 * bpp) {
+                        add_diag_offset(f, 2 * stride - 2 * bpp);
+                        add_diag_offset(f, 2 * stride + 2 * bpp);
+                    }
+                }
+            }
+            if (f->is_stereo_16) {
+                add_diag_offset(f, 2);
+                add_diag_offset(f, 6);
+            }
+        }
     }
     return 0;
 }
@@ -1906,6 +1952,22 @@ static LZ0_ALWAYS_INLINE void hash_probe_core(lz0_finder *f, uint32_t pos, int m
         }
         while (hits) {
             uint32_t off = (uint32_t)mul[lz0_ctz64(hits)] * stride;
+            hits &= hits - 1;
+            probe_tail(f, in, pos, pos - off, off, minm, maxl, &best_len, out, &nout, cc);
+        }
+    }
+
+    /* Piste B: 2D Raster neighborhood & Multichannel Audio Probing */
+    if (f->num_diag > 0) {
+        uint64_t hits = 0;
+        for (int i = 0; i < f->num_diag; i++) {
+            uint32_t off = f->diag_offsets[i];
+            if (off <= pos) {
+                hits |= (uint64_t)((lz0_ld16(in + pos - off) & pm) == w0) << i;
+            }
+        }
+        while (hits) {
+            uint32_t off = f->diag_offsets[lz0_ctz64(hits)];
             hits &= hits - 1;
             probe_tail(f, in, pos, pos - off, off, minm, maxl, &best_len, out, &nout, cc);
         }
