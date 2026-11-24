@@ -219,6 +219,41 @@ int lz0_compress(const unsigned char *in, size_t in_sz,
     rc = lz0_emit(in, (uint32_t)in_sz, &tl, out, out_sz, &acct);
     double t3 = now_ms();
 
+    /* Piste D: Zero-inflation safety net.
+     * If the parsed stream inflated beyond the cost of a single literal run,
+     * replace it with an exact single LiteralRun token covering the entire input.
+     * A single literal run is guaranteed to cost only in_sz + ceil((2*k + 3)/8) bytes
+     * (at most in_sz + 5..8 bytes), eliminating any parser-induced inflation. */
+    if (rc == 0 && *out && in_sz > 0) {
+        int k = 0;
+        size_t tmp = in_sz;
+        while (tmp >>= 1)
+            k++;
+        size_t single_sz = in_sz + (size_t)(2 * k + 10) / 8;
+        if (*out_sz > single_sz) {
+            lz0_toklist single_tl;
+            lz0_toklist_init(&single_tl);
+            lz0_toklist_push(&single_tl, 0, (uint32_t)in_sz, 0);
+            unsigned char *alt_out = NULL;
+            size_t alt_sz = 0;
+            lz0_bitacct alt_acct;
+            if (lz0_emit(in, (uint32_t)in_sz, &single_tl, &alt_out, &alt_sz, &alt_acct) == 0 && alt_sz < *out_sz) {
+                free(*out);
+                *out = alt_out;
+                *out_sz = alt_sz;
+                acct = alt_acct;
+                lz0_toklist_free(&tl);
+                tl = single_tl;
+                single_tl.t = NULL;
+                single_tl.n = 0;
+                single_tl.cap = 0;
+            } else {
+                free(alt_out);
+                lz0_toklist_free(&single_tl);
+            }
+        }
+    }
+
     uint32_t lo = LZ0_INITIAL_OFFSET;
     for (uint32_t i = 0; i < tl.n; i++) {
         if (!tl.t[i].offset)
