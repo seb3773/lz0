@@ -82,6 +82,19 @@ static inline void u_relax(u_dp *d, uint32_t pos, uint32_t key, int cost, uint32
         *rb = cost;
     size_t base = (size_t)pos * (size_t)d->K;
     int n = d->ns[pos];
+    int w = -1;
+    if (n == d->K) {
+        /* full row: no slot costs more than the worst one, so a transition at
+         * or above it can neither improve a same-key slot nor evict: reject
+         * before the key filter and the vector search (the cached argmax is
+         * recomputed identically whenever invalidated, so caching it here
+         * changes nothing). */
+        if (d->worst[pos] == 0xff)
+            u_find_worst(d, pos);
+        w = d->worst[pos];
+        if (cost >= d->cost[base + w])
+            return;
+    }
     uint64_t bit = 1ull << u_hbit(key);
     if (d->bloom[pos] & bit) {
         /* keys are unique within a row: vector search for the slot */
@@ -96,7 +109,7 @@ static inline void u_relax(u_dp *d, uint32_t pos, uint32_t key, int cost, uint32
             return;
         }
     }
-    if (n < d->K) {
+    if (w < 0) {
         d->key[base + n] = key;
         d->cost[base + n] = cost;
         d->pp[base + n] = pp;
@@ -104,11 +117,7 @@ static inline void u_relax(u_dp *d, uint32_t pos, uint32_t key, int cost, uint32
         d->bloom[pos] |= bit;
         return;
     }
-    if (d->worst[pos] == 0xff)
-        u_find_worst(d, pos);
-    int w = d->worst[pos];
-    if (cost >= d->cost[base + w])
-        return;
+    /* full row, key absent, cost < worst already established: evict w */
     d->key[base + w] = key;
     d->cost[base + w] = cost;
     d->pp[base + w] = pp;
@@ -117,6 +126,24 @@ static inline void u_relax(u_dp *d, uint32_t pos, uint32_t key, int cost, uint32
 }
 
 static void u_emit_last(u_dp *d, uint32_t i, int L, uint32_t off, int cost, uint32_t pp) {
+    if (lz0_len_code == 3 && lz0_ultra_fine == 8) {
+        /* v0.4.0: 1 + elias(l) unrolled for l <= 8, then one end per Elias
+         * plateau [2^(k-1) .. 2^k - 1] (15, 31, 63, ...) costing 2k bits. */
+        static const uint8_t cost_last_1_8[] = {0, 2, 4, 4, 6, 6, 6, 6, 8};
+        int fine = L < 8 ? L : 8;
+        for (int l = 1; l <= fine; l++)
+            u_relax(d, i + (uint32_t)l, off, cost + (int)cost_last_1_8[l], pp);
+        if (L < 9)
+            return;
+        for (int k = 4; k < 31; k++) {
+            int h = (int)((1u << k) - 1u);
+            int end = L < h ? L : h;
+            u_relax(d, i + (uint32_t)end, off, cost + 2 * k, pp);
+            if (L <= h)
+                return;
+        }
+        return;
+    }
     int fine = L < lz0_ultra_fine ? L : lz0_ultra_fine;
     for (int l = 1; l <= fine; l++)
         u_relax(d, i + (uint32_t)l, off, cost + u_cost_last(l), pp);
@@ -131,6 +158,40 @@ static void u_emit_last(u_dp *d, uint32_t i, int L, uint32_t off, int cost, uint
 static void u_emit_new(const lz0_finder *f, u_dp *d, uint32_t i, int L, uint32_t off,
                        int cost, uint32_t pp) {
     int base = cost + u_cost_new_base(off);
+    if (lz0_len_code == 3 && lz0_ultra_fine == 8) {
+        /* v0.4.0: every length 2..8 costs 3 bits, 9 costs 4, then one end per
+         * plateau of the shifted Elias code (+2 bits each), as in lz0_parse.c */
+        int fine = L < 8 ? L : 8;
+        int l = 2;
+        if (fine >= 2 && !lz0_is_len2_allowed(f, off))
+            l = 3;
+        for (; l <= fine; l++)
+            u_relax(d, i + (uint32_t)l, off, base + 3, pp);
+        if (L < 9)
+            return;
+        u_relax(d, i + 9u, off, base + 4, pp);
+        if (L < 10)
+            return;
+        static const int hi[] = {11,   15,   23,   39,    71,    135,   263,  519,
+                                 1031, 2055, 4103, 8199, 16391, 32775, 65543};
+        int cl = 6;
+        int need = 10;
+        for (int p = 0; p < 15; p++) {
+            int h = hi[p];
+            int end = L < h ? L : h;
+            u_relax(d, i + (uint32_t)end, off, base + cl, pp);
+            if (L <= h)
+                return;
+            cl += 2;
+            need = h + 1;
+        }
+        while (need <= L) {
+            int end = lz0_next_plateau_new(need, L);
+            u_relax(d, i + (uint32_t)end, off, base + u_len_new(end), pp);
+            need = end + 1;
+        }
+        return;
+    }
     int fine = L < lz0_ultra_fine ? L : lz0_ultra_fine;
     for (int l = 2; l <= fine; l++) {
         if (l == 2 && !lz0_is_len2_allowed(f, off))
@@ -211,6 +272,7 @@ int lz0_parse_ultra(lz0_finder *f, lz0_toklist *tl) {
     d.best[0] = 0;
 
     lz0_match cands[64];
+    const int lit1 = 10; /* u_cost_lit(1) = 1 + elias(1) + 8 */
     for (uint32_t i = 0; i < n; i++) {
         int nsi = d.ns[i];
         if (nsi == 0)
@@ -234,7 +296,7 @@ int lz0_parse_ultra(lz0_finder *f, lz0_toklist *tl) {
                 b = s;
             uint32_t pp = i | ((uint32_t)s << 24);
             if (!(key & U_LIT_FLAG)) {
-                u_relax(&d, i + 1, off | U_LIT_FLAG, cost + u_cost_lit(1), pp);
+                u_relax(&d, i + 1, off | U_LIT_FLAG, cost + lit1, pp);
             } else {
                 /* extend the literal run from its origin */
                 uint32_t opp = d.pp[base + s];
