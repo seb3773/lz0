@@ -179,16 +179,25 @@
     mov x3, x13
     b \cont
 2:
-    cmp x5, #1
-    b.ne 3f
-    ld1r {v0.16b}, [x15]        /* offset 1: byte broadcast */
-1:
+    cmp x5, #2
+    b.hi 4f
+    b.lo 21f
+    ld1r {v0.8h}, [x15]        /* offset 2: halfword broadcast */
+20:
     str q0, [x3], #16
     cmp x3, x13
-    b.lo 1b
+    b.lo 20b
     mov x3, x13
     b \cont
-3:  /* offset p = 2..7: build y = p-periodic doubleword in a register.
+21:
+    ld1r {v0.16b}, [x15]       /* offset 1: byte broadcast */
+    b 20b
+4:
+    cmp x5, #4
+    b.ne 3f
+    ld1r {v0.4s}, [x15]        /* offset 4: word broadcast */
+    b 20b
+3:  /* offset p = 3, 5, 6, 7: build y = p-periodic doubleword in a register.
        Mask low p bytes with shl/lsr by 64-8p, then duplicate via shifts.
        Store y every s = p*floor(8/p) bytes: no byte loop, one load. */
     lsl x14, x5, #3             /* 8p */

@@ -561,7 +561,12 @@ lz0dec_fast_riscv64:
     addi t1, t6, 8
     bgtu t1, a3, .Lmatch_short_bytes
 
-    # Build 8-byte periodic pattern in t0
+    li t4, 2
+    beq a7, t4, .Lmatch_p2
+    li t4, 4
+    beq a7, t4, .Lmatch_p4
+
+    # Build 8-byte periodic pattern in t0 (offsets 3, 5, 6, 7)
     slli t1, a7, 3              # t1 = 8p
     li t4, 64
     sub t4, t4, t1              # t4 = 64 - 8p
@@ -580,12 +585,29 @@ lz0dec_fast_riscv64:
     srl t4, t4, t1
     andi t4, t4, 0xFF           # t4 = s (8, 6, 8, 5, 6, 7)
 
+.Lmatch_p_store:
 1:
     sd t0, 0(a4)
     add a4, a4, t4
     bltu a4, t6, 1b
     mv a4, t6
     j .Lafter_match
+
+.Lmatch_p2:
+    lhu t0, 0(t3)
+    slli t5, t0, 16
+    or t0, t0, t5
+    slli t5, t0, 32
+    or t0, t0, t5
+    li t4, 8
+    j .Lmatch_p_store
+
+.Lmatch_p4:
+    lwu t0, 0(t3)
+    slli t5, t0, 32
+    or t0, t0, t5
+    li t4, 8
+    j .Lmatch_p_store
 
 .Lmatch_byte_loop:
 .Lmatch_short_bytes:

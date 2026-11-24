@@ -190,21 +190,34 @@
     mov r12, rax
     jmp \cont
 2:
-    cmp rbx, 1
-    jne 3f
+    cmp rbx, 2
+    ja 4f
+    je 22f
     movzx edx, byte ptr [rsi]   /* offset 1: byte broadcast */
     mov rcx, 0x0101010101010101
     imul rdx, rcx
     movq xmm0, rdx
     punpcklqdq xmm0, xmm0
-1:
+20:
     movdqu xmmword ptr [r12], xmm0
     add r12, 16
     cmp r12, rax
-    jb 1b
+    jb 20b
     mov r12, rax
     jmp \cont
-3:  /* offset p = 2..7: build y = p-periodic qword in a register.
+22:                             /* offset 2: halfword broadcast */
+    movzx edx, word ptr [rsi]
+    imul edx, edx, 0x00010001
+    movd xmm0, edx
+    pshufd xmm0, xmm0, 0
+    jmp 20b
+4:
+    cmp rbx, 4
+    jne 3f
+    movd xmm0, dword ptr [rsi]   /* offset 4: dword broadcast */
+    pshufd xmm0, xmm0, 0
+    jmp 20b
+3:  /* offset p = 3, 5, 6, 7: build y = p-periodic qword in a register.
        x = low p bytes of the qword at out-p (shl/shr by 64-8p clears the
        bytes at out.., read inside the wild margin), then
        y = x | x<<8p | x<<16p | x<<24p. The shifts accumulate with count
