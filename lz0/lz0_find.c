@@ -1215,11 +1215,26 @@ static int keep_candidate(lz0_finder *f, lz0_match *out, int *n, int max_c, lz0_
     return 0;
 }
 
+/* Unaligned, alias-safe prefix load; shared by SA and hash probing. */
+static inline uint32_t lz0_ld16(const unsigned char *p) {
+    uint16_t v;
+    memcpy(&v, p, sizeof(v));
+    return v;
+}
+
 static int sa_probe_side(lz0_finder *f, uint32_t pos, uint32_t src, int known,
                          int minm, int maxl, int *best_len, lz0_match *out, int *nout,
                          lz0_sdp_census *cen) {
     const unsigned char *in = f->in;
     int ml;
+    /* Every caller has maxl >= minm >= 2. A differing prefix cannot
+     * change the candidate list or best_len. Census must still measure
+     * the exact (possibly zero or one byte) match as before. */
+    if (!cen && known == 0) {
+        if (lz0_ld16(in + pos) != lz0_ld16(in + src))
+            return 0;
+        known = 2;
+    }
     if (known >= maxl)
         ml = maxl;
     else if (known > 0)
@@ -1356,6 +1371,26 @@ static LZ0_ALWAYS_INLINE void sa_probe_one(lz0_finder *f, uint32_t pos, int rk, 
     }
 }
 
+/* Batch the common, non-LCP interior pair. Invalid sources are mapped to
+ * pos before the prefix load: no future/end-of-input suffix is read.
+ * The two independent loads build a hit mask without branching on
+ * src < pos. Consume it left first, exactly as in the scalar loop; shorter
+ * matches remain candidates even when they cannot improve best_len. */
+static LZ0_ALWAYS_INLINE void sa_probe_pair(lz0_finder *f, uint32_t pos, int left,
+                                            int right, uint32_t prefix, int minm, int maxl,
+                                            int *best_len, lz0_match *out, int *nout) {
+    uint32_t srcL = f->sa[left], srcR = f->sa[right];
+    uint32_t okL = (uint32_t)(srcL < pos), okR = (uint32_t)(srcR < pos);
+    uint32_t safeL = okL ? srcL : pos, safeR = okR ? srcR : pos;
+    uint32_t hits = (okL & (uint32_t)(lz0_ld16(f->in + safeL) == prefix)) |
+                    ((okR & (uint32_t)(lz0_ld16(f->in + safeR) == prefix)) << 1);
+    while (hits) {
+        uint32_t src = (hits & 1u) ? srcL : srcR;
+        hits &= hits - 1u;
+        sa_probe_side(f, pos, src, 2, minm, maxl, best_len, out, nout, NULL);
+    }
+}
+
 /* with_cen and with_pf are compile-time constants at every call site: the
  * census-free path carries no census branches, and inputs below
  * LZ0_SA_PF_MIN_INPUT run a loop with no prefetch code at all. */
@@ -1380,6 +1415,7 @@ static LZ0_ALWAYS_INLINE void sa_probe_core(lz0_finder *f, uint32_t pos, int min
     int accL = INT_MAX;
     int accR = INT_MAX;
     int use_lcp = (lz0_sa_lcp && f->lcp && f->sa_sample <= 1);
+    const uint32_t prefix = (!with_cen && !use_lcp) ? lz0_ld16(f->in + pos) : 0;
     int adapt = lz0_sa_adapt;
     int ms = lz0_sa_multiscale;
     int stop_at = 0;
@@ -1414,12 +1450,16 @@ static LZ0_ALWAYS_INLINE void sa_probe_core(lz0_finder *f, uint32_t pos, int min
         if (with_pf && d + LZ0_SA_PF_K <= pf_lim)
             sa_pf_payload(sa, in, hot, r, ns, d + LZ0_SA_PF_K);
 #endif
-        if (r - d >= 0)
-            sa_probe_one(f, pos, r - d, r - d + 1, &accL, use_lcp, minm, maxl, best_len, out,
-                         nout, cen, with_cen);
-        if (r + d < ns)
-            sa_probe_one(f, pos, r + d, r + d, &accR, use_lcp, minm, maxl, best_len, out, nout,
-                         cen, with_cen);
+        if (!with_cen && !use_lcp && r - d >= 0 && r + d < ns) {
+            sa_probe_pair(f, pos, r - d, r + d, prefix, minm, maxl, best_len, out, nout);
+        } else {
+            if (r - d >= 0)
+                sa_probe_one(f, pos, r - d, r - d + 1, &accL, use_lcp, minm, maxl, best_len, out,
+                             nout, cen, with_cen);
+            if (r + d < ns)
+                sa_probe_one(f, pos, r + d, r + d, &accR, use_lcp, minm, maxl, best_len, out, nout,
+                             cen, with_cen);
+        }
         if (adapt && (d == 4 || d == 8)) {
             if (*best_len >= 16) {
                 stop_at = d;
@@ -1617,12 +1657,6 @@ static int bt_update(lz0_finder *f, uint32_t pos, lz0_match *out, int maxout) {
  *    link depth; the deep probe resumes from there (skip list if present)
  *    instead of re-walking up to 255 dependent links from the head.
  */
-static inline uint32_t lz0_ld16(const unsigned char *p) {
-    uint16_t v;
-    memcpy(&v, p, sizeof(v));
-    return v;
-}
-
 /* lz0_ld16() mask of the early-reject prefix test (see above). */
 static inline uint32_t lz0_prefix_mask(const int with_cen) {
     if (!with_cen)

@@ -19,7 +19,7 @@ LZ0DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.S lz0/lz0dec_fa
 
 VERSION ?= 0.4.0
 
-.PHONY: all bench clean test smoke bounds diag lite32 state sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz guard simd enc_bench enc_tiers find_bench mem_peak lz0 lz0dec cli sanitize valgrind bench_all bench_ratio bench_dec bench_dec_arm64 bench_dec_riscv64 bench_blobs test_arm64 arm64 test_riscv64 riscv64 windows dist dist_linux dist_arm64 dist_riscv64 dist_windows
+.PHONY: all bench clean test smoke bounds diag lite32 state sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz guard simd sa_probe enc_bench enc_tiers find_bench mem_peak lz0 lz0dec cli sanitize valgrind bench_all bench_ratio bench_dec bench_dec_arm64 bench_dec_riscv64 bench_blobs test_arm64 arm64 test_riscv64 riscv64 windows dist dist_linux dist_arm64 dist_riscv64 dist_windows
 
 all: bench/lz0_bench bench/lz0_smoke bench/lz0_bounds bench/lz0_diag_rep bench/lz0_lite32 bench/lz0_diag_state bench/lz0_sdp32 bench/lz0_scale bench/lz0_prof bench/lz0_cmpfind bench/lz0_jumpsweep bench/lz0_pruneab bench/lz0_bits bench/lz0_final
 
@@ -278,6 +278,12 @@ tests/test_simd: tests/test_simd.c $(LZ0_SIMD_SRC) lz0/lz0_simd.h
 simd: tests/test_simd
 	./tests/test_simd
 
+tests/test_sa_probe: tests/test_sa_probe.c lz0/lz0_cost.c lz0/lz0_parse.c lz0/lz0_emit.c lz0/lz0_decompress.c lz0/lz0_compress.c lz0/lz0_ultra.c $(LZ0_SIMD_SRC)
+	$(CC) $(CFLAGS) -o $@ tests/test_sa_probe.c lz0/lz0_cost.c lz0/lz0_parse.c lz0/lz0_emit.c lz0/lz0_decompress.c lz0/lz0_compress.c lz0/lz0_ultra.c $(LZ0_SIMD_SRC) -lm
+
+sa_probe: tests/test_sa_probe
+	./tests/test_sa_probe
+
 bench/lz0_enc_bench: bench/enc_bench.c $(LZ0_SRC) $(LZ0DEC_SRC)
 	$(CC) $(CFLAGS) -o $@ bench/enc_bench.c $(LZ0_SRC) $(LZ0DEC_SRC) -lm
 
@@ -392,5 +398,5 @@ riscv64: test_riscv64
 
 clean:
 	rm -f bench/lz0_* bench/dump_rep bench/debug_a3 bench/count_bench bench/scatter_bench
-	rm -f bin/lz0* tests/test_vectors tests/test_boundary tests/test_malformed tests/test_fuzz tests/test_guard tests/test_simd tests/*_arm64 tests/*_riscv64
+	rm -f bin/lz0* tests/test_vectors tests/test_boundary tests/test_malformed tests/test_fuzz tests/test_guard tests/test_simd tests/test_sa_probe tests/*_arm64 tests/*_riscv64
 	rm -rf dist build
