@@ -1692,6 +1692,16 @@ static inline void sdp_relax(sdp_rows *d, uint32_t pos, uint32_t key, int cost,
     int n = d->ns[pos];
     if (cen)
         cen->n_relax++;
+    int w = -1;
+    if (n == K) {
+        w = d->worst[pos];
+        if (w == 0xff) {
+            w = lz0_simd_argmax_i32(d->cost + base, K);
+            d->worst[pos] = (uint8_t)w;
+        }
+        if (cost >= d->cost[base + (size_t)w])
+            return;
+    }
     /* keys are unique within a row; the filter rejects most absent keys
      * without searching (a false positive only costs the vector search) */
     uint64_t bit = sdp_key_bit(key);
@@ -1717,26 +1727,49 @@ static inline void sdp_relax(sdp_rows *d, uint32_t pos, uint32_t key, int cost,
         d->bloom[pos] |= bit;
         return;
     }
-    /* full row: evict the first slot holding the highest cost */
-    int w = d->worst[pos];
-    if (w == 0xff) {
-        w = lz0_simd_argmax_i32(d->cost + base, K);
-        d->worst[pos] = (uint8_t)w;
-    }
+    /* full row: evict the slot holding the highest cost (cost < worst_cost is guaranteed) */
     if (cen)
         cen->n_evicted++;
-    if (cost < d->cost[base + (size_t)w]) {
-        d->key[base + (size_t)w] = key;
-        d->cost[base + (size_t)w] = cost;
-        d->prev_pos[base + (size_t)w] = prev_pos;
-        d->prev_slot[base + (size_t)w] = prev_slot;
-        d->worst[pos] = 0xff;
-        d->bloom[pos] |= bit;
-    }
+    d->key[base + (size_t)w] = key;
+    d->cost[base + (size_t)w] = cost;
+    d->prev_pos[base + (size_t)w] = prev_pos;
+    d->prev_slot[base + (size_t)w] = prev_slot;
+    d->worst[pos] = 0xff;
+    d->bloom[pos] |= bit;
 }
 
 static void sdp_emit_last(sdp_rows *d, uint32_t i, int L, uint32_t last_off, int cost,
                           uint8_t slot, lz0_sdp_census *cen) {
+    if (lz0_len_code == 3) {
+        if (lz0_sdp_fine_matches) {
+            static const uint8_t cost_last_1_8[] = {0, 2, 4, 4, 6, 6, 6, 6, 8};
+            int max_fine = L < 8 ? L : 8;
+            for (int l = 1; l <= max_fine; l++)
+                sdp_relax(d, i + (uint32_t)l, last_off, cost + (int)cost_last_1_8[l], i, slot, cen);
+            if (L <= 8)
+                return;
+            uint32_t hi = 15u;
+            int add = 8;
+            for (;;) {
+                int end = hi < (uint32_t)L ? (int)hi : L;
+                sdp_relax(d, i + (uint32_t)end, last_off, cost + add, i, slot, cen);
+                if (end == L)
+                    return;
+                hi = (hi << 1) | 1u;
+                add += 2;
+            }
+        }
+        uint32_t hi = 1u;
+        int add = 2;
+        for (;;) {
+            int end = hi < (uint32_t)L ? (int)hi : L;
+            sdp_relax(d, i + (uint32_t)end, last_off, cost + add, i, slot, cen);
+            if (end == L)
+                return;
+            hi = (hi << 1) | 1u;
+            add += 2;
+        }
+    }
     int start = 1;
     if (lz0_sdp_fine_matches) {
         int max_fine = L < 8 ? L : 8;
@@ -1754,6 +1787,43 @@ static void sdp_emit_last(sdp_rows *d, uint32_t i, int L, uint32_t last_off, int
 static void sdp_emit_new(const lz0_finder *f, sdp_rows *d, uint32_t i, int L, uint32_t off,
                          int cost, uint8_t slot, lz0_sdp_census *cen) {
     int len2 = lz0_is_len2_allowed(f, off);
+    if (L < 2 || (L == 2 && !len2))
+        return;
+    if (lz0_len_code == 3 && lz0_offset_lsb_bits == 8) {
+        int cbase = cost + 10 + sdp_elias_bits((((int)off - 1) >> 8) + 1);
+        if (lz0_sdp_fine_matches) {
+            int max_fine = L < 8 ? L : 8;
+            for (int l = len2 ? 2 : 3; l <= max_fine; l++)
+                sdp_relax(d, i + (uint32_t)l, off, cbase + 3, i, slot, cen);
+        } else {
+            sdp_relax(d, i + (uint32_t)(L < 8 ? L : 8), off, cbase + 3, i, slot, cen);
+        }
+        if (L < 9)
+            return;
+        sdp_relax(d, i + 9u, off, cbase + 4, i, slot, cen);
+        if (L < 10)
+            return;
+        static const int hi[] = {11,  15,   23,   39,    71,    135,   263,  519,
+                                 1031, 2055, 4103, 8199,  16391, 32775, 65543};
+        int cl = 6;
+        int need = 10;
+        for (int p = 0; p < 15 && L >= need; p++) {
+            int h = hi[p];
+            int end = L < h ? L : h;
+            sdp_relax(d, i + (uint32_t)end, off, cbase + cl, i, slot, cen);
+            if (L <= h)
+                return;
+            cl += 2;
+            need = h + 1;
+        }
+        while (need <= L) {
+            int end = lz0_next_plateau_new(need, L);
+            sdp_relax(d, i + (uint32_t)end, off, cost + lz0_cost_new((int)off, end), i, slot,
+                      cen);
+            need = end + 1;
+        }
+        return;
+    }
     int start;
     if (lz0_sdp_fine_matches) {
         int max_fine = L < 8 ? L : 8;
@@ -1852,6 +1922,7 @@ int lz0_parse_sdp(lz0_finder *f, lz0_toklist *tl) {
     d.ns[0] = 1;
 
     lz0_match cands[64];
+    const int lit1 = (lz0_len_code == 3) ? 10 : lz0_cost_literal(1);
     for (uint32_t i = 0; i < n; i++) {
         int nsi = d.ns[i];
         if (nsi == 0)
@@ -1872,7 +1943,7 @@ int lz0_parse_sdp(lz0_finder *f, lz0_toklist *tl) {
             uint8_t slot = (uint8_t)s;
             if (!(key & SDP_LIT_FLAG)) {
                 /* start a literal run */
-                sdp_relax(&d, i + 1, key | SDP_LIT_FLAG, cost + lz0_cost_literal(1), i, slot,
+                sdp_relax(&d, i + 1, key | SDP_LIT_FLAG, cost + lit1, i, slot,
                           cen);
             } else {
                 /* extend the literal run from its origin (states at i > 0 always
