@@ -456,11 +456,62 @@ lz0dec_fast_x86_64:
     COMMIT
     TO_SAFE
     jmp .S_new_body
+
+/* ---- MatchLast and MatchNew lengths with 9 <= n <= 15 payload bits ----
+   Window holds >= 61 valid bits at MatchLast (only 1 bit consumed after WINDOW)
+   and >= 58 valid bits at MatchNew length (only 3 bits consumed after WINDOW).
+   Decoding 9..15 bits directly in the window avoids falling back to SAFE and
+   enables 16-byte vectorized wildcopies for long matches. */
+.Ff_ml:
+    mov rdx, 0xAAAAAAAA00000000 /* control bits c0..c15 */
+    and rdx, rdi
+    jz .Ff_ml_safe
+    pxor xmm1, xmm1             /* extra len = 0 */
+    jmp .Ff_len_common
+
 .Ff_len:
+    mov rdx, 0xAAAAAAAA00000000 /* control bits c0..c15 */
+    and rdx, rdi
+    jz .Ff_len_safe
+    mov eax, 8
+    movd xmm1, eax              /* extra len = 8 */
+
+.Ff_len_common:
+    mov rax, rdi
+    shr rax, 32                 /* eax = b0 b1 b2 b3 (b0 = top byte) */
+    movzx ecx, al
+    movzx esi, byte ptr [r15 + rcx]   /* d13..d16 */
+    movzx ecx, ah
+    movzx ecx, byte ptr [r15 + rcx]   /* d9..d12 */
+    shl ecx, 4
+    or esi, ecx
+    shr eax, 16
+    movzx ecx, al
+    movzx ecx, byte ptr [r15 + rcx]   /* d5..d8 */
+    shl ecx, 8
+    or esi, ecx
+    movzx ecx, ah
+    movzx ecx, byte ptr [r15 + rcx]   /* d1..d4 */
+    shl ecx, 12
+    or esi, ecx
+    or esi, 0x10000             /* set leading 1 (non-inverted) */
+    bsr rdx, rdx                /* b = 63 - 2n */
+    mov ecx, 64
+    sub ecx, edx                /* consumed = 2n + 1 */
+    shl rdi, cl
+    add rbp, rcx
+    lea ecx, [rdx - 31]
+    shr ecx, 1                  /* 16 - n */
+    shr esi, cl
+    movd eax, xmm1
+    lea rcx, [rsi + rax]
+    jmp .F_copy
+
+.Ff_len_safe:
     COMMIT
     TO_SAFE
     jmp .S_new_len_elias
-.Ff_ml:
+.Ff_ml_safe:
     COMMIT
     TO_SAFE
     jmp .S_match_last

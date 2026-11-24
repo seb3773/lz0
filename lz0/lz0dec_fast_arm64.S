@@ -409,11 +409,58 @@ lz0dec_fast_arm64:
     COMMIT
     TO_SAFE
     b .S_new_body
+
+/* ---- MatchLast and MatchNew lengths with 9 <= n <= 15 payload bits ----
+   Window holds >= 61 valid bits at MatchLast (only 1 bit consumed after WINDOW)
+   and >= 58 valid bits at MatchNew length (only 3 bits consumed after WINDOW).
+   Decoding 9..15 bits directly in the window avoids falling back to SAFE and
+   enables 16-byte vectorized wildcopies for long matches. */
+.Ff_ml:
+    movz x13, #0xAAAA, lsl #48  /* control bits c0..c15 */
+    movk x13, #0xAAAA, lsl #32
+    ands x13, x10, x13
+    b.eq .Ff_ml_safe
+    mov w15, #0
+    fmov s0, w15
+    b .Ff_len_common
+
 .Ff_len:
+    movz x13, #0xAAAA, lsl #48  /* control bits c0..c15 */
+    movk x13, #0xAAAA, lsl #32
+    ands x13, x10, x13
+    b.eq .Ff_len_safe
+    mov w15, #8
+    fmov s0, w15
+
+.Ff_len_common:
+    clz x13, x13                /* 2n */
+    ubfx x17, x10, #56, #8
+    ubfx x15, x10, #48, #8
+    ubfx x14, x10, #40, #8
+    ubfx x16, x10, #32, #8
+    ldrb w17, [x12, x17]        /* d1..d4   */
+    ldrb w15, [x12, x15]        /* d5..d8   */
+    ldrb w14, [x12, x14]        /* d9..d12  */
+    ldrb w16, [x12, x16]        /* d13..d16 */
+    orr w16, w16, w14, lsl #4
+    orr w16, w16, w15, lsl #8
+    orr w16, w16, w17, lsl #12
+    orr w16, w16, #0x10000      /* non-inverted: leading 1 */
+    add x17, x13, #1            /* consumed = 2n + 1 */
+    lsl x10, x10, x17
+    add x9, x9, x17
+    lsr x13, x13, #1            /* n */
+    lsl w16, w16, w13
+    lsr x16, x16, #16           /* 1 d1 .. dn */
+    fmov w15, s0
+    add x14, x16, x15           /* length + extra */
+    b .F_copy
+
+.Ff_len_safe:
     COMMIT
     TO_SAFE
     b .S_new_len_elias
-.Ff_ml:
+.Ff_ml_safe:
     COMMIT
     TO_SAFE
     b .S_match_last
