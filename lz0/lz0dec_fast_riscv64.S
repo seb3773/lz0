@@ -480,31 +480,27 @@ lz0dec_fast_riscv64:
     j .Lafter_match
 
 .Lmatch_large_8:
-    li t0, 8
-.Lmatch_8_loop:
-    bltu t2, t0, .Lmatch_8_tail
-    ld t4, 0(t3)
-    sd t4, 0(a4)
-    addi t3, t3, 8
-    addi a4, a4, 8
-    addi t2, t2, -8
-    j .Lmatch_8_loop
+    add t6, a4, t2              # final out_ptr
+    addi t1, t6, 8
+    bgtu t1, a3, .Lmatch_byte_loop
 
-.Lmatch_8_tail:
-    beqz t2, .Lafter_match
-    addi t0, a4, 8
-    bgtu t0, a3, .Lmatch_byte_loop
-    addi t1, t2, -8
-    add t4, t3, t1
-    add t5, a4, t1
-    ld t0, 0(t4)
-    sd t0, 0(t5)
-    add a4, a4, t2
+    # offset 8..15: pre-load lo and hi before out_ptr to avoid STLF stalls
+    ld t0, 0(t3)                # lo = out[-off..-off+7]
+    addi t4, a4, -8
+    ld t4, 0(t4)                # hi = out[-8..-1]
+    addi t5, a7, -8             # off - 8
+1:
+    sd t0, 0(a4)
+    add t1, a4, t5
+    sd t4, 0(t1)
+    add a4, a4, a7
+    bltu a4, t6, 1b
+    mv a4, t6
     j .Lafter_match
 
 .Lmatch_overlap_short:
     li t0, 1
-    bne a7, t0, .Lmatch_short_bytes
+    bne a7, t0, .Lmatch_periodic_2_7
 
     # ================= Case C: offset == 1 (run of byte) =================
     lbu t0, 0(t3)
@@ -558,6 +554,38 @@ lz0dec_fast_riscv64:
     addi a4, a4, 1
     addi t2, t2, -1
     j .Lfill1_bytes
+
+.Lmatch_periodic_2_7:
+    # Check boundary: if out_ptr + len + 8 > out_end, use safe byte copy
+    add t6, a4, t2              # t6 = final out_ptr
+    addi t1, t6, 8
+    bgtu t1, a3, .Lmatch_short_bytes
+
+    # Build 8-byte periodic pattern in t0
+    slli t1, a7, 3              # t1 = 8p
+    li t4, 64
+    sub t4, t4, t1              # t4 = 64 - 8p
+    ld t0, 0(t3)
+    sll t0, t0, t4
+    srl t0, t0, t4              # t0 masked to low p bytes
+    sll t5, t0, t1
+    or t0, t0, t5
+    sll t5, t5, t1
+    or t0, t0, t5
+    sll t5, t5, t1
+    or t0, t0, t5
+
+    # Step size s = p * floor(8/p) packed into 64-bit constant
+    li t4, 0x0706050806080000
+    srl t4, t4, t1
+    andi t4, t4, 0xFF           # t4 = s (8, 6, 8, 5, 6, 7)
+
+1:
+    sd t0, 0(a4)
+    add a4, a4, t4
+    bltu a4, t6, 1b
+    mv a4, t6
+    j .Lafter_match
 
 .Lmatch_byte_loop:
 .Lmatch_short_bytes:

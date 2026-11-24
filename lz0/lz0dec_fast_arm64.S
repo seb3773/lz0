@@ -38,7 +38,7 @@
  *   x9  fast: bit counter q (segment start = 7 - leftover bits)
  *   x10 fast: bit window
  *   x11 0xAAAA800000000000 (Elias control-bit mask)
- *   x12 table base (.Lunzip, then .Le_tab at +256)
+ *   x12 table base (.Lunzip, then .Ls_tab at +256)
  *   x13..x17, v0 : scratch
  */
 
@@ -163,9 +163,17 @@
 8881:
     cmp x5, #8
     b.lo 2f
-1:                              /* offset 8..15 */
-    ldr x17, [x15], #8
-    str x17, [x3], #8
+    /* offset 8..15: lo = out[-off..-off+7] and hi = out[-8..-1] together
+       hold the whole period (off <= 16) and both loads end before out.
+       Each step stores lo at q and hi at q+off-8, then q += off. */
+    ldr x16, [x15]              /* lo */
+    sub x17, x3, #8
+    ldr x17, [x17]              /* hi */
+    sub x14, x5, #8             /* off - 8 */
+1:
+    str x16, [x3]
+    str x17, [x3, x14]
+    add x3, x3, x5
     cmp x3, x13
     b.lo 1b
     mov x3, x13
@@ -180,24 +188,28 @@
     b.lo 1b
     mov x3, x13
     b \cont
-3:                              /* offset 2..7 */
-    add x17, x3, #8
-1:
-    ldrb w16, [x15], #1
-    strb w16, [x3], #1
-    cmp x3, x17
-    b.lo 1b
-    cmp x3, x13
-    b.hs 2f
-    add x16, x12, #256          /* e = off*ceil(8/off) in 8..14 */
+3:  /* offset p = 2..7: build y = p-periodic doubleword in a register.
+       Mask low p bytes with shl/lsr by 64-8p, then duplicate via shifts.
+       Store y every s = p*floor(8/p) bytes: no byte loop, one load. */
+    lsl x14, x5, #3             /* 8p */
+    mov x16, #64
+    sub x16, x16, x14           /* 64 - 8p */
+    ldr x17, [x15]
+    lsl x17, x17, x16
+    lsr x17, x17, x16
+    lsl x15, x17, x14
+    orr x17, x17, x15
+    lsl x15, x15, x14
+    orr x17, x17, x15
+    lsl x15, x15, x14
+    orr x17, x17, x15
+    add x16, x12, #256          /* .Ls_tab at .Lunzip + 256 */
     ldrb w16, [x16, x5]
-    sub x15, x3, x16
 1:
-    ldr x17, [x15], #8
-    str x17, [x3], #8
+    str x17, [x3]
+    add x3, x3, x16
     cmp x3, x13
     b.lo 1b
-2:
     mov x3, x13
     b \cont
   .subsection 0
@@ -578,8 +590,8 @@ lz0dec_fast_arm64:
     .byte 12,13,12,13,14,15,14,15,12,13,12,13,14,15,14,15
     .byte 8,9,8,9,10,11,10,11,8,9,8,9,10,11,10,11
     .byte 12,13,12,13,14,15,14,15,12,13,12,13,14,15,14,15
-.Le_tab:                        /* .Lunzip + 256 */
-    .byte 0, 0, 8, 9, 8, 10, 12, 14
+.Ls_tab:                        /* .Lunzip + 256: s = p*floor(8/p) */
+    .byte 0, 0, 8, 6, 8, 5, 6, 7
 
 #if defined(__ELF__)
     .section .note.GNU-stack,"",%progbits
