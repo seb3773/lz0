@@ -104,9 +104,9 @@ static LZ0_ALWAYS_INLINE void sa_ref_core(lz0_finder *f, uint32_t pos, int minm,
     int ns = (int)f->sa_n;
     int accL = INT_MAX;
     int accR = INT_MAX;
-    int use_lcp = (lz0_sa_lcp && f->lcp && f->sa_sample <= 1);
-    int adapt = lz0_sa_adapt;
-    int ms = lz0_sa_multiscale;
+    int use_lcp = (f->opts.sa_lcp && f->lcp && f->sa_sample <= 1);
+    int adapt = f->opts.sa_adapt;
+    int ms = f->opts.sa_multiscale;
     int stop_at = 0;
     if (with_cen)
         cen->n_sa_invoke++;
@@ -193,7 +193,8 @@ int main(void) {
     in[254] = 'a'; in[255] = 'b';
     lz0_finder f = {0};
     f.in = in; f.n = 256; f.max_candidates = 64; f.min_match = 2;
-    lz0_len2_max_off = 0; /* This fixture admits every nonzero length-2 offset. */
+    f.opts.isolated = 1;
+    f.opts.len2_max_off = 0; /* This fixture admits every nonzero length-2 offset. */
     lz0_match out[64] = {{0}};
     int count = 0, best = 16;
 
@@ -242,8 +243,8 @@ int main(void) {
         for (int ms = 0; ms <= 2; ms++) {
             lz0_config cfg;
             lz0_config_level(&cfg, level);
-            lz0_sa_lcp = lcp; lz0_sa_sample = sample;
-            lz0_sa_adapt = adapt; lz0_sa_multiscale = ms;
+            cfg.sa_lcp = lcp; cfg.sa_sample = sample;
+            cfg.sa_adapt = adapt; cfg.sa_multiscale = ms;
             lz0_finder opt, ref;
             assert(lz0_finder_init(&opt, in, 256, &cfg) == 0);
             assert(lz0_finder_init(&ref, in, 256, &cfg) == 0);

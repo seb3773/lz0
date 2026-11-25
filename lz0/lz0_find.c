@@ -87,21 +87,21 @@ static void census_ml(lz0_sdp_census *cen, int ml) {
 }
 
 static void sa_counting_sort(uint32_t *sa, uint32_t *out, const int *key, int n, int maxk,
-                             lz0_sdp_census *cen, int smode) {
+                             lz0_sdp_census *cen, int smode, const lz0_config *opts) {
     double t0 = cen ? sa_now_ms() : 0;
     int *cnt = (int *)calloc((size_t)maxk + 1, sizeof(int));
     double t1 = cen ? sa_now_ms() : 0;
     if (!cnt)
         return;
-    if (lz0_sa_count_mode == 1) {
-        const int look = lz0_sa_pf_look;
+    const int cmode = opts->sa_count_mode;
+    const int look = opts->sa_pf_look;
+    if (cmode == 1) {
         for (int i = 0; i < n; i++) {
             if (i + look < n)
                 __builtin_prefetch(&key[sa[i + look]], 0, 1);
             cnt[key[sa[i]]]++;
         }
-    } else if (lz0_sa_count_mode == 2) {
-        const int look = lz0_sa_pf_look;
+    } else if (cmode == 2) {
         for (int i = 0; i < n; i++) {
             if (i + look < n) {
                 __builtin_prefetch(&sa[i + look], 0, 3);
@@ -109,8 +109,7 @@ static void sa_counting_sort(uint32_t *sa, uint32_t *out, const int *key, int n,
             }
             cnt[key[sa[i]]]++;
         }
-    } else if (lz0_sa_count_mode == 3) {
-        const int look = lz0_sa_pf_look;
+    } else if (cmode == 3) {
         for (int i = 0; i < n; i++) {
             if (i + look < n) {
                 uint32_t s = sa[i + look];
@@ -128,7 +127,6 @@ static void sa_counting_sort(uint32_t *sa, uint32_t *out, const int *key, int n,
         cnt[i] += cnt[i - 1];
     double t3 = cen ? sa_now_ms() : 0;
     if (smode == 1) {
-        const int look = lz0_sa_pf_look;
         for (int i = n - 1; i >= 0; i--) {
             if (i - look >= 0)
                 __builtin_prefetch(&out[cnt[key[sa[i - look]]] - 1], 1, 1);
@@ -152,7 +150,7 @@ static void sa_counting_sort(uint32_t *sa, uint32_t *out, const int *key, int n,
 }
 
 static int sa_build_full_impl(lz0_finder *f, int v2) {
-    lz0_sdp_census *cen = lz0_sdp_census_out;
+    lz0_sdp_census *cen = (lz0_sdp_census *)f->census;
     int n = (int)f->n;
     double t0 = sa_now_ms();
     uint32_t *sa = (uint32_t *)malloc((size_t)n * sizeof(uint32_t));
@@ -184,11 +182,11 @@ static int sa_build_full_impl(lz0_finder *f, int v2) {
             for (int i = 0; i < n; i++)
                 k2[i] = (i + k < n) ? rank[i + k] + 1 : 0;
             double tb = sa_now_ms();
-            sa_counting_sort(sa, tmp, k2, n, maxk + 1, cen, 0);
+            sa_counting_sort(sa, tmp, k2, n, maxk + 1, cen, 0, &f->opts);
             double tc = sa_now_ms();
             memcpy(sa, tmp, (size_t)n * sizeof(uint32_t));
             double td = sa_now_ms();
-            sa_counting_sort(sa, tmp, rank, n, maxk, cen, 0);
+            sa_counting_sort(sa, tmp, rank, n, maxk, cen, 0, &f->opts);
             double te = sa_now_ms();
             memcpy(sa, tmp, (size_t)n * sizeof(uint32_t));
             double tf = sa_now_ms();
@@ -211,7 +209,7 @@ static int sa_build_full_impl(lz0_finder *f, int v2) {
                     tmp[m++] = p - (uint32_t)k;
             }
             double tb = sa_now_ms();
-            sa_counting_sort(tmp, sa, rank, n, maxk, cen, lz0_sa_csort_smode);
+            sa_counting_sort(tmp, sa, rank, n, maxk, cen, f->opts.sa_csort_smode, &f->opts);
             double tc = sa_now_ms();
             if (cen) {
                 cen->ms_sa_k2 += tb - ta;
@@ -483,16 +481,62 @@ static int sa_build_sais(lz0_finder *f) {
     return 0;
 }
 
+static void lz0_opts_from_globals(const lz0_config *cfg, lz0_config *out) {
+    if (cfg)
+        *out = *cfg;
+    else {
+        memset(out, 0, sizeof(*out));
+        out->min_match = 2;
+        out->max_chain = 8;
+        out->max_candidates = 16;
+        out->score_k = 8;
+        out->max_states = 2;
+    }
+    if (out->isolated)
+        return;
+    out->offset_lsb_bits = lz0_offset_lsb_bits;
+    out->len_code = lz0_len_code;
+    out->chain_prune = lz0_chain_prune;
+    out->chain_noskip = lz0_chain_noskip;
+    out->skip_thresh = lz0_skip_thresh;
+    out->skip_stride = lz0_skip_stride;
+    out->hash4_probe = lz0_hash4_probe;
+    out->deep_probe = lz0_deep_probe;
+    out->sa_win = lz0_sa_win;
+    out->sa_lcp = lz0_sa_lcp;
+    out->sa_sample = lz0_sa_sample;
+    out->sa_hybrid = lz0_sa_hybrid;
+    out->sa_thresh = lz0_sa_thresh;
+    out->sa_adapt = lz0_sa_adapt;
+    out->sa_multiscale = lz0_sa_multiscale;
+    out->sa_csort_v2 = lz0_sa_csort_v2;
+    out->sa_csort_smode = lz0_sa_csort_smode;
+    out->sa_pf_look = lz0_sa_pf_look;
+    out->sa_count_mode = lz0_sa_count_mode;
+    out->sa_algo = lz0_sa_algo;
+    out->sdp_fine_matches = lz0_sdp_fine_matches;
+    out->len2_max_off = lz0_len2_max_off;
+    out->rle_tail = lz0_rle_tail;
+    out->ultra_states = lz0_ultra_states;
+    out->ultra_budget = lz0_ultra_budget;
+    out->ultra_margin = lz0_ultra_margin;
+    out->ultra_fine = lz0_ultra_fine;
+    out->ultra_inject = lz0_ultra_inject;
+    out->legacy_single_window_scan = lz0_legacy_single_window_scan;
+}
+
 static int sa_build_full(lz0_finder *f) {
-    if (lz0_sa_algo == 1)
+    if (f->opts.sa_algo == 1)
         return sa_build_sais(f);
-    return sa_build_full_impl(f, lz0_sa_csort_v2);
+    return sa_build_full_impl(f, f->opts.sa_csort_v2);
 }
 
 int lz0_sa_debug_build(const unsigned char *in, size_t n, int v2,
                        uint32_t **sa_out, uint32_t **rank_out) {
     lz0_finder f;
     memset(&f, 0, sizeof(f));
+    lz0_opts_from_globals(NULL, &f.opts);
+    f.census = lz0_sdp_census_out;
     f.in = in;
     f.n = (uint32_t)n;
     if (sa_build_full_impl(&f, v2) != 0)
@@ -506,13 +550,15 @@ int lz0_sa_debug_build_algo(const unsigned char *in, size_t n, int algo,
                             uint32_t **sa_out, uint32_t **rank_out) {
     lz0_finder f;
     memset(&f, 0, sizeof(f));
+    lz0_opts_from_globals(NULL, &f.opts);
+    f.census = lz0_sdp_census_out;
     f.in = in;
     f.n = (uint32_t)n;
     int rc;
     if (algo == 1)
         rc = sa_build_sais(&f);
     else
-        rc = sa_build_full_impl(&f, lz0_sa_csort_v2);
+        rc = sa_build_full_impl(&f, f.opts.sa_csort_v2);
     if (rc != 0)
         return -1;
     *sa_out = f.sa;
@@ -782,14 +828,15 @@ static int lz0_detect_strides_win(const unsigned char *win, uint32_t win_sz,
 int lz0_legacy_single_window_scan = 0;
 
 /* Multi-window stride scanning across the entire buffer */
-static int lz0_detect_strides(const unsigned char *in, uint32_t n, uint32_t *strides, int max_strides) {
+static int lz0_detect_strides(const unsigned char *in, uint32_t n, uint32_t *strides, int max_strides,
+                              int single_window) {
     if (n < 64 || max_strides <= 0)
         return 0;
     int n_out = 0;
     /* Window 0 at the start */
     n_out = lz0_detect_strides_win(in, n, strides, 0, max_strides);
 
-    if (lz0_legacy_single_window_scan)
+    if (single_window)
         return n_out;
 
     /* For buffers > 32 KB (e.g. multi-resource blobs), sample additional windows */
@@ -836,14 +883,19 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
                     const lz0_config *cfg) {
     memset(f, 0, sizeof(*f));
     lz0_simd_init();
+    lz0_opts_from_globals(cfg, &f->opts);
+    if (!f->opts.isolated) {
+        f->census = lz0_sdp_census_out;
+        f->dp_census = lz0_dp_census_out;
+    }
     f->in = in;
     f->n = n;
-    f->min_match = cfg->min_match < 2 ? 2 : cfg->min_match;
-    f->max_chain = cfg->max_chain < 1 ? 1 : cfg->max_chain;
-    f->max_candidates = cfg->max_candidates < 1 ? 1 : cfg->max_candidates;
-    f->score_k = cfg->score_k > 0 ? cfg->score_k : 8;
-    f->max_states = cfg->max_states > 0 ? cfg->max_states : 2;
-    f->jump_levels = cfg->jump_levels;
+    f->min_match = f->opts.min_match < 2 ? 2 : f->opts.min_match;
+    f->max_chain = f->opts.max_chain < 1 ? 1 : f->opts.max_chain;
+    f->max_candidates = f->opts.max_candidates < 1 ? 1 : f->opts.max_candidates;
+    f->score_k = f->opts.score_k > 0 ? f->opts.score_k : 8;
+    f->max_states = f->opts.max_states > 0 ? f->opts.max_states : 2;
+    f->jump_levels = f->opts.jump_levels;
     if (f->jump_levels < 0)
         f->jump_levels = 0;
     if (f->jump_levels > LZ0_JUMP_LEVELS)
@@ -861,15 +913,17 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
     f->rank = NULL;
     f->lcp = NULL;
     f->sa_n = 0;
-    f->sa_win = lz0_sa_win;
-    f->sa_sample = lz0_sa_sample > 0 ? lz0_sa_sample : 1;
-    lz0_sa_build_ms = 0;
-    int need_hash = (lz0_sa_hybrid != 0) || (lz0_sa_win <= 0);
-    int need_sa = (lz0_sa_win > 0);
+    f->sa_win = f->opts.sa_win;
+    f->sa_sample = f->opts.sa_sample > 0 ? f->opts.sa_sample : 1;
+    f->sa_build_ms = 0;
+    if (!f->opts.isolated)
+        lz0_sa_build_ms = 0;
+    int need_hash = (f->opts.sa_hybrid != 0) || (f->opts.sa_win <= 0);
+    int need_sa = (f->opts.sa_win > 0);
     if (need_hash) {
         f->prev = (uint32_t *)malloc((size_t)n * sizeof(uint32_t));
         f->head = (uint32_t *)malloc((size_t)LZ0_HASH_SIZE * sizeof(uint32_t));
-        if (lz0_hash4_probe != 0) {
+        if (f->opts.hash4_probe != 0) {
             f->head4 = (uint32_t *)malloc((size_t)LZ0_HASH_SIZE * sizeof(uint32_t));
             if (!f->head4) {
                 lz0_finder_free(f);
@@ -877,7 +931,7 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
             }
             memset(f->head4, 0xff, (size_t)LZ0_HASH_SIZE * sizeof(uint32_t));
         }
-        if (lz0_chain_prune == 4) {
+        if (f->opts.chain_prune == 4) {
             f->head3 = (uint32_t *)malloc((size_t)LZ0_HASH_SIZE * sizeof(uint32_t));
             if (!f->head3) {
                 lz0_finder_free(f);
@@ -899,7 +953,7 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
             lz0_finder_free(f);
             return -1;
         }
-        if (lz0_sa_lcp && f->sa_sample <= 1) {
+        if (f->opts.sa_lcp && f->sa_sample <= 1) {
             if (sa_build_lcp(f) != 0) {
                 lz0_finder_free(f);
                 return -1;
@@ -911,12 +965,15 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
                 return -1;
             }
         }
-        lz0_sa_build_ms = sa_now_ms() - t0;
-        if (lz0_sdp_census_out)
-            lz0_sdp_census_out->ms_sa_build = lz0_sa_build_ms;
+        f->sa_build_ms = sa_now_ms() - t0;
+        if (!f->opts.isolated) {
+            lz0_sa_build_ms = f->sa_build_ms;
+            if (f->census)
+                ((lz0_sdp_census *)f->census)->ms_sa_build = f->sa_build_ms;
+        }
     }
-    if (cfg->bt_depth > 0) {
-        f->bt_depth = cfg->bt_depth;
+    if (f->opts.bt_depth > 0) {
+        f->bt_depth = f->opts.bt_depth;
         int hb = 16;
         while (hb < 22 && (1u << hb) < n)
             hb++;
@@ -937,8 +994,9 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
     f->is_stereo_16 = 0;
     f->is_high_entropy = (uint8_t)lz0_detect_high_entropy(in, n);
     f->num_diag = 0;
-    if (cfg->max_candidates >= 16) {
-        f->num_strides = lz0_detect_strides(in, n, f->strides, lz0_legacy_single_window_scan ? 4 : 8);
+    if (f->opts.max_candidates >= 16) {
+        int single_win = f->opts.legacy_single_window_scan;
+        f->num_strides = lz0_detect_strides(in, n, f->strides, single_win ? 4 : 8, single_win);
         for (int i = 0; i < f->num_strides; i++) {
             uint32_t s = f->strides[i];
             if (s >= 2 && s <= 8 && f->bpp == 0)
@@ -1019,7 +1077,7 @@ void lz0_finder_free(lz0_finder *f) {
 static int bt_update(lz0_finder *f, uint32_t pos, lz0_match *out, int maxout);
 
 static inline uint32_t hash_at(lz0_finder *f, uint32_t i) {
-    if ((lz0_chain_prune == 3 || lz0_chain_prune == 4) && i + 3 < f->n)
+    if ((f->opts.chain_prune == 3 || f->opts.chain_prune == 4) && i + 3 < f->n)
         return hash4(f->in + i);
     if (i + 2 < f->n)
         return hash3(f->in + i);
@@ -1185,9 +1243,10 @@ int lz0_len2_max_off = 32;
 int lz0_rle_tail = 0;
 
 int lz0_is_len2_allowed(const lz0_finder *f, uint32_t off) {
-    if (lz0_len2_max_off <= 0)
+    int max_off = f ? f->opts.len2_max_off : lz0_len2_max_off;
+    if (max_off <= 0)
         return 1;
-    if (off <= (uint32_t)lz0_len2_max_off)
+    if (off <= (uint32_t)max_off)
         return 1;
     if (f) {
         if (!f->is_high_entropy && f->bpp == 0 && off <= 256)
@@ -1210,7 +1269,7 @@ static inline int is_valid_candidate(const lz0_finder *f, uint32_t len, uint32_t
         return 0;
     /* lz0_is_len2_allowed() with its two early accepts folded into a single
      * (mostly not taken) branch in front of the stride scan */
-    int mo = lz0_len2_max_off;
+    int mo = f->opts.len2_max_off;
     if ((len == 2) & (mo > 0) & (off > (uint32_t)mo))
         return lz0_is_len2_allowed(f, off);
     return 1;
@@ -1502,10 +1561,10 @@ static LZ0_ALWAYS_INLINE void sa_probe_core(lz0_finder *f, uint32_t pos, int min
     int ns = (int)f->sa_n;
     int accL = INT_MAX;
     int accR = INT_MAX;
-    int use_lcp = (lz0_sa_lcp && f->lcp && f->sa_sample <= 1);
+    int use_lcp = (f->opts.sa_lcp && f->lcp && f->sa_sample <= 1);
     const uint32_t prefix = (!with_cen && !use_lcp) ? lz0_ld16(f->in + pos) : 0;
-    int adapt = lz0_sa_adapt;
-    int ms = lz0_sa_multiscale;
+    int adapt = f->opts.sa_adapt;
+    int ms = f->opts.sa_multiscale;
     int stop_at = 0;
     if (with_cen)
         cen->n_sa_invoke++;
@@ -1579,7 +1638,7 @@ static LZ0_ALWAYS_INLINE void sa_probe_core(lz0_finder *f, uint32_t pos, int min
 static void sa_probe_neighbors(lz0_finder *f, uint32_t pos, int minm, int maxl,
                                int *best_len, lz0_match *out, int *nout,
                                lz0_sdp_census *cen) {
-    if (lz0_sa_win <= 0 || !f->sa || !f->rank)
+    if (f->opts.sa_win <= 0 || !f->sa || !f->rank)
         return;
     if (cen)
         sa_probe_core(f, pos, minm, maxl, best_len, out, nout, cen, 1, 0);
@@ -1601,7 +1660,7 @@ static void sa_probe_neighbors_timed(lz0_finder *f, uint32_t pos, int minm, int 
 }
 
 int lz0_find_last_len(lz0_finder *f, uint32_t pos, uint32_t last_offset) {
-    lz0_sdp_census *cen = lz0_sdp_census_out;
+    lz0_sdp_census *cen = (lz0_sdp_census *)f->census;
     if (cen)
         cen->n_last_len++;
     if (pos >= f->n)
@@ -1859,8 +1918,8 @@ static const int lz0_deep_d2[] = {64, 128};
 static const int lz0_deep_d3[] = {32, 64, 128};
 static const int lz0_deep_d4[] = {32, 64, 128, 256};
 
-static inline int deep_depths(const int **ds) {
-    switch (lz0_deep_probe) {
+static inline int deep_depths(const lz0_config *opts, const int **ds) {
+    switch (opts->deep_probe) {
     case 1: *ds = lz0_deep_d1; return 1;
     case 2: *ds = lz0_deep_d2; return 2;
     case 3: *ds = lz0_deep_d3; return 3;
@@ -1913,7 +1972,7 @@ static LZ0_ALWAYS_INLINE void hash_probe_core(lz0_finder *f, uint32_t pos, int m
      * census path runs the deep probe's own walk so its counters stay). */
     deep_track dtk;
     const int *ds = NULL;
-    int nd = f->head ? deep_depths(&ds) : 0;
+    int nd = f->head ? deep_depths(&f->opts, &ds) : 0;
     const int track = !with_cen && nd > 0;
     uint32_t chain_head = LZ0_CHAIN_NIL;
     int have_ck = 0;
@@ -1930,7 +1989,7 @@ static LZ0_ALWAYS_INLINE void hash_probe_core(lz0_finder *f, uint32_t pos, int m
     double t_pow0 = 0, t_ch0 = 0;
     if (with_cen)
         t_pow0 = sa_now_ms();
-    if (lz0_sa_win <= 0 || lz0_sa_hybrid) {
+    if (f->opts.sa_win <= 0 || f->opts.sa_hybrid) {
         /* power-of-two offsets 1, 2, 4, ... <= pos */
         int np = lz0_pow2_count(pos);
         uint64_t hits = 0;
@@ -2029,7 +2088,7 @@ static LZ0_ALWAYS_INLINE void hash_probe_core(lz0_finder *f, uint32_t pos, int m
         }
     }
 
-    if (lz0_chain_prune == 4 && f->head3 && pos + 2 < n) {
+    if (f->opts.chain_prune == 4 && f->head3 && pos + 2 < n) {
         uint32_t c3 = f->head3[hash3(in + pos)];
         if (c3 != LZ0_CHAIN_NIL && c3 < pos) {
             if (with_cen)
@@ -2042,7 +2101,7 @@ static LZ0_ALWAYS_INLINE void hash_probe_core(lz0_finder *f, uint32_t pos, int m
         }
     }
 
-    if ((lz0_sa_win <= 0 || lz0_sa_hybrid) && f->head) {
+    if ((f->opts.sa_win <= 0 || f->opts.sa_hybrid) && f->head) {
         if (with_cen)
             t_ch0 = sa_now_ms();
         const uint32_t *prev = f->prev;
@@ -2079,7 +2138,7 @@ static LZ0_ALWAYS_INLINE void hash_probe_core(lz0_finder *f, uint32_t pos, int m
             visited++;
             if (with_cen)
                 cen->n_chain_visit++;
-            if (lz0_chain_prune == 2) {
+            if (f->opts.chain_prune == 2) {
                 int hit4 = 0;
                 if (maxl >= 4 &&
                     in[cur] == in[pos] &&
@@ -2105,7 +2164,7 @@ static LZ0_ALWAYS_INLINE void hash_probe_core(lz0_finder *f, uint32_t pos, int m
                 if (!(probe > 0 && probe < maxl && in[cur + probe] != in[pos + probe])) {
                     int ml;
                     int used_matchlen = 1;
-                    if (lz0_chain_prune == 1) {
+                    if (f->opts.chain_prune == 1) {
                         int cheap = cheap_ml_a(in, cur, pos, maxl);
                         if (cheap >= 0) {
                             ml = cheap;
@@ -2139,7 +2198,8 @@ static LZ0_ALWAYS_INLINE void hash_probe_core(lz0_finder *f, uint32_t pos, int m
             } else if (with_cen)
                 cen->n_chain_rej_b0++;
             checks++;
-            if (lz0_chain_noskip || (lz0_skip_thresh > 0 && best_len < lz0_skip_thresh)) {
+            if (f->opts.chain_noskip ||
+                (f->opts.skip_thresh > 0 && best_len < f->opts.skip_thresh)) {
                 cur = nxt;
                 links++;
                 visited++;
@@ -2147,9 +2207,9 @@ static LZ0_ALWAYS_INLINE void hash_probe_core(lz0_finder *f, uint32_t pos, int m
                     cen->n_chain_visit++;
                     cen->n_prev++;
                 }
-            } else if (lz0_skip_stride > 0) {
+            } else if (f->opts.skip_stride > 0) {
                 int taken = 0;
-                cur = chain_skip(f, cur, lz0_skip_stride, &taken);
+                cur = chain_skip(f, cur, f->opts.skip_stride, &taken);
                 links += taken;
                 visited += taken;
                 if (with_cen) {
@@ -2243,8 +2303,8 @@ static LZ0_ALWAYS_INLINE void hash_probe_core(lz0_finder *f, uint32_t pos, int m
             pl = t;
         }
     }
-    if (lz0_hash4_probe != 0 && f->head4 && pos + 3 < n) {
-        int trig = (lz0_hash4_probe == 1) || (best_len >= lz0_hash4_probe);
+    if (f->opts.hash4_probe != 0 && f->head4 && pos + 3 < n) {
+        int trig = (f->opts.hash4_probe == 1) || (best_len >= f->opts.hash4_probe);
         if (trig) {
             if (with_cen)
                 cen->n_hash4_probe++;
@@ -2264,7 +2324,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
                      lz0_match *out, int *last_len) {
     int nout = 0;
     *last_len = 0;
-    lz0_sdp_census *cen = lz0_sdp_census_out;
+    lz0_sdp_census *cen = (lz0_sdp_census *)f->census;
     if (cen)
         cen->n_find++;
     if (pos >= f->n)
@@ -2308,7 +2368,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
         m.offset = 1;
         m.length = (uint32_t)rlen;
         keep_candidate(f, out, &nout, f->max_candidates, m);
-        if (lz0_rle_tail <= 0 || rlen > lz0_rle_tail)
+        if (f->opts.rle_tail <= 0 || rlen > f->opts.rle_tail)
             return nout;
     }
 
@@ -2323,8 +2383,8 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
         hash_probe_core(f, pos, minm, maxl, &best_len, out, &nout, NULL, 0);
     if (cen)
         cen->n_cand_hash += (uint64_t)nout;
-    int do_sa = (lz0_sa_win > 0 && f->sa && f->rank);
-    if (do_sa && lz0_sa_hybrid && lz0_sa_thresh > 0 && best_len >= lz0_sa_thresh)
+    int do_sa = (f->opts.sa_win > 0 && f->sa && f->rank);
+    if (do_sa && f->opts.sa_hybrid && f->opts.sa_thresh > 0 && best_len >= f->opts.sa_thresh)
         do_sa = 0;
     if (do_sa)
         sa_probe_neighbors_timed(f, pos, minm, maxl, &best_len, out, &nout, cen);

@@ -61,24 +61,23 @@ int main(int argc, char **argv) {
         int rc;
         if (mode[0] == 'l' || mode[0] == 'u') {
             lz0_config cfg;
-            lz0_config_default(&cfg, LZ0_PARSE_SDP);
             lz0_config_level(&cfg, mode[0] == 'u' ? 9 : atoi(mode + 1));
             if (mode[0] == 'u')
                 cfg.parser = LZ0_PARSE_ULTRA;
             /* experiment overrides */
             const char *e;
-            if ((e = getenv("UB_K"))) cfg.max_states = lz0_ultra_states = atoi(e);
-            if ((e = getenv("UB_MARGIN"))) lz0_ultra_margin = atoi(e);
-            if ((e = getenv("UB_FINE"))) lz0_ultra_fine = atoi(e);
-            if ((e = getenv("UB_INJ"))) lz0_ultra_inject = atoi(e);
+            if ((e = getenv("UB_K"))) cfg.max_states = cfg.ultra_states = atoi(e);
+            if ((e = getenv("UB_MARGIN"))) cfg.ultra_margin = atoi(e);
+            if ((e = getenv("UB_FINE"))) cfg.ultra_fine = atoi(e);
+            if ((e = getenv("UB_INJ"))) cfg.ultra_inject = atoi(e);
             if ((e = getenv("UB_CANDS"))) cfg.max_candidates = atoi(e);
             if ((e = getenv("UB_CHAIN"))) cfg.max_chain = atoi(e);
             if ((e = getenv("UB_BT"))) cfg.bt_depth = atoi(e);
-            if ((e = getenv("UB_SAWIN"))) lz0_sa_win = atoi(e);
-            if ((e = getenv("UB_MSCALE"))) lz0_sa_multiscale = atoi(e);
-            if ((e = getenv("UB_LEN2"))) lz0_len2_max_off = atoi(e);
-            if ((e = getenv("UB_DEEP"))) lz0_deep_probe = atoi(e);
-            if ((e = getenv("UB_RLE"))) lz0_rle_tail = atoi(e);
+            if ((e = getenv("UB_SAWIN"))) cfg.sa_win = atoi(e);
+            if ((e = getenv("UB_MSCALE"))) cfg.sa_multiscale = atoi(e);
+            if ((e = getenv("UB_LEN2"))) cfg.len2_max_off = atoi(e);
+            if ((e = getenv("UB_DEEP"))) cfg.deep_probe = atoi(e);
+            if ((e = getenv("UB_RLE"))) cfg.rle_tail = atoi(e);
             rc = lz0_compress(in, n, &out, &osz, &cfg, NULL);
         } else {
             int lim = 0;

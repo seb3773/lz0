@@ -18,6 +18,8 @@ tests/test_malformed
 tests/test_fuzz
 tests/test_guard
 tests/test_simd
+tests/test_sa_probe
+tests/test_threadsafe
 tests/*_arm64
 tests/*_riscv64
 

@@ -153,10 +153,10 @@ static void benchmark_blob(const blob_target *tgt, int test_upkr, int upkr_level
     /* 2. LZ0 Ultra (-9) [Multi-Window Stride Scan - Current] */
     size_t csz_ultra_current = 0;
     {
-        lz0_legacy_single_window_scan = 0;
         lz0_config cfg;
         lz0_stats stats;
         lz0_config_level(&cfg, 9);
+        cfg.legacy_single_window_scan = 0;
 
         unsigned char *comp = NULL;
         size_t csz = 0;
@@ -185,10 +185,10 @@ static void benchmark_blob(const blob_target *tgt, int test_upkr, int upkr_level
 
     /* 3. LZ0 Ultra (-9) [Legacy Single-Window Stride Scan - Before] */
     {
-        lz0_legacy_single_window_scan = 1;
         lz0_config cfg;
         lz0_stats stats;
         lz0_config_level(&cfg, 9);
+        cfg.legacy_single_window_scan = 1;
 
         unsigned char *comp = NULL;
         size_t csz = 0;
@@ -201,7 +201,6 @@ static void benchmark_blob(const blob_target *tgt, int test_upkr, int upkr_level
         printf("| *LZ0 Ultra (-9) [Legacy 1-Win]* | %zu B | %.2f%% | %s%ld B vs Multi | - | - | (comparison) |\n",
                csz, (double)csz * 100.0 / in_sz, delta <= 0 ? "" : "+", delta);
         free(comp);
-        lz0_legacy_single_window_scan = 0;
     }
 
     /* 4. UPKR */

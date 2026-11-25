@@ -25,7 +25,7 @@ static void wr_bit(wr_t *w, int value, int cat) {
             w->acct->bits_offset++;
     }
     if (w->backtrack) {
-        if (value)
+        if (value && w->index > 0)
             w->data[w->index - 1] |= 1;
         w->backtrack = 0;
         return;
@@ -82,18 +82,21 @@ static void wr_len_coded(wr_t *w, int v, int cat, int code) {
     wr_elias(w, v, 0, cat);
 }
 
-static void wr_len(wr_t *w, int v, int cat) {
-    int code = (lz0_len_code == 3) ? 0 : lz0_len_code;
+static void wr_len(wr_t *w, int v, int cat, int lcode) {
+    int code = (lcode == 3) ? 0 : lcode;
     wr_len_coded(w, v, cat, code);
 }
 
-static void wr_len_new(wr_t *w, int v, int cat) {
-    int code = (lz0_len_code == 3) ? 2 : lz0_len_code;
+static void wr_len_new(wr_t *w, int v, int cat, int lcode) {
+    int code = (lcode == 3) ? 2 : lcode;
     wr_len_coded(w, v, cat, code);
 }
 
-int lz0_emit(const unsigned char *in, uint32_t n, const lz0_toklist *tl,
-             unsigned char **out, size_t *out_sz, lz0_bitacct *acct) {
+int lz0_emit_cfg(const unsigned char *in, uint32_t n, const lz0_toklist *tl,
+                 unsigned char **out, size_t *out_sz, lz0_bitacct *acct,
+                 const lz0_config *cfg) {
+    if (!tl || tl->n == 0)
+        return -1;
     size_t cap = (size_t)n + 64;
     unsigned char *buf = (unsigned char *)malloc(cap);
     if (!buf)
@@ -108,7 +111,10 @@ int lz0_emit(const unsigned char *in, uint32_t n, const lz0_toklist *tl,
 
     uint32_t last_off = LZ0_INITIAL_OFFSET;
     int can_last = 0;
-    lz0_stream_census *sc = lz0_stream_census_out;
+    int iso = (cfg && cfg->isolated);
+    int lcode = cfg ? cfg->len_code : lz0_len_code;
+    int lsb_bits = cfg ? cfg->offset_lsb_bits : lz0_offset_lsb_bits;
+    lz0_stream_census *sc = iso ? NULL : lz0_stream_census_out;
 
     for (uint32_t k = 0; k < tl->n; k++) {
         const lz0_token *t = &tl->t[k];
@@ -123,7 +129,7 @@ int lz0_emit(const unsigned char *in, uint32_t n, const lz0_toklist *tl,
         }
         if (!t->offset) {
             wr_bit(&w, 0, 0);
-            wr_len(&w, (int)t->length, 1);
+            wr_len(&w, (int)t->length, 1, lcode);
             for (uint32_t i = 0; i < t->length; i++) {
                 wr_byte(&w, in[t->pos + i]);
                 if (acct)
@@ -133,7 +139,7 @@ int lz0_emit(const unsigned char *in, uint32_t n, const lz0_toklist *tl,
                 sc->n_lit++;
                 sc->bytes_lit += t->length;
                 sc->bits_lit_flag++;
-                sc->bits_lit_len += (uint64_t)lz0_len_payload_bits((int)t->length);
+                sc->bits_lit_len += (uint64_t)lz0_len_payload_bits_c(cfg, (int)t->length);
                 sc->bits_lit_pay += (uint64_t)t->length << 3;
                 int lb = 0;
                 uint32_t L = t->length;
@@ -145,17 +151,17 @@ int lz0_emit(const unsigned char *in, uint32_t n, const lz0_toklist *tl,
                 int ix = t->length > 32 ? 32 : (int)t->length;
                 sc->nlen[ix]++;
                 sc->nlen_lit[ix]++;
-                sc->blen[ix] += (uint64_t)lz0_len_payload_bits((int)t->length);
+                sc->blen[ix] += (uint64_t)lz0_len_payload_bits_c(cfg, (int)t->length);
             }
             can_last = 1;
         } else if (t->offset == last_off && can_last) {
             wr_bit(&w, 0, 0);
-            wr_len(&w, (int)t->length, 1);
+            wr_len(&w, (int)t->length, 1, lcode);
             if (sc) {
                 sc->n_last++;
                 sc->bytes_last += t->length;
                 sc->bits_last_flag++;
-                sc->bits_last_len += (uint64_t)lz0_len_payload_bits((int)t->length);
+                sc->bits_last_len += (uint64_t)lz0_len_payload_bits_c(cfg, (int)t->length);
                 int lb = 0;
                 uint32_t L = t->length;
                 while (L > 1 && lb < 7) {
@@ -166,14 +172,14 @@ int lz0_emit(const unsigned char *in, uint32_t n, const lz0_toklist *tl,
                 int ix = t->length > 32 ? 32 : (int)t->length;
                 sc->nlen[ix]++;
                 sc->nlen_last[ix]++;
-                sc->blen[ix] += (uint64_t)lz0_len_payload_bits((int)t->length);
+                sc->blen[ix] += (uint64_t)lz0_len_payload_bits_c(cfg, (int)t->length);
             }
             can_last = 0;
         } else {
             wr_bit(&w, 1, 0);
             wr_bit(&w, 1, 2);
             {
-                int sh = lz0_offset_lsb_bits;
+                int sh = lsb_bits;
                 if (sh < 1)
                     sh = 7;
                 uint32_t mod = 1u << sh;
@@ -196,14 +202,14 @@ int lz0_emit(const unsigned char *in, uint32_t n, const lz0_toklist *tl,
                         wr_bit(&w, (inv >> b) & 1, 2);
                     w.backtrack = 0;
                 }
-                wr_len_new(&w, (int)t->length - 1, 1);
+                wr_len_new(&w, (int)t->length - 1, 1, lcode);
                 if (sc) {
                     sc->n_new++;
                     sc->bytes_new += t->length;
                     sc->bits_new_flag += 2;
                     sc->bits_new_off_elias += (uint64_t)lz0_elias_bits(msb);
                     sc->bits_new_off_lsb += (sh == 7) ? 8u : (uint64_t)sh;
-                    sc->bits_new_len += (uint64_t)lz0_len_new_payload_bits((int)t->length - 1);
+                    sc->bits_new_len += (uint64_t)lz0_len_new_payload_bits_c(cfg, (int)t->length - 1);
                     sc->sum_off += t->offset;
                     int ob = 0;
                     uint32_t o = t->offset;
@@ -222,7 +228,7 @@ int lz0_emit(const unsigned char *in, uint32_t n, const lz0_toklist *tl,
                     int ix = t->length > 32 ? 32 : (int)t->length;
                     sc->nlen[ix]++;
                     sc->nlen_new[ix]++;
-                    sc->blen[ix] += (uint64_t)lz0_len_new_payload_bits((int)t->length - 1);
+                    sc->blen[ix] += (uint64_t)lz0_len_new_payload_bits_c(cfg, (int)t->length - 1);
                 }
             }
             last_off = t->offset;
@@ -247,4 +253,9 @@ int lz0_emit(const unsigned char *in, uint32_t n, const lz0_toklist *tl,
     *out = w.data;
     *out_sz = (size_t)w.index;
     return 0;
+}
+
+int lz0_emit(const unsigned char *in, uint32_t n, const lz0_toklist *tl,
+             unsigned char **out, size_t *out_sz, lz0_bitacct *acct) {
+    return lz0_emit_cfg(in, n, tl, out, out_sz, acct, NULL);
 }

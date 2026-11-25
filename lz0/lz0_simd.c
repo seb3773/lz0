@@ -138,14 +138,26 @@ static int lz0_simd_detect(void) {
 
 int lz0_simd_init(void) {
     static int detected = -1;
-    if (detected < 0)
-        detected = lz0_simd_detect();
-    int lvl = detected;
-    if (lz0_simd_force >= 0 && lz0_simd_force < lvl)
-        lvl = lz0_simd_force;
-    lz0_simd_level = lvl;
+    int det = __atomic_load_n(&detected, __ATOMIC_RELAXED);
+    if (det < 0) {
+        det = lz0_simd_detect();
+        __atomic_store_n(&detected, det, __ATOMIC_RELAXED);
+    }
+    int force = __atomic_load_n(&lz0_simd_force, __ATOMIC_RELAXED);
+    int lvl = det;
+    if (force >= 0 && force < lvl)
+        lvl = force;
+    if (__atomic_load_n(&lz0_simd_level, __ATOMIC_RELAXED) != lvl)
+        __atomic_store_n(&lz0_simd_level, lvl, __ATOMIC_RELAXED);
     return lvl;
 }
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((constructor))
+static void lz0_simd_ctor(void) {
+    lz0_simd_init();
+}
+#endif
 
 const char *lz0_simd_name(void) {
 #if defined(LZ0_SIMD_X86_64)

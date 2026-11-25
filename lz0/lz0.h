@@ -32,6 +32,42 @@ typedef struct {
     int max_states;
     int jump_levels;
     int bt_depth;
+    /* Per-instance configuration (populated by lz0_config_level(), isolated = 1).
+     * When isolated == 0 (legacy lz0_config_default() or partial aggregate init),
+     * lz0_compress / lz0_finder_init snapshot legacy tuning globals into a
+     * local config copy; callers using lz0_config_level() or cfg == NULL never
+     * read or write encoder globals and are re-entrant and thread-safe. */
+    int isolated;
+    int level;
+    int offset_lsb_bits;
+    int len_code;
+    int chain_prune;
+    int chain_noskip;
+    int skip_thresh;
+    int skip_stride;
+    int hash4_probe;
+    int deep_probe;
+    int sa_win;
+    int sa_lcp;
+    int sa_sample;
+    int sa_hybrid;
+    int sa_thresh;
+    int sa_adapt;
+    int sa_multiscale;
+    int sa_csort_v2;
+    int sa_csort_smode;
+    int sa_pf_look;
+    int sa_count_mode;
+    int sa_algo;
+    int sdp_fine_matches;
+    int len2_max_off;
+    int rle_tail;
+    int ultra_states;
+    size_t ultra_budget;
+    int ultra_margin;
+    int ultra_fine;
+    int ultra_inject;
+    int legacy_single_window_scan;
 } lz0_config;
 
 typedef struct {

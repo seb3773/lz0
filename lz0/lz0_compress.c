@@ -10,7 +10,8 @@
 #define LZ0_SKIP_LEVELS_HIGH 12
 #endif
 
-void lz0_config_default(lz0_config *cfg, lz0_parse_t parser) {
+static void lz0_config_init_defaults(lz0_config *cfg, lz0_parse_t parser) {
+    memset(cfg, 0, sizeof(*cfg));
     cfg->min_match = 2;
     cfg->max_chain = 8;
     cfg->max_candidates = 16;
@@ -19,13 +20,36 @@ void lz0_config_default(lz0_config *cfg, lz0_parse_t parser) {
     cfg->max_states = 2;
     cfg->jump_levels = 0;
     cfg->bt_depth = 0;
+    cfg->isolated = 0;
+    cfg->level = 0;
+    cfg->offset_lsb_bits = 8;
+    cfg->len_code = 3;
+    cfg->sa_win = 16;
+    cfg->sa_sample = 1;
+    cfg->sa_hybrid = 1;
+    cfg->sa_adapt = 1;
+    cfg->sa_csort_v2 = 1;
+    cfg->sa_csort_smode = 1;
+    cfg->sa_pf_look = 16;
+    cfg->sa_count_mode = 1;
+    cfg->sa_algo = 1;
+    cfg->len2_max_off = 32;
+    cfg->ultra_budget = (size_t)768 << 20;
+    cfg->ultra_margin = 32;
+    cfg->ultra_fine = 8;
+}
+
+void lz0_config_default(lz0_config *cfg, lz0_parse_t parser) {
+    lz0_config_init_defaults(cfg, parser);
 }
 
 void lz0_config_level(lz0_config *cfg, int level) {
     if (level < 1) level = 1;
     if (level > 9) level = 9;
 
-    lz0_h2c8_apply();
+    lz0_config_init_defaults(cfg, LZ0_PARSE_SDP);
+    cfg->isolated = 1;
+    cfg->level = level;
 
     if (level <= 3) {
         // Fast mode
@@ -37,11 +61,11 @@ void lz0_config_level(lz0_config *cfg, int level) {
         cfg->max_states = 2;
         cfg->jump_levels = 0;
         cfg->bt_depth = 0;
-        lz0_sa_win = 8;
-        lz0_sa_adapt = 1;
-        lz0_sdp_fine_matches = 0;
-        lz0_deep_probe = 0;
-        lz0_hash4_probe = 0;
+        cfg->sa_win = 8;
+        cfg->sa_adapt = 1;
+        cfg->sdp_fine_matches = 0;
+        cfg->deep_probe = 0;
+        cfg->hash4_probe = 0;
     } else if (level <= 6) {
         // Standard H2C8 (Default)
         cfg->min_match = 2;
@@ -52,11 +76,11 @@ void lz0_config_level(lz0_config *cfg, int level) {
         cfg->max_states = 2;
         cfg->jump_levels = 0;
         cfg->bt_depth = 0;
-        lz0_sa_win = 16;
-        lz0_sa_adapt = 1;
-        lz0_sdp_fine_matches = 0;
-        lz0_deep_probe = 0;
-        lz0_hash4_probe = 0;
+        cfg->sa_win = 16;
+        cfg->sa_adapt = 1;
+        cfg->sdp_fine_matches = 0;
+        cfg->deep_probe = 0;
+        cfg->hash4_probe = 0;
     } else if (level <= 8) {
         // High compression
         cfg->min_match = 2;
@@ -68,11 +92,11 @@ void lz0_config_level(lz0_config *cfg, int level) {
         /* hash-chain skip list: exact, turns long chain walks into jumps */
         cfg->jump_levels = LZ0_SKIP_LEVELS_HIGH;
         cfg->bt_depth = 0;
-        lz0_sa_win = 64;
-        lz0_sa_adapt = 1;
-        lz0_sdp_fine_matches = 1;
-        lz0_deep_probe = 2;
-        lz0_hash4_probe = 1;
+        cfg->sa_win = 64;
+        cfg->sa_adapt = 1;
+        cfg->sdp_fine_matches = 1;
+        cfg->deep_probe = 2;
+        cfg->hash4_probe = 1;
     } else {
         // Level 9: Ultra maximal compression (dedicated ultra parser)
         cfg->min_match = 2;
@@ -83,17 +107,17 @@ void lz0_config_level(lz0_config *cfg, int level) {
         cfg->max_states = 32;
         cfg->jump_levels = LZ0_SKIP_LEVELS_HIGH;
         cfg->bt_depth = 32;
-        lz0_sa_win = 128;
-        lz0_sa_multiscale = 1;
-        lz0_sa_adapt = 0;
-        lz0_sdp_fine_matches = 1;
-        lz0_deep_probe = 4;
-        lz0_hash4_probe = 1;
-        lz0_len2_max_off = 0;
-        lz0_rle_tail = 64;
-        lz0_ultra_states = 0;
-        lz0_ultra_margin = 32;
-        lz0_ultra_fine = 8;
+        cfg->sa_win = 128;
+        cfg->sa_multiscale = 1;
+        cfg->sa_adapt = 0;
+        cfg->sdp_fine_matches = 1;
+        cfg->deep_probe = 4;
+        cfg->hash4_probe = 1;
+        cfg->len2_max_off = 0;
+        cfg->rle_tail = 64;
+        cfg->ultra_states = 0;
+        cfg->ultra_margin = 32;
+        cfg->ultra_fine = 8;
     }
 }
 
@@ -147,7 +171,8 @@ int lz0_compress(const unsigned char *in, size_t in_sz,
         return -1;
     lz0_config local;
     if (!cfg) {
-        lz0_config_default(&local, LZ0_PARSE_LAZY);
+        lz0_config_init_defaults(&local, LZ0_PARSE_LAZY);
+        local.isolated = 1;
         cfg = &local;
     } else {
         local = *cfg;
@@ -167,15 +192,15 @@ int lz0_compress(const unsigned char *in, size_t in_sz,
         return -1;
     /* finder RAM without the skip list: it is only built on demand (see
      * lz0_find.c) and added below if it was */
-    stats->peak_ram = lz0_ram_finder((uint32_t)in_sz, 0);
-    if (cfg->parser == LZ0_PARSE_DP)
+    stats->peak_ram = lz0_ram_finder_c(&f.opts, (uint32_t)in_sz, 0);
+    if (f.opts.parser == LZ0_PARSE_DP)
         stats->peak_ram += lz0_ram_dp((uint32_t)in_sz);
-    if (cfg->parser == LZ0_PARSE_SDP) {
-        int k = cfg->max_states > 0 ? cfg->max_states : 4;
+    if (f.opts.parser == LZ0_PARSE_SDP) {
+        int k = f.opts.max_states > 0 ? f.opts.max_states : 4;
         stats->peak_ram += lz0_ram_sdp((uint32_t)in_sz, k);
     }
-    if (cfg->parser == LZ0_PARSE_ULTRA)
-        stats->peak_ram += lz0_ram_ultra((uint32_t)in_sz);
+    if (f.opts.parser == LZ0_PARSE_ULTRA)
+        stats->peak_ram += lz0_ram_ultra_c(&f.opts, (uint32_t)in_sz);
 
     lz0_toklist tl;
     lz0_toklist_init(&tl);
@@ -216,7 +241,7 @@ int lz0_compress(const unsigned char *in, size_t in_sz,
     }
 
     lz0_bitacct acct;
-    rc = lz0_emit(in, (uint32_t)in_sz, &tl, out, out_sz, &acct);
+    rc = lz0_emit_cfg(in, (uint32_t)in_sz, &tl, out, out_sz, &acct, &f.opts);
     double t3 = now_ms();
 
     /* Piste D: Zero-inflation safety net.
@@ -237,7 +262,7 @@ int lz0_compress(const unsigned char *in, size_t in_sz,
             unsigned char *alt_out = NULL;
             size_t alt_sz = 0;
             lz0_bitacct alt_acct;
-            if (lz0_emit(in, (uint32_t)in_sz, &single_tl, &alt_out, &alt_sz, &alt_acct) == 0 && alt_sz < *out_sz) {
+            if (lz0_emit_cfg(in, (uint32_t)in_sz, &single_tl, &alt_out, &alt_sz, &alt_acct, &f.opts) == 0 && alt_sz < *out_sz) {
                 free(*out);
                 *out = alt_out;
                 *out_sz = alt_sz;

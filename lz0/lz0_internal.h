@@ -59,6 +59,12 @@ typedef struct {
      * Both are maintained by keep_candidate() only. */
     uint32_t kc_off[64];
     int kc_worst;
+    /* Resolved per-instance encoder options and optional diagnostics (only
+     * populated from globals when opts.isolated == 0). */
+    lz0_config opts;
+    double sa_build_ms;
+    void *census;
+    void *dp_census;
 } lz0_finder;
 
 typedef struct {
@@ -89,6 +95,14 @@ int lz0_cost_new(int offset, int len);
 int lz0_next_plateau_last(int len, int max_len);
 int lz0_next_plateau_new(int len, int max_len);
 int lz0_next_plateau_lit(int len, int max_len);
+int lz0_len_payload_bits_c(const lz0_config *cfg, int v);
+int lz0_len_new_payload_bits_c(const lz0_config *cfg, int v);
+int lz0_cost_literal_c(const lz0_config *cfg, int len);
+int lz0_cost_last_c(const lz0_config *cfg, int len);
+int lz0_cost_new_c(const lz0_config *cfg, int offset, int len);
+int lz0_next_plateau_last_c(const lz0_config *cfg, int len, int max_len);
+int lz0_next_plateau_new_c(const lz0_config *cfg, int len, int max_len);
+int lz0_next_plateau_lit_c(const lz0_config *cfg, int len, int max_len);
 
 int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
                     const lz0_config *cfg);
@@ -147,8 +161,11 @@ extern int lz0_ultra_states;
 extern size_t lz0_ultra_budget;
 int lz0_ultra_states_for(uint32_t n);
 size_t lz0_ram_ultra(uint32_t n);
+int lz0_ultra_states_for_c(const lz0_config *cfg, uint32_t n);
+size_t lz0_ram_ultra_c(const lz0_config *cfg, uint32_t n);
 extern int lz0_ultra_margin;
 extern int lz0_ultra_fine;
+extern int lz0_ultra_inject;
 extern int lz0_rle_tail;
 int lz0_parse_dp(lz0_finder *f, lz0_toklist *tl);
 int lz0_tokens_valid(const lz0_toklist *tl, uint32_t n);
@@ -286,8 +303,12 @@ extern int lz0_legacy_single_window_scan;
 
 int lz0_emit(const unsigned char *in, uint32_t n, const lz0_toklist *tl,
              unsigned char **out, size_t *out_sz, lz0_bitacct *acct);
+int lz0_emit_cfg(const unsigned char *in, uint32_t n, const lz0_toklist *tl,
+                 unsigned char **out, size_t *out_sz, lz0_bitacct *acct,
+                 const lz0_config *cfg);
 
 size_t lz0_ram_finder(uint32_t n, int jump_levels);
+size_t lz0_ram_finder_c(const lz0_config *cfg, uint32_t n, int jump_levels);
 size_t lz0_ram_dp(uint32_t n);
 size_t lz0_ram_sdp(uint32_t n, int k);
 

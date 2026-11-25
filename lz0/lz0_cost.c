@@ -16,15 +16,16 @@ int lz0_elias_bits(int value) {
 int lz0_offset_lsb_bits = 8;
 int lz0_len_code = 3;
 
-int lz0_len_payload_bits(int v) {
+int lz0_len_payload_bits_c(const lz0_config *cfg, int v) {
+    int code = cfg ? cfg->len_code : lz0_len_code;
     if (v <= 0)
         return 1;
-    if (lz0_len_code == 1) {
+    if (code == 1) {
         if (v <= 7)
             return v;
         return 7 + lz0_elias_bits(v - 7);
     }
-    if (lz0_len_code == 2) {
+    if (code == 2) {
         if (v <= 7)
             return 3;
         return 3 + lz0_elias_bits(v - 7);
@@ -32,38 +33,60 @@ int lz0_len_payload_bits(int v) {
     return lz0_elias_bits(v);
 }
 
-int lz0_len_new_payload_bits(int v) {
-    if (lz0_len_code == 3) {
+int lz0_len_payload_bits(int v) {
+    return lz0_len_payload_bits_c(NULL, v);
+}
+
+int lz0_len_new_payload_bits_c(const lz0_config *cfg, int v) {
+    int code = cfg ? cfg->len_code : lz0_len_code;
+    if (code == 3) {
         if (v <= 0)
             return 1;
         if (v <= 7)
             return 3;
         return 3 + lz0_elias_bits(v - 7);
     }
-    return lz0_len_payload_bits(v);
+    return lz0_len_payload_bits_c(cfg, v);
+}
+
+int lz0_len_new_payload_bits(int v) {
+    return lz0_len_new_payload_bits_c(NULL, v);
+}
+
+int lz0_cost_literal_c(const lz0_config *cfg, int len) {
+    if (len <= 0)
+        return 0;
+    return 1 + lz0_len_payload_bits_c(cfg, len) + (len << 3);
 }
 
 int lz0_cost_literal(int len) {
+    return lz0_cost_literal_c(NULL, len);
+}
+
+int lz0_cost_last_c(const lz0_config *cfg, int len) {
     if (len <= 0)
         return 0;
-    return 1 + lz0_len_payload_bits(len) + (len << 3);
+    return 1 + lz0_len_payload_bits_c(cfg, len);
 }
 
 int lz0_cost_last(int len) {
-    if (len <= 0)
-        return 0;
-    return 1 + lz0_len_payload_bits(len);
+    return lz0_cost_last_c(NULL, len);
 }
 
-int lz0_cost_new(int offset, int len) {
+int lz0_cost_new_c(const lz0_config *cfg, int offset, int len) {
     if (len < 2 || offset < 1)
         return 1 << 30;
-    int sh = lz0_offset_lsb_bits;
+    int sh = cfg ? cfg->offset_lsb_bits : lz0_offset_lsb_bits;
     if (sh < 1)
         sh = 7;
     int offset_msb = (offset - 1) >> sh;
     int lsb_cost = (sh == 7) ? 8 : sh;
-    return 1 + 1 + lsb_cost + lz0_elias_bits(offset_msb + 1) + lz0_len_new_payload_bits(len - 1);
+    return 1 + 1 + lsb_cost + lz0_elias_bits(offset_msb + 1) +
+           lz0_len_new_payload_bits_c(cfg, len - 1);
+}
+
+int lz0_cost_new(int offset, int len) {
+    return lz0_cost_new_c(NULL, offset, len);
 }
 
 static int next_elias_plateau(int value, int max_value) {
@@ -103,28 +126,47 @@ static int next_len_plateau(int value, int max_value, int code) {
     return p + 7;
 }
 
-int lz0_next_plateau_last(int len, int max_len) {
-    int code = (lz0_len_code == 3) ? 0 : lz0_len_code;
+int lz0_next_plateau_last_c(const lz0_config *cfg, int len, int max_len) {
+    int lcode = cfg ? cfg->len_code : lz0_len_code;
+    int code = (lcode == 3) ? 0 : lcode;
     return next_len_plateau(len, max_len, code);
 }
 
-int lz0_next_plateau_new(int len, int max_len) {
+int lz0_next_plateau_last(int len, int max_len) {
+    return lz0_next_plateau_last_c(NULL, len, max_len);
+}
+
+int lz0_next_plateau_new_c(const lz0_config *cfg, int len, int max_len) {
     if (len < 2)
         len = 2;
-    int code = (lz0_len_code == 3) ? 2 : lz0_len_code;
+    int lcode = cfg ? cfg->len_code : lz0_len_code;
+    int code = (lcode == 3) ? 2 : lcode;
     int p = next_len_plateau(len - 1, max_len - 1, code);
     return p + 1;
 }
 
-int lz0_next_plateau_lit(int len, int max_len) {
-    int code = (lz0_len_code == 3) ? 0 : lz0_len_code;
+int lz0_next_plateau_new(int len, int max_len) {
+    return lz0_next_plateau_new_c(NULL, len, max_len);
+}
+
+int lz0_next_plateau_lit_c(const lz0_config *cfg, int len, int max_len) {
+    int lcode = cfg ? cfg->len_code : lz0_len_code;
+    int code = (lcode == 3) ? 0 : lcode;
     return next_len_plateau(len, max_len, code);
 }
 
-size_t lz0_ram_finder(uint32_t n, int jump_levels) {
+int lz0_next_plateau_lit(int len, int max_len) {
+    return lz0_next_plateau_lit_c(NULL, len, max_len);
+}
+
+size_t lz0_ram_finder_c(const lz0_config *cfg, uint32_t n, int jump_levels) {
     size_t ram = 0;
-    int need_hash = (lz0_sa_hybrid != 0) || (lz0_sa_win <= 0);
-    int need_sa = (lz0_sa_win > 0);
+    int sa_hybrid = cfg ? cfg->sa_hybrid : lz0_sa_hybrid;
+    int sa_win = cfg ? cfg->sa_win : lz0_sa_win;
+    int sa_sample = cfg ? cfg->sa_sample : lz0_sa_sample;
+    int sa_lcp = cfg ? cfg->sa_lcp : lz0_sa_lcp;
+    int need_hash = (sa_hybrid != 0) || (sa_win <= 0);
+    int need_sa = (sa_win > 0);
     if (need_hash) {
         if (jump_levels < 0)
             jump_levels = 0;
@@ -134,17 +176,21 @@ size_t lz0_ram_finder(uint32_t n, int jump_levels) {
                (size_t)LZ0_HASH_SIZE * sizeof(uint32_t);
     }
     if (need_sa) {
-        int samp = lz0_sa_sample > 0 ? lz0_sa_sample : 1;
+        int samp = sa_sample > 0 ? sa_sample : 1;
         if (samp > 1)
             ram += (size_t)n * sizeof(uint32_t) +
                    ((size_t)n / (size_t)samp) * sizeof(uint32_t);
         else {
             ram += (size_t)n * sizeof(uint32_t) * 2u;
-            if (lz0_sa_lcp)
+            if (sa_lcp)
                 ram += (size_t)n * sizeof(uint32_t);
         }
     }
     return ram;
+}
+
+size_t lz0_ram_finder(uint32_t n, int jump_levels) {
+    return lz0_ram_finder_c(NULL, n, jump_levels);
 }
 
 size_t lz0_ram_dp(uint32_t n) {
