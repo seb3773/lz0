@@ -372,7 +372,7 @@ test: smoke bounds limits bench/lz0_bench vectors boundary malformed guard simd 
 	./bench/lz0_bench --quick
 
 ARM64_CC ?= aarch64-linux-gnu-gcc
-ARM64_EMU = qemu-aarch64-static
+ARM64_EMU ?= $(shell command -v qemu-aarch64-static 2>/dev/null || echo qemu-aarch64)
 ARM64_CFLAGS = -O3 -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Izx0_compressor -Izx0_decompressor -Ilz0 -DLZ0_VERSION=\"$(VERSION)\" -static
 ARM64_DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_arm64.S lz0/lz0dec_fast_arm64.S
 
@@ -397,7 +397,7 @@ test_arm64: lz0/lz0dec_arm64.S lz0/lz0dec_fast_arm64.S
 arm64: test_arm64
 
 RISCV64_CC ?= riscv64-linux-gnu-gcc
-RISCV64_EMU ?= qemu-riscv64-static
+RISCV64_EMU ?= $(shell command -v qemu-riscv64-static 2>/dev/null || echo qemu-riscv64)
 # Same emulator with the V extension enabled (exercises the RVV encoder tier).
 RISCV64_EMU_V ?= $(RISCV64_EMU) -cpu rv64,v=true,vlen=128
 RISCV64_CFLAGS = -O3 -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Izx0_compressor -Izx0_decompressor -Ilz0 -DLZ0_VERSION=\"$(VERSION)\" -static

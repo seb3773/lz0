@@ -41,14 +41,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             gcc-aarch64-linux-gnu \
-            gcc-riscv64-linux-gnu \
-            qemu-user-static
+            gcc-riscv64-linux-gnu
+          sudo apt-get install -y --no-install-recommends qemu-user-static || \
+            sudo apt-get install -y --no-install-recommends qemu-user
 
       - name: Run ARM64 tests under QEMU
-        run: make test_arm64 && make bin/lz0_arm64 bin/lz0dec_arm64
+        run: |
+          A64_EMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64)"
+          make test_arm64 ARM64_EMU="$A64_EMU" && make bin/lz0_arm64 bin/lz0dec_arm64
 
       - name: Run RISC-V 64 (scalar + RVV) tests under QEMU
-        run: make test_riscv64 && make bin/lz0_riscv64 bin/lz0dec_riscv64
+        run: |
+          RV64_EMU="$(command -v qemu-riscv64-static || command -v qemu-riscv64)"
+          make test_riscv64 RISCV64_EMU="$RV64_EMU" RISCV64_EMU_V="$RV64_EMU -cpu rv64,v=true,vlen=128" && \
+          make bin/lz0_riscv64 bin/lz0dec_riscv64
 
   windows-native:
     name: Windows x86-64 (MSYS2 MinGW-w64)

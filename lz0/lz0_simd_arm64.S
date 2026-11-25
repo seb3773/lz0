@@ -20,26 +20,33 @@
         .text
 
 #if defined(__APPLE__)
-#define FUNC(name)              \
-        .globl  _##name;        \
-        .private_extern _##name;\
-        .p2align 4;             \
-_##name:
-#define ENDF(name)
+.macro FUNC name
+        .globl  _\name
+        .private_extern _\name
+        .p2align 4
+_\name:
+.Lbody_\name:
+.endm
+.macro ENDF name
+.endm
 #else
-#define FUNC(name)              \
-        .globl  name;           \
-        .hidden name;           \
-        .type   name, %function;\
-        .p2align 4;             \
-name:
-#define ENDF(name) .size name, .-name
+.macro FUNC name
+        .globl  \name
+        .hidden \name
+        .type   \name, %function
+        .p2align 4
+\name:
+.Lbody_\name:
+.endm
+.macro ENDF name
+        .size   \name, .-\name
+.endm
 #endif
 
 /* ------------------------------------------------------------------------
  * int lz0_find_u32_neon(const uint32_t *p = x0, int n = w1, uint32_t key = w2)
  * ---------------------------------------------------------------------- */
-FUNC(lz0_find_u32_neon)
+FUNC lz0_find_u32_neon
         sxtw    x1, w1
         cmp     x1, #4
         b.lt    .Lfu_small
@@ -106,12 +113,12 @@ FUNC(lz0_find_u32_neon)
 .Lfu_sret:
         mov     w0, w3
         ret
-ENDF(lz0_find_u32_neon)
+ENDF lz0_find_u32_neon
 
 /* ------------------------------------------------------------------------
  * int lz0_argmax_i32_neon(const int32_t *p = x0, int n = w1)      n >= 1
  * ---------------------------------------------------------------------- */
-FUNC(lz0_argmax_i32_neon)
+FUNC lz0_argmax_i32_neon
         sxtw    x1, w1
         cmp     x1, #4
         b.lt    .Lam_small
@@ -142,7 +149,7 @@ FUNC(lz0_argmax_i32_neon)
         smax    v0.4s, v0.4s, v1.4s
         smaxv   s0, v0.4s
         fmov    w2, s0
-        b       lz0_find_u32_neon           /* x0, w1 unchanged; finds it */
+        b       .Lbody_lz0_find_u32_neon    /* x0, w1 unchanged; finds it */
 .Lam_small:                                 /* n in 1..3 */
         ldr     w2, [x0]
         mov     w6, #0
@@ -161,13 +168,13 @@ FUNC(lz0_argmax_i32_neon)
 .Lam_sret:
         mov     w0, w6
         ret
-ENDF(lz0_argmax_i32_neon)
+ENDF lz0_argmax_i32_neon
 
 /* ------------------------------------------------------------------------
  * int lz0_find_off_neon(const lz0_match *m = x0, int n = w1, uint32_t off = w2)
  * LD2 de-interleaves {offset, length} pairs: v1 = 4 offsets, v2 = 4 lengths.
  * ---------------------------------------------------------------------- */
-FUNC(lz0_find_off_neon)
+FUNC lz0_find_off_neon
         sxtw    x1, w1
         cmp     x1, #4
         b.lt    .Lfo_small
@@ -236,7 +243,7 @@ FUNC(lz0_find_off_neon)
 .Lfo_sret:
         mov     w0, w3
         ret
-ENDF(lz0_find_off_neon)
+ENDF lz0_find_off_neon
 
 /* ------------------------------------------------------------------------
  * int lz0_kc_worst_neon(const int32_t *score = x0, const lz0_match *m = x1,
@@ -248,7 +255,7 @@ ENDF(lz0_find_off_neon)
  * Overlapping tails are harmless for min (idempotent) and for pass 3 (the
  * re-checked lanes are known not to match).
  * ---------------------------------------------------------------------- */
-FUNC(lz0_kc_worst_neon)
+FUNC lz0_kc_worst_neon
         sxtw    x2, w2
         cmp     x2, #4
         b.lt    .Lkw_small
@@ -350,7 +357,7 @@ FUNC(lz0_kc_worst_neon)
 .Lkw_sret:
         mov     w0, w6
         ret
-ENDF(lz0_kc_worst_neon)
+ENDF lz0_kc_worst_neon
 
 /* ------------------------------------------------------------------------
  * uint32_t lz0_count_eq_neon(const uint8_t *a = x0, const uint8_t *b = x1,
@@ -360,7 +367,7 @@ ENDF(lz0_kc_worst_neon)
  * value 2 * 8192 = 16384), so any len < 2^32 is safe. Blocks start at
  * multiples of 16, hence of the step; the remainder is scalar.
  * ---------------------------------------------------------------------- */
-FUNC(lz0_count_eq_neon)
+FUNC lz0_count_eq_neon
         mov     w2, w2                      /* zero-extend len */
         mov     w3, w3                      /* zero-extend step */
         cmp     w3, #2
@@ -413,7 +420,7 @@ FUNC(lz0_count_eq_neon)
 .Lce_ret:
         mov     w0, w8
         ret
-ENDF(lz0_count_eq_neon)
+ENDF lz0_count_eq_neon
 
 
 /* ------------------------------------------------------------------------
@@ -422,7 +429,7 @@ ENDF(lz0_count_eq_neon)
  * Same algorithm as lz0_mru_batch_sse2: the list stays in v0/v1, EXT builds
  * the shifted list, CMHI against lane indices builds the blend masks.
  * ---------------------------------------------------------------------- */
-FUNC(lz0_mru_batch_neon)
+FUNC lz0_mru_batch_neon
         ldp     q0, q1, [x0]
         ldr     w4, [x1]                    /* n_mru */
 #if defined(__APPLE__)
@@ -484,7 +491,7 @@ FUNC(lz0_mru_batch_neon)
         stp     q0, q1, [x0]
         str     w4, [x1]
         ret
-ENDF(lz0_mru_batch_neon)
+ENDF lz0_mru_batch_neon
 
 #if defined(__APPLE__)
         .section __TEXT,__const
@@ -507,7 +514,7 @@ ENDF(lz0_mru_batch_neon)
  * overlapping in-bounds block ending at max. max < 16: two 8-byte words
  * (the second overlapping) or a byte loop. Never reads a[max] / b[max].
  * ---------------------------------------------------------------------- */
-FUNC(lz0_matchlen_neon)
+FUNC lz0_matchlen_neon
         sxtw    x2, w2
         mov     x3, #0                      /* n */
         cmp     x2, #16
@@ -594,7 +601,7 @@ FUNC(lz0_matchlen_neon)
 .Lml_bret:
         mov     w0, w3
         ret
-ENDF(lz0_matchlen_neon)
+ENDF lz0_matchlen_neon
 
 #if defined(__ELF__)
         .section .note.GNU-stack, "", %progbits
