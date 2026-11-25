@@ -144,11 +144,11 @@ int main(void) {
         if (!in)
             return 1;
         run_zx0(kinds[k], n, in);
-        run_lz0(kinds[k], n, in, "A2", LZ0_PARSE_LAZY, 4);
+        run_lz0(kinds[k], n, in, "G", LZ0_PARSE_GREEDY, 2);
         run_lz0(kinds[k], n, in, "S2", LZ0_PARSE_SDP, 2);
         run_lz0(kinds[k], n, in, "S4", LZ0_PARSE_SDP, 4);
         run_lz0(kinds[k], n, in, "S8", LZ0_PARSE_SDP, 8);
-        run_lz0(kinds[k], n, in, "A3", LZ0_PARSE_DP, 4);
+        run_lz0(kinds[k], n, in, "U", LZ0_PARSE_ULTRA, 32);
         free(in);
     }
     return 0;

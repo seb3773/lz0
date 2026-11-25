@@ -4,21 +4,16 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifndef LZ0_VERSION
+#define LZ0_VERSION "0.6.0-dev"
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef enum {
     LZ0_PARSE_GREEDY = 1,
-    LZ0_PARSE_LAZY = 2,
-    LZ0_PARSE_DP = 3,
-    LZ0_PARSE_GREEDY_COST = 4,
-    LZ0_PARSE_LAZY2 = 5,
-    LZ0_PARSE_LITE1 = 6,
-    LZ0_PARSE_LITE2 = 7,
-    LZ0_PARSE_LITE1F = 8,
-    LZ0_PARSE_LITE1FN = 9,
-    LZ0_PARSE_H2 = 10,
     LZ0_PARSE_SDP = 11,
     LZ0_PARSE_ULTRA = 12
 } lz0_parse_t;

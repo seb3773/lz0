@@ -229,8 +229,7 @@ int lz0_compress(const unsigned char *in, size_t in_sz,
         return -1;
     lz0_config local;
     if (!cfg) {
-        lz0_config_init_defaults(&local, LZ0_PARSE_LAZY);
-        local.isolated = 1;
+        lz0_config_level(&local, 6);
         cfg = &local;
     } else {
         local = *cfg;
@@ -263,8 +262,6 @@ int lz0_compress(const unsigned char *in, size_t in_sz,
     /* finder RAM without the skip list: it is only built on demand (see
      * lz0_find.c) and added below if it was */
     stats->peak_ram = lz0_ram_finder_c(&f.opts, (uint32_t)in_sz, 0);
-    if (f.opts.parser == LZ0_PARSE_DP)
-        stats->peak_ram += lz0_ram_dp((uint32_t)in_sz);
     if (f.opts.parser == LZ0_PARSE_SDP) {
         int k = f.opts.max_states > 0 ? f.opts.max_states : 4;
         stats->peak_ram += lz0_ram_sdp((uint32_t)in_sz, k);
@@ -279,28 +276,12 @@ int lz0_compress(const unsigned char *in, size_t in_sz,
     int rc;
     if (cfg->parser == LZ0_PARSE_GREEDY)
         rc = lz0_parse_greedy(&f, &tl);
-    else if (cfg->parser == LZ0_PARSE_DP)
-        rc = lz0_parse_dp(&f, &tl);
-    else if (cfg->parser == LZ0_PARSE_GREEDY_COST)
-        rc = lz0_parse_greedy_cost(&f, &tl);
-    else if (cfg->parser == LZ0_PARSE_LAZY2)
-        rc = lz0_parse_lazy2(&f, &tl);
-    else if (cfg->parser == LZ0_PARSE_LITE1)
-        rc = lz0_parse_lite1(&f, &tl);
-    else if (cfg->parser == LZ0_PARSE_LITE2)
-        rc = lz0_parse_lite2(&f, &tl);
-    else if (cfg->parser == LZ0_PARSE_LITE1F)
-        rc = lz0_parse_lite1f(&f, &tl);
-    else if (cfg->parser == LZ0_PARSE_LITE1FN)
-        rc = lz0_parse_lite1fn(&f, &tl);
-    else if (cfg->parser == LZ0_PARSE_H2)
-        rc = lz0_parse_h2(&f, &tl);
     else if (cfg->parser == LZ0_PARSE_SDP)
         rc = lz0_parse_sdp(&f, &tl);
     else if (cfg->parser == LZ0_PARSE_ULTRA)
         rc = lz0_parse_ultra(&f, &tl);
     else
-        rc = lz0_parse_lazy(&f, &tl);
+        rc = -1;
     double t2 = now_ms();
     if (f.jmp)
         stats->peak_ram += (size_t)in_sz * (size_t)f.jump_levels * sizeof(uint32_t);

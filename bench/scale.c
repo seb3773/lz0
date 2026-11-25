@@ -218,7 +218,7 @@ int main(int argc, char **argv) {
                     printf("%-6s %-6s %-4s %10s %8s %10s %8s %8s %8s %10s %7s %7s %10s\n",
                            sz, kinds[k], "ZX0", "-", "-", "skip", "-", "-", "-", "-", "-", "-",
                            "skip");
-                run_lz0(sz, kinds[k], n, in, "A2", LZ0_PARSE_LAZY);
+                run_lz0(sz, kinds[k], n, in, "G", LZ0_PARSE_GREEDY);
             }
             run_lz0(sz, kinds[k], n, in, "S2", LZ0_PARSE_SDP);
             free(in);

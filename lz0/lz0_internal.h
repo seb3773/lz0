@@ -100,7 +100,6 @@ typedef struct {
     lz0_config opts;
     double sa_build_ms;
     void *census;
-    void *dp_census;
     /* Per-16 KiB window classification table (NULL on single-window / small inputs). */
     lz0_win_info *wins;
     uint32_t n_wins;
@@ -188,14 +187,6 @@ int lz0_toklist_push(lz0_toklist *tl, uint32_t pos, uint32_t length, uint32_t of
 lz0_token *lz0_toklist_extend(lz0_toklist *tl, uint32_t m);
 
 int lz0_parse_greedy(lz0_finder *f, lz0_toklist *tl);
-int lz0_parse_lazy(lz0_finder *f, lz0_toklist *tl);
-int lz0_parse_greedy_cost(lz0_finder *f, lz0_toklist *tl);
-int lz0_parse_lazy2(lz0_finder *f, lz0_toklist *tl);
-int lz0_parse_lite1(lz0_finder *f, lz0_toklist *tl);
-int lz0_parse_lite2(lz0_finder *f, lz0_toklist *tl);
-int lz0_parse_lite1f(lz0_finder *f, lz0_toklist *tl);
-int lz0_parse_lite1fn(lz0_finder *f, lz0_toklist *tl);
-int lz0_parse_h2(lz0_finder *f, lz0_toklist *tl);
 int lz0_parse_sdp(lz0_finder *f, lz0_toklist *tl);
 int lz0_parse_ultra(lz0_finder *f, lz0_toklist *tl);
 extern int lz0_ultra_states;
@@ -208,24 +199,7 @@ extern int lz0_ultra_margin;
 extern int lz0_ultra_fine;
 extern int lz0_ultra_inject;
 extern int lz0_rle_tail;
-int lz0_parse_dp(lz0_finder *f, lz0_toklist *tl);
 int lz0_tokens_valid(const lz0_toklist *tl, uint32_t n);
-
-typedef struct {
-    uint32_t n_pos;
-    uint32_t both_live;
-    uint32_t last_diff;
-    uint32_t last_diff_close32;
-    uint32_t last_diff_close64;
-    uint32_t nsamp;
-    uint32_t spos[12];
-    uint32_t sal_off[12];
-    uint32_t sam_off[12];
-    int sal_bits[12];
-    int sam_bits[12];
-} lz0_dp_census;
-
-extern lz0_dp_census *lz0_dp_census_out;
 
 typedef struct {
     uint32_t n_pos;
@@ -350,7 +324,6 @@ int lz0_emit_cfg(const unsigned char *in, uint32_t n, const lz0_toklist *tl,
 
 size_t lz0_ram_finder(uint32_t n, int jump_levels);
 size_t lz0_ram_finder_c(const lz0_config *cfg, uint32_t n, int jump_levels);
-size_t lz0_ram_dp(uint32_t n);
 size_t lz0_ram_sdp(uint32_t n, int k);
 
 #endif

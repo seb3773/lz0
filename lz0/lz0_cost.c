@@ -193,10 +193,6 @@ size_t lz0_ram_finder(uint32_t n, int jump_levels) {
     return lz0_ram_finder_c(NULL, n, jump_levels);
 }
 
-size_t lz0_ram_dp(uint32_t n) {
-    return (size_t)n * (sizeof(int) * 2 + sizeof(uint32_t) * 3);
-}
-
 size_t lz0_ram_sdp(uint32_t n, int k) {
     if (k < 1)
         k = 4;

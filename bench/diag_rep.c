@@ -237,14 +237,12 @@ int main(void) {
     dump_chain(p, (uint32_t)n, 32, 8);
     dump_chain(p, (uint32_t)n, 128, 4);
     printf("=== parser sizes n=%zu ===\n", n);
-    size_one(p, n, "A1", LZ0_PARSE_GREEDY, 32);
-    size_one(p, n, "A1b", LZ0_PARSE_GREEDY_COST, 32);
-    size_one(p, n, "A2", LZ0_PARSE_LAZY, 32);
-    size_one(p, n, "A2b", LZ0_PARSE_LAZY2, 32);
-    size_one(p, n, "A3", LZ0_PARSE_DP, 32);
-    size_one(p, n, "A1", LZ0_PARSE_GREEDY, 128);
-    size_one(p, n, "A1b", LZ0_PARSE_GREEDY_COST, 128);
-    size_one(p, n, "A2b", LZ0_PARSE_LAZY2, 128);
+    size_one(p, n, "G", LZ0_PARSE_GREEDY, 32);
+    size_one(p, n, "S2", LZ0_PARSE_SDP, 32);
+    size_one(p, n, "U", LZ0_PARSE_ULTRA, 32);
+    size_one(p, n, "G", LZ0_PARSE_GREEDY, 128);
+    size_one(p, n, "S2", LZ0_PARSE_SDP, 128);
+    size_one(p, n, "U", LZ0_PARSE_ULTRA, 128);
     free(p);
     return 0;
 }

@@ -1,56 +1,24 @@
 #define _POSIX_C_SOURCE 200809L
 #include "lz0.h"
 #include "lz0dec.h"
+#include "lz0_stdio.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <errno.h>
 
-static unsigned char *read_file(const char *path, size_t *n) {
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        return NULL;
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
-        return NULL;
-    }
-    long sz = ftell(f);
-    if (sz < 0) {
-        fclose(f);
-        return NULL;
-    }
-    rewind(f);
-    unsigned char *p = (unsigned char *)malloc(sz > 0 ? (size_t)sz : 1);
-    if (!p) {
-        fclose(f);
-        return NULL;
-    }
-    if (sz && fread(p, 1, (size_t)sz, f) != (size_t)sz) {
-        free(p);
-        fclose(f);
-        return NULL;
-    }
-    fclose(f);
-    *n = (size_t)sz;
-    return p;
-}
-
-static int write_file(const char *path, const unsigned char *p, size_t n) {
-    FILE *f = fopen(path, "wb");
-    if (!f)
-        return -1;
-    if (n && fwrite(p, 1, n, f) != n) {
-        fclose(f);
-        return -1;
-    }
-    fclose(f);
-    return 0;
+static void print_usage(const char *prog) {
+    fprintf(stderr, "LZ0 Compressor CLI v%s\n\n", LZ0_VERSION);
+    fprintf(stderr, "Usage:\n");
+    fprintf(stderr, "  %s c [-1..-9] <in|-> <out.lz0|->   Compress input (default level 6)\n", prog);
+    fprintf(stderr, "  %s d <in.lz0|-> <out|->           Decompress LZ01 stream\n", prog);
+    fprintf(stderr, "  %s -h | --help                    Show help\n", prog);
+    fprintf(stderr, "  %s -v | --version                 Show version\n", prog);
 }
 
 static int cmd_c(const char *in_path, const char *out_path, int level) {
     size_t n = 0;
-    unsigned char *in = read_file(in_path, &n);
+    unsigned char *in = lz0_cli_read(in_path, &n);
     if (!in) {
         fprintf(stderr, "lz0: cannot read %s\n", in_path);
         return 1;
@@ -67,7 +35,7 @@ static int cmd_c(const char *in_path, const char *out_path, int level) {
     lz0_config_level(&cfg, level);
     if (n == 0) {
         unsigned char cont[8] = {'L', 'Z', '0', '1', 0, 0, 0, 0};
-        int rc = write_file(out_path, cont, 8);
+        int rc = lz0_cli_write(out_path, cont, 8);
         free(in);
         return rc != 0;
     }
@@ -92,7 +60,7 @@ static int cmd_c(const char *in_path, const char *out_path, int level) {
     cont[6] = (unsigned char)((sz >> 16) & 255);
     cont[7] = (unsigned char)((sz >> 24) & 255);
     memcpy(cont + 8, raw, rsz);
-    int rc = write_file(out_path, cont, 8 + rsz);
+    int rc = lz0_cli_write(out_path, cont, 8 + rsz);
     free(cont);
     free(raw);
     free(in);
@@ -101,7 +69,7 @@ static int cmd_c(const char *in_path, const char *out_path, int level) {
 
 static int cmd_d(const char *in_path, const char *out_path) {
     size_t n = 0;
-    unsigned char *cont = read_file(in_path, &n);
+    unsigned char *cont = lz0_cli_read(in_path, &n);
     if (!cont) {
         fprintf(stderr, "lz0: cannot read %s\n", in_path);
         return 1;
@@ -120,7 +88,7 @@ static int cmd_d(const char *in_path, const char *out_path) {
         if (psz != 0) {
             fprintf(stderr, "lz0: empty size with nonempty payload\n");
             rc = 1;
-        } else if (write_file(out_path, NULL, 0) != 0)
+        } else if (lz0_cli_write(out_path, NULL, 0) != 0)
             rc = 1;
         free(cont);
         return rc;
@@ -137,15 +105,25 @@ static int cmd_d(const char *in_path, const char *out_path) {
         free(cont);
         return 1;
     }
-    int rc = write_file(out_path, out, (size_t)d);
+    int rc = lz0_cli_write(out_path, out, (size_t)d);
     free(out);
     free(cont);
     return rc != 0;
 }
 
 int main(int argc, char **argv) {
+    if (argc == 2) {
+        if (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) {
+            print_usage(argv[0]);
+            return 0;
+        }
+        if (!strcmp(argv[1], "-v") || !strcmp(argv[1], "--version")) {
+            printf("lz0 %s\n", LZ0_VERSION);
+            return 0;
+        }
+    }
     if (argc < 4) {
-        fprintf(stderr, "usage: lz0 c [-1..-9] <in> <out.lz0>\n       lz0 d <in.lz0> <out>\n");
+        print_usage(argv[0]);
         return 1;
     }
     if (!strcmp(argv[1], "c")) {

@@ -7,12 +7,11 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "lz0dec.h"
+#include "lz0_stdio.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-
-#define LZ0DEC_VERSION "0.2.0"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -36,39 +35,14 @@ static double now_ns(void) {
 }
 #endif
 
-static unsigned char *read_file(const char *path, size_t *n) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
-    long sz = ftell(f);
-    if (sz < 0) { fclose(f); return NULL; }
-    rewind(f);
-    unsigned char *p = (unsigned char *)malloc(sz > 0 ? (size_t)sz : 1);
-    if (!p) { fclose(f); return NULL; }
-    if (sz && fread(p, 1, (size_t)sz, f) != (size_t)sz) {
-        free(p); fclose(f); return NULL;
-    }
-    fclose(f);
-    *n = (size_t)sz;
-    return p;
-}
-
-static int write_file(const char *path, const unsigned char *p, size_t n) {
-    FILE *f = fopen(path, "wb");
-    if (!f) return -1;
-    if (n && fwrite(p, 1, n, f) != n) { fclose(f); return -1; }
-    fclose(f);
-    return 0;
-}
-
 static void print_usage(const char *prog) {
-    fprintf(stderr, "LZ0 Standalone Decompressor v%s\n\n", LZ0DEC_VERSION);
+    fprintf(stderr, "LZ0 Standalone Decompressor v%s\n\n", LZ0_VERSION);
     fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s <input.lz0> <output>                 Decompress using fastest engine (default)\n", prog);
-    fprintf(stderr, "  %s -e, --engine <fast|compact|min> <in> <out>  Decompress using selected engine\n", prog);
-    fprintf(stderr, "  %s -b, --bench <input.lz0>              Benchmark decompression throughput\n", prog);
-    fprintf(stderr, "  %s -h, --help                           Show this help message\n", prog);
-    fprintf(stderr, "  %s -v, --version                        Show version\n\n", prog);
+    fprintf(stderr, "  %s <input.lz0|-> <output|->            Decompress using fastest engine (default)\n", prog);
+    fprintf(stderr, "  %s -e, --engine <fast|compact|min> <in|-> <out|->  Decompress using selected engine\n", prog);
+    fprintf(stderr, "  %s -b, --bench <input.lz0>             Benchmark decompression throughput\n", prog);
+    fprintf(stderr, "  %s -h, --help                          Show this help message\n", prog);
+    fprintf(stderr, "  %s -v, --version                       Show version\n\n", prog);
     fprintf(stderr, "Available engines on this platform:\n");
     fprintf(stderr, "  min      : Minimal C decoder (lz0dec_min), no heap\n");
 #if (defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64) || (defined(__riscv) && __riscv_xlen == 64)) && !defined(_WIN32)
@@ -174,7 +148,7 @@ int main(int argc, char **argv) {
             return 0;
         }
         if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
-            printf("lz0dec %s\n", LZ0DEC_VERSION);
+            printf("lz0dec %s\n", LZ0_VERSION);
             return 0;
         }
         if (strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--bench") == 0) {
@@ -225,7 +199,7 @@ int main(int argc, char **argv) {
     }
 
     size_t in_sz = 0;
-    unsigned char *cont = read_file(input_path, &in_sz);
+    unsigned char *cont = lz0_cli_read(input_path, &in_sz);
     if (!cont) {
         fprintf(stderr, "lz0dec: error: cannot read '%s'\n", input_path);
         return 1;
@@ -257,7 +231,7 @@ int main(int argc, char **argv) {
             free(cont);
             return 1;
         }
-        write_file(output_path, NULL, 0);
+        lz0_cli_write(output_path, NULL, 0);
         free(cont);
         return 0;
     }
@@ -277,7 +251,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    if (write_file(output_path, out, (size_t)decomp_len) != 0) {
+    if (lz0_cli_write(output_path, out, (size_t)decomp_len) != 0) {
         fprintf(stderr, "lz0dec: error: failed to write output file '%s'\n", output_path);
         free(out);
         free(cont);

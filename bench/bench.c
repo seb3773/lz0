@@ -174,15 +174,14 @@ int main(int argc, char **argv) {
                 return 1;
             }
             run_one(kinds[k], n, in, "ZX0", do_zx0, 0, 2, 32, 16);
-            run_one(kinds[k], n, in, "A1", 0, LZ0_PARSE_GREEDY, 2, 32, 16);
-            run_one(kinds[k], n, in, "A1b", 0, LZ0_PARSE_GREEDY_COST, 2, 32, 16);
-            run_one(kinds[k], n, in, "A2", 0, LZ0_PARSE_LAZY, 2, 32, 16);
-            run_one(kinds[k], n, in, "A2b", 0, LZ0_PARSE_LAZY2, 2, 32, 16);
+            run_one(kinds[k], n, in, "G", 0, LZ0_PARSE_GREEDY, 2, 4, 8);
+            run_one(kinds[k], n, in, "S2", 0, LZ0_PARSE_SDP, 2, 8, 16);
+            run_one(kinds[k], n, in, "S8", 0, LZ0_PARSE_SDP, 2, 32, 32);
             if (n <= 64 * 1024)
-                run_one(kinds[k], n, in, "A3", 0, LZ0_PARSE_DP, 2, 32, 16);
+                run_one(kinds[k], n, in, "U", 0, LZ0_PARSE_ULTRA, 2, 64, 48);
             else
                 printf("%-6zu %-6s %-4s %10s %8s %10s %10s %8s %8s %8s %8s %10s\n",
-                       n, kinds[k], "A3", "-", "-", "skip", "-", "-", "-", "-", "-", "skip");
+                       n, kinds[k], "U", "-", "-", "skip", "-", "-", "-", "-", "-", "skip");
             free(in);
         }
     }

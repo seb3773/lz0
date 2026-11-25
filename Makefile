@@ -1,6 +1,7 @@
 CC = gcc
+VERSION ?= 0.6.0-dev
 CFLAGS = -O3 -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Wno-unused-parameter
-CFLAGS += -Izx0_compressor -Izx0_decompressor -Ilz0
+CFLAGS += -Izx0_compressor -Izx0_decompressor -Ilz0 -DLZ0_VERSION=\"$(VERSION)\"
 
 ZX0_SRC = zx0_compressor/compress.c zx0_compressor/optimize.c \
           zx0_compressor/memory.c zx0_compressor/zx0_compress_wrapper.c \
@@ -17,11 +18,9 @@ LZ0_SRC = lz0/lz0_cost.c lz0/lz0_find.c lz0/lz0_parse.c \
 
 LZ0DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.S lz0/lz0dec_fast_x86_64.S
 
-VERSION ?= 0.5.0
+.PHONY: all bench clean test smoke bounds diag sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz guard simd sa_probe enc_bench enc_tiers find_bench mem_peak lz0 lz0dec cli sanitize valgrind bench_all bench_ratio bench_dec bench_dec_arm64 bench_dec_riscv64 bench_blobs test_arm64 arm64 test_riscv64 riscv64 windows dist dist_linux dist_arm64 dist_riscv64 dist_windows
 
-.PHONY: all bench clean test smoke bounds diag lite32 state sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz guard simd sa_probe enc_bench enc_tiers find_bench mem_peak lz0 lz0dec cli sanitize valgrind bench_all bench_ratio bench_dec bench_dec_arm64 bench_dec_riscv64 bench_blobs test_arm64 arm64 test_riscv64 riscv64 windows dist dist_linux dist_arm64 dist_riscv64 dist_windows
-
-all: bench/lz0_bench bench/lz0_smoke bench/lz0_bounds bench/lz0_diag_rep bench/lz0_lite32 bench/lz0_diag_state bench/lz0_sdp32 bench/lz0_scale bench/lz0_prof bench/lz0_cmpfind bench/lz0_jumpsweep bench/lz0_pruneab bench/lz0_bits bench/lz0_final
+all: bin/lz0 bin/lz0dec bench/lz0_bench bench/lz0_smoke bench/lz0_bounds bench/lz0_diag_rep bench/lz0_sdp32 bench/lz0_scale bench/lz0_prof bench/lz0_cmpfind bench/lz0_jumpsweep bench/lz0_pruneab bench/lz0_bits bench/lz0_final
 
 bench/lz0_bench_ratio: bench/bench_ratio.c $(ZX0_SRC) $(LZ0_SRC) $(LZ0DEC_SRC)
 	$(CC) $(CFLAGS) -o $@ bench/bench_ratio.c $(ZX0_SRC) $(LZ0_SRC) $(LZ0DEC_SRC) -lm
@@ -75,18 +74,6 @@ bounds: bench/lz0_bounds
 
 diag: bench/lz0_diag_rep
 	./bench/lz0_diag_rep
-
-bench/lz0_lite32: bench/lite32.c $(ZX0_SRC) $(LZ0_SRC)
-	$(CC) $(CFLAGS) -o $@ bench/lite32.c $(ZX0_SRC) $(LZ0_SRC)
-
-lite32: bench/lz0_lite32
-	./bench/lz0_lite32
-
-bench/lz0_diag_state: bench/diag_state.c $(LZ0_SRC)
-	$(CC) $(CFLAGS) -o $@ bench/diag_state.c $(LZ0_SRC)
-
-state: bench/lz0_diag_state
-	./bench/lz0_diag_state
 
 bench/lz0_sdp32: bench/sdp32.c $(ZX0_SRC) $(LZ0_SRC)
 	$(CC) $(CFLAGS) -o $@ bench/sdp32.c $(ZX0_SRC) $(LZ0_SRC)
@@ -359,7 +346,7 @@ test: smoke bounds bench/lz0_bench vectors boundary malformed guard simd threads
 
 ARM64_CC = aarch64-linux-gnu-gcc
 ARM64_EMU = qemu-aarch64-static
-ARM64_CFLAGS = -O3 -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Izx0_compressor -Izx0_decompressor -Ilz0 -static
+ARM64_CFLAGS = -O3 -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Izx0_compressor -Izx0_decompressor -Ilz0 -DLZ0_VERSION=\"$(VERSION)\" -static
 ARM64_DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_arm64.S lz0/lz0dec_fast_arm64.S
 
 test_arm64: lz0/lz0dec_arm64.S lz0/lz0dec_fast_arm64.S
@@ -384,7 +371,7 @@ RISCV64_CC ?= riscv64-linux-gnu-gcc
 RISCV64_EMU ?= qemu-riscv64-static
 # Same emulator with the V extension enabled (exercises the RVV encoder tier).
 RISCV64_EMU_V ?= $(RISCV64_EMU) -cpu rv64,v=true,vlen=128
-RISCV64_CFLAGS = -O3 -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Izx0_compressor -Izx0_decompressor -Ilz0 -static
+RISCV64_CFLAGS = -O3 -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Izx0_compressor -Izx0_decompressor -Ilz0 -DLZ0_VERSION=\"$(VERSION)\" -static
 RISCV64_DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_riscv64.S lz0/lz0dec_fast_riscv64.S
 
 test_riscv64: lz0/lz0dec_riscv64.S lz0/lz0dec_fast_riscv64.S

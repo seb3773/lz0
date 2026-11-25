@@ -1062,10 +1062,8 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
     memset(f, 0, sizeof(*f));
     lz0_simd_init();
     lz0_opts_from_globals(cfg, &f->opts);
-    if (!f->opts.isolated) {
+    if (!f->opts.isolated)
         f->census = lz0_sdp_census_out;
-        f->dp_census = lz0_dp_census_out;
-    }
     f->in = in;
     f->n = n;
     f->min_match = f->opts.min_match < 2 ? 2 : f->opts.min_match;

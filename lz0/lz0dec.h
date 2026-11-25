@@ -1,6 +1,10 @@
 #ifndef LZ0DEC_H
 #define LZ0DEC_H
 
+#ifndef LZ0_VERSION
+#define LZ0_VERSION "0.6.0-dev"
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
