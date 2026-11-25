@@ -954,6 +954,7 @@ static uint32_t lz0_win_detect_bpp(const unsigned char *win, uint32_t wlen) {
 static void lz0_apply_win_info(lz0_finder *f, const lz0_win_info *wi) {
     f->is_high_entropy = wi->is_high_entropy;
     f->is_stereo_16 = wi->is_stereo_16;
+    f->local_tab = wi->local_tab;
     f->bpp = wi->bpp;
     f->num_strides = wi->num_strides;
     for (int i = 0; i < (int)wi->num_strides; i++)
@@ -1184,6 +1185,7 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
             wi.num_strides =
                 (uint8_t)lz0_detect_strides(in, n, wi.strides, single_win ? 4 : 8, single_win);
             lz0_populate_win_diag(&wi);
+            wi.local_tab = (!wi.is_high_entropy && wi.num_strides > 0 && wi.bpp == 0) ? 1u : 0u;
         }
         lz0_apply_win_info(f, &wi);
     } else {
@@ -1229,6 +1231,17 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
                         memcpy(wi->strides, g_strides, sizeof(g_strides));
                     }
                     lz0_populate_win_diag(wi);
+                    if (!wi->is_high_entropy && wi->bpp == 0 && local_bpp == 0 &&
+                        g_num_strides > 0 && wlen >= 512u) {
+                        uint32_t ls[4];
+                        int ln = lz0_detect_strides_win(in + off, wlen, ls, 0, 4);
+                        for (int k = 0; k < ln; k++) {
+                            if (ls[k] > 8u) {
+                                wi->local_tab = 1u;
+                                break;
+                            }
+                        }
+                    }
                 }
             }
             f->wins = wins;
@@ -1241,6 +1254,7 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
             wi.num_strides = g_num_strides;
             memcpy(wi.strides, g_strides, sizeof(g_strides));
             lz0_populate_win_diag(&wi);
+            wi.local_tab = (!wi.is_high_entropy && wi.num_strides > 0 && wi.bpp == 0) ? 1u : 0u;
             lz0_apply_win_info(f, &wi);
         }
     }
@@ -1556,19 +1570,21 @@ static int keep_candidate(lz0_finder *f, lz0_match *out, int *n, int max_c, lz0_
         *n = cnt + 1;
         return 1;
     }
-    /* When cnt == max_c and i < 0, m_score > worst_score is guaranteed */
+    /* When cnt == max_c and i < 0, m_score > worst_score is guaranteed.
+     * On saturated strided non-raster blocks (e.g. fixed-width tables), drop
+     * redundant candidates already strictly Pareto-dominated by >= 2 entries. */
+    if (max_c >= 32 && f->local_tab) {
+        int dom = 0;
+        for (int j = 0; j < cnt; j++) {
+            if (out[j].offset <= m.offset && out[j].length >= m.length && ++dom >= 2)
+                return 0;
+        }
+    }
     out[worst] = m;
     f->kc_off[worst] = m.offset;
     f->kc_score[worst] = m_score;
     f->kc_worst = -1;
     return 1;
-}
-
-/* Unaligned, alias-safe prefix load; shared by SA and hash probing. */
-static inline uint32_t lz0_ld16(const unsigned char *p) {
-    uint16_t v;
-    memcpy(&v, p, sizeof(v));
-    return v;
 }
 
 static int sa_probe_side(lz0_finder *f, uint32_t pos, uint32_t src, int known,
@@ -1763,7 +1779,7 @@ static LZ0_ALWAYS_INLINE void sa_probe_core(lz0_finder *f, uint32_t pos, int min
     int ns = (int)f->sa_n;
     int accL = INT_MAX;
     int accR = INT_MAX;
-    int use_lcp = (f->opts.sa_lcp && f->lcp && f->sa_sample <= 1);
+    int use_lcp = (f->opts.sa_lcp && f->lcp && f->sa_sample <= 1 && !f->opts.sa_multiscale);
     const uint32_t prefix = (!with_cen && !use_lcp) ? lz0_ld16(f->in + pos) : 0;
     int adapt = f->opts.sa_adapt;
     int ms = f->opts.sa_multiscale;

@@ -1308,39 +1308,64 @@ static inline void sdp_store(sdp_st *d, uint32_t key, int cost, uint32_t prev_po
  * transition with cost >= max(row[0].cost, row[1].cost) can neither improve a
  * matching slot (strict "<") nor evict the worst one, so it returns at once;
  * below that bound, a non-matching key always evicts the worst slot w. */
-static inline void sdp_relax2(sdp_st *row, uint8_t *nslot, uint32_t key, int cost,
-                              uint32_t prev_pos, uint8_t prev_slot) {
+static inline void sdp_relax2_impl(sdp_st *row, uint8_t *nslot, uint32_t key, int cost,
+                                   uint32_t prev_pos, uint8_t prev_slot,
+                                   uint32_t lit_pos, const int lit_tie) {
     uint8_t n = *nslot;
     if (n == 2) {
         int c0 = row[0].cost, c1 = row[1].cost;
         int max_c = c0 > c1 ? c0 : c1;
-        if (cost >= max_c)
+        if (cost > max_c || (!lit_tie && cost == max_c))
             return;
         if (row[0].key == key) {
-            if (cost < c0)
+            if (cost < c0 ||
+                (lit_tie && cost == c0 &&
+                 lz0_lit_headroom(lit_pos - prev_pos) >
+                     lz0_lit_headroom(lit_pos - sdp_pp_pos(row[0].pp))))
                 sdp_store(&row[0], key, cost, prev_pos, prev_slot);
             return;
         }
         if (row[1].key == key) {
-            if (cost < c1)
+            if (cost < c1 ||
+                (lit_tie && cost == c1 &&
+                 lz0_lit_headroom(lit_pos - prev_pos) >
+                     lz0_lit_headroom(lit_pos - sdp_pp_pos(row[1].pp))))
                 sdp_store(&row[1], key, cost, prev_pos, prev_slot);
             return;
         }
+        if (lit_tie && cost >= max_c)
+            return;
         sdp_store(&row[c1 > c0 ? 1 : 0], key, cost, prev_pos, prev_slot);
         return;
     }
     if (n > 0 && row[0].key == key) {
-        if (cost < row[0].cost)
+        if (cost < row[0].cost ||
+            (lit_tie && cost == row[0].cost &&
+             lz0_lit_headroom(lit_pos - prev_pos) >
+                 lz0_lit_headroom(lit_pos - sdp_pp_pos(row[0].pp))))
             sdp_store(&row[0], key, cost, prev_pos, prev_slot);
         return;
     }
     if (n > 1 && row[1].key == key) {
-        if (cost < row[1].cost)
+        if (cost < row[1].cost ||
+            (lit_tie && cost == row[1].cost &&
+             lz0_lit_headroom(lit_pos - prev_pos) >
+                 lz0_lit_headroom(lit_pos - sdp_pp_pos(row[1].pp))))
             sdp_store(&row[1], key, cost, prev_pos, prev_slot);
         return;
     }
     sdp_store(&row[n], key, cost, prev_pos, prev_slot);
     *nslot = (uint8_t)(n + 1);
+}
+
+static inline void sdp_relax2(sdp_st *row, uint8_t *nslot, uint32_t key, int cost,
+                              uint32_t prev_pos, uint8_t prev_slot) {
+    sdp_relax2_impl(row, nslot, key, cost, prev_pos, prev_slot, 0, 0);
+}
+
+static inline void sdp_relax2_lit(sdp_st *row, uint8_t *nslot, uint32_t key, int cost,
+                                  uint32_t prev_pos, uint8_t prev_slot, uint32_t lit_pos) {
+    sdp_relax2_impl(row, nslot, key, cost, prev_pos, prev_slot, lit_pos, 1);
 }
 
 static inline int sdp_use_fine(const lz0_finder *f) {
@@ -1596,8 +1621,8 @@ static int lz0_parse_sdp_k2(lz0_finder *f, lz0_toklist *tl) {
             uint8_t slot = (uint8_t)s;
             double tl0 = timed ? sdp_now_ms() : 0;
             if (!can_last && max_left >= 1) {
-                sdp_relax2(st + (size_t)(i + 1) * 2u, &ns[i + 1], key | SDP_LIT_FLAG,
-                           cost + lit1, i, slot);
+                sdp_relax2_lit(st + (size_t)(i + 1) * 2u, &ns[i + 1], key | SDP_LIT_FLAG,
+                               cost + lit1, i, slot, i + 1);
                 if (cen)
                     cen->n_trans_lit++;
             }
@@ -1607,9 +1632,9 @@ static int lz0_parse_sdp_k2(lz0_finder *f, lz0_toklist *tl) {
             if (can_last && max_left >= 1 && opos < i) {
                 uint8_t oslot = sdp_pp_slot(cur->pp);
                 const sdp_st *origin = &st[(size_t)opos * 2u + oslot];
-                sdp_relax2(st + (size_t)(i + 1) * 2u, &ns[i + 1], key,
-                           origin->cost + lz0_cost_literal_c(&f->opts, (int)(i - opos + 1)), opos,
-                           oslot);
+                sdp_relax2_lit(st + (size_t)(i + 1) * 2u, &ns[i + 1], key,
+                               origin->cost + lz0_cost_literal_c(&f->opts, (int)(i - opos + 1)),
+                               opos, oslot, i + 1);
                 if (cen)
                     cen->n_trans_lit++;
             }
@@ -1742,8 +1767,9 @@ static void sdp_rows_free(sdp_rows *d) {
     free(d->bloom);
 }
 
-static inline void sdp_relax(sdp_rows *d, uint32_t pos, uint32_t key, int cost,
-                             uint32_t prev_pos, uint8_t prev_slot, lz0_sdp_census *cen) {
+static inline void sdp_relax_impl(sdp_rows *d, uint32_t pos, uint32_t key, int cost,
+                                  uint32_t prev_pos, uint8_t prev_slot, lz0_sdp_census *cen,
+                                  const int lit_tie) {
     const int K = d->K;
     size_t base = (size_t)pos * (size_t)K;
     int n = d->ns[pos];
@@ -1756,7 +1782,8 @@ static inline void sdp_relax(sdp_rows *d, uint32_t pos, uint32_t key, int cost,
             w = lz0_simd_argmax_i32(d->cost + base, K);
             d->worst[pos] = (uint8_t)w;
         }
-        if (cost >= d->cost[base + (size_t)w])
+        int wc = d->cost[base + (size_t)w];
+        if (cost > wc || (!lit_tie && cost == wc))
             return;
     }
     /* keys are unique within a row; the filter rejects most absent keys
@@ -1764,7 +1791,11 @@ static inline void sdp_relax(sdp_rows *d, uint32_t pos, uint32_t key, int cost,
     uint64_t bit = sdp_key_bit(key);
     int s = (d->bloom[pos] & bit) ? lz0_simd_find_u32(d->key + base, n, key) : -1;
     if (s >= 0) {
-        if (cost < d->cost[base + (size_t)s]) {
+        int cur = d->cost[base + (size_t)s];
+        if (cost < cur ||
+            (lit_tie && cost == cur &&
+             lz0_lit_headroom(pos - prev_pos) >
+                 lz0_lit_headroom(pos - d->prev_pos[base + (size_t)s]))) {
             d->cost[base + (size_t)s] = cost;
             d->prev_pos[base + (size_t)s] = prev_pos;
             d->prev_slot[base + (size_t)s] = prev_slot;
@@ -1774,6 +1805,8 @@ static inline void sdp_relax(sdp_rows *d, uint32_t pos, uint32_t key, int cost,
         }
         return;
     }
+    if (w >= 0 && lit_tie && cost >= d->cost[base + (size_t)w])
+        return;
     if (n < K) {
         d->key[base + (size_t)n] = key;
         d->cost[base + (size_t)n] = cost;
@@ -1793,6 +1826,16 @@ static inline void sdp_relax(sdp_rows *d, uint32_t pos, uint32_t key, int cost,
     d->prev_slot[base + (size_t)w] = prev_slot;
     d->worst[pos] = 0xff;
     d->bloom[pos] |= bit;
+}
+
+static inline void sdp_relax(sdp_rows *d, uint32_t pos, uint32_t key, int cost,
+                             uint32_t prev_pos, uint8_t prev_slot, lz0_sdp_census *cen) {
+    sdp_relax_impl(d, pos, key, cost, prev_pos, prev_slot, cen, 0);
+}
+
+static inline void sdp_relax_lit(sdp_rows *d, uint32_t pos, uint32_t key, int cost,
+                                 uint32_t prev_pos, uint8_t prev_slot, lz0_sdp_census *cen) {
+    sdp_relax_impl(d, pos, key, cost, prev_pos, prev_slot, cen, 1);
 }
 
 static void sdp_emit_last(const lz0_finder *f, sdp_rows *d, uint32_t i, int L, uint32_t last_off,
@@ -2001,16 +2044,16 @@ int lz0_parse_sdp(lz0_finder *f, lz0_toklist *tl) {
             uint8_t slot = (uint8_t)s;
             if (!(key & SDP_LIT_FLAG)) {
                 /* start a literal run */
-                sdp_relax(&d, i + 1, key | SDP_LIT_FLAG, cost + lit1, i, slot,
-                          cen);
+                sdp_relax_lit(&d, i + 1, key | SDP_LIT_FLAG, cost + lit1, i, slot,
+                              cen);
             } else {
                 /* extend the literal run from its origin (states at i > 0 always
                  * have prev_pos < i, so the run length is >= 1) */
                 uint32_t opos = d.prev_pos[base + (size_t)s];
                 uint8_t oslot = d.prev_slot[base + (size_t)s];
                 int ocost = d.cost[(size_t)opos * (size_t)K + oslot];
-                sdp_relax(&d, i + 1, key, ocost + lz0_cost_literal_c(&f->opts, (int)(i + 1 - opos)), opos,
-                          oslot, cen);
+                sdp_relax_lit(&d, i + 1, key, ocost + lz0_cost_literal_c(&f->opts, (int)(i + 1 - opos)),
+                              opos, oslot, cen);
                 int L = lz0_find_last_len(f, i, last_off);
                 if (L > max_left)
                     L = max_left;

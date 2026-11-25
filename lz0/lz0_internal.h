@@ -2,6 +2,27 @@
 #define LZ0_INTERNAL_H
 
 #include "lz0.h"
+#include <string.h>
+
+/* Unaligned, alias-safe 16-bit load; shared by finder and ultra injector. */
+static inline uint32_t lz0_ld16(const unsigned char *p) {
+    uint16_t v;
+    memcpy(&v, p, sizeof(v));
+    return v;
+}
+
+/* Remaining literals in current Elias-gamma plateau before next +2b jump. */
+static inline uint32_t lz0_lit_headroom(uint32_t lit_len) {
+#if defined(__GNUC__) || defined(__clang__)
+    uint32_t v = lit_len ? lit_len : 1u;
+    return (~0u >> __builtin_clz(v)) - v;
+#else
+    uint32_t lim = 1u;
+    while (lim < lit_len)
+        lim = (lim << 1) | 1u;
+    return lim - lit_len;
+#endif
+}
 
 #define LZ0_INITIAL_OFFSET 1
 #define LZ0_HASH_BITS 17
@@ -23,6 +44,7 @@ typedef struct {
     uint8_t is_stereo_16;
     uint8_t num_strides;
     uint8_t num_diag;
+    uint8_t local_tab;
     uint32_t bpp;
     uint32_t strides[8];
     uint32_t diag_offsets[16];
@@ -56,6 +78,7 @@ typedef struct {
     uint32_t bpp;
     uint8_t is_stereo_16;
     uint8_t is_high_entropy;
+    uint8_t local_tab;
     int num_diag;
     uint32_t diag_offsets[16];
     int n_mru;

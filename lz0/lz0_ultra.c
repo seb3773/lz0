@@ -73,8 +73,8 @@ static void u_find_worst(u_dp *d, uint32_t pos) {
     d->worst[pos] = (uint8_t)lz0_simd_argmax_i32(d->cost + base, d->K);
 }
 
-static inline void u_relax(u_dp *d, uint32_t pos, uint32_t key, int cost, uint32_t pp,
-                           int margin) {
+static inline void u_relax_impl(u_dp *d, uint32_t pos, uint32_t key, int cost, uint32_t pp,
+                                int margin, const int lit_tie) {
     uint32_t off = key & ~U_LIT_FLAG;
     int32_t *rb = &d->best[pos];
     if (cost > *rb + u_margin(off, margin))
@@ -87,13 +87,12 @@ static inline void u_relax(u_dp *d, uint32_t pos, uint32_t key, int cost, uint32
     if (n == d->K) {
         /* full row: no slot costs more than the worst one, so a transition at
          * or above it can neither improve a same-key slot nor evict: reject
-         * before the key filter and the vector search (the cached argmax is
-         * recomputed identically whenever invalidated, so caching it here
-         * changes nothing). */
+         * before the key filter and the vector search (unless a literal-run
+         * tie can win via larger Elias-gamma headroom). */
         if (d->worst[pos] == 0xff)
             u_find_worst(d, pos);
         w = d->worst[pos];
-        if (cost >= d->cost[base + w])
+        if (cost > d->cost[base + w] || (!lit_tie && cost == d->cost[base + w]))
             return;
     }
     uint64_t bit = 1ull << u_hbit(key);
@@ -101,7 +100,11 @@ static inline void u_relax(u_dp *d, uint32_t pos, uint32_t key, int cost, uint32
         /* keys are unique within a row: vector search for the slot */
         int s = lz0_simd_find_u32(d->key + base, n, key);
         if (s >= 0) {
-            if (cost < d->cost[base + s]) {
+            int cur = d->cost[base + s];
+            if (cost < cur ||
+                (lit_tie && cost == cur &&
+                 lz0_lit_headroom(pos - (pp & U_POS_MASK)) >
+                     lz0_lit_headroom(pos - (d->pp[base + s] & U_POS_MASK)))) {
                 d->cost[base + s] = cost;
                 d->pp[base + s] = pp;
                 if (d->worst[pos] == (uint8_t)s)
@@ -110,6 +113,8 @@ static inline void u_relax(u_dp *d, uint32_t pos, uint32_t key, int cost, uint32
             return;
         }
     }
+    if (w >= 0 && lit_tie && cost >= d->cost[base + w])
+        return;
     if (w < 0) {
         d->key[base + n] = key;
         d->cost[base + n] = cost;
@@ -124,6 +129,16 @@ static inline void u_relax(u_dp *d, uint32_t pos, uint32_t key, int cost, uint32
     d->pp[base + w] = pp;
     d->bloom[pos] |= bit;
     d->worst[pos] = 0xff;
+}
+
+static inline void u_relax(u_dp *d, uint32_t pos, uint32_t key, int cost, uint32_t pp,
+                           int margin) {
+    u_relax_impl(d, pos, key, cost, pp, margin, 0);
+}
+
+static inline void u_relax_lit(u_dp *d, uint32_t pos, uint32_t key, int cost, uint32_t pp,
+                               int margin) {
+    u_relax_impl(d, pos, key, cost, pp, margin, 1);
 }
 
 static void u_emit_last(const lz0_finder *f, u_dp *d, uint32_t i, int L, uint32_t off, int cost, uint32_t pp) {
@@ -306,15 +321,15 @@ int lz0_parse_ultra(lz0_finder *f, lz0_toklist *tl) {
                 b = s;
             uint32_t pp = i | ((uint32_t)s << 24);
             if (!(key & U_LIT_FLAG)) {
-                u_relax(&d, i + 1, off | U_LIT_FLAG, cost + lit1, pp, f->opts.ultra_margin);
+                u_relax_lit(&d, i + 1, off | U_LIT_FLAG, cost + lit1, pp, f->opts.ultra_margin);
             } else {
                 /* extend the literal run from its origin */
                 uint32_t opp = d.pp[base + s];
                 uint32_t opos = opp & U_POS_MASK;
                 uint32_t oslot = opp >> 24;
                 int ocost = d.cost[(size_t)opos * (size_t)K + oslot];
-                u_relax(&d, i + 1, key, ocost + u_cost_lit((int)(i + 1 - opos)), opp,
-                        f->opts.ultra_margin);
+                u_relax_lit(&d, i + 1, key, ocost + u_cost_lit((int)(i + 1 - opos)), opp,
+                            f->opts.ultra_margin);
                 int L = lz0_find_last_len(f, i, off);
                 if (L > max_left)
                     L = max_left;
@@ -322,22 +337,58 @@ int lz0_parse_ultra(lz0_finder *f, lz0_toklist *tl) {
                     u_emit_last(f, &d, i, L, off, cost, pp);
             }
         }
-        if (f->opts.ultra_inject && i > 0 && b >= 0) {
-            /* new matches that return to an offset held by another live state */
-            for (int s = 0; s < nsi && nc < 64; s++) {
+        if (f->opts.ultra_inject && i > 0 && b >= 0 && max_left >= 2 && nc < 64) {
+            /* Inject live beam offsets whose 16-bit prefix matches in[i..i+1];
+             * keep up to the top 8 distinct lowest-cost candidates not already in cands[]. */
+            uint32_t cur16 = lz0_ld16(f->in + i);
+            uint32_t inj_off[8];
+            int32_t inj_cost[8];
+            int ninj = 0;
+            for (int s = 0; s < nsi; s++) {
                 uint32_t off = d.key[base + s] & ~U_LIT_FLAG;
-                if (off > i)
+                if (off == 0 || off > i || lz0_ld16(f->in + i - off) != cur16)
                     continue;
                 int dup = 0;
-                for (int k = 0; k < nc; k++)
+                for (int k = 0; k < nc; k++) {
                     if (cands[k].offset == off) {
                         dup = 1;
                         break;
                     }
+                }
                 if (dup)
                     continue;
-                int ml = lz0_simd_matchlen(f->in + i, f->in + i - off, max_left);
-                if (ml >= 2) {
+                int32_t sc = d.cost[base + s];
+                int seen = 0;
+                for (int j = 0; j < ninj; j++) {
+                    if (inj_off[j] == off) {
+                        if (sc < inj_cost[j])
+                            inj_cost[j] = sc;
+                        seen = 1;
+                        break;
+                    }
+                }
+                if (seen)
+                    continue;
+                if (ninj < 8) {
+                    inj_off[ninj] = off;
+                    inj_cost[ninj] = sc;
+                    ninj++;
+                } else {
+                    int w = 0;
+                    for (int j = 1; j < 8; j++) {
+                        if (inj_cost[j] > inj_cost[w])
+                            w = j;
+                    }
+                    if (sc < inj_cost[w]) {
+                        inj_off[w] = off;
+                        inj_cost[w] = sc;
+                    }
+                }
+            }
+            for (int j = 0; j < ninj && nc < 64; j++) {
+                uint32_t off = inj_off[j];
+                int ml = 2 + lz0_simd_matchlen(f->in + i + 2, f->in + i - off + 2, max_left - 2);
+                if (ml >= 3 || lz0_is_len2_allowed(f, off)) {
                     cands[nc].offset = off;
                     cands[nc].length = (uint32_t)ml;
                     nc++;

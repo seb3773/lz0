@@ -148,6 +148,7 @@ void lz0_config_level(lz0_config *cfg, int level) {
         cfg->ultra_states = 0;
         cfg->ultra_margin = 32;
         cfg->ultra_fine = 8;
+        cfg->ultra_inject = 1;
     }
 }
 
