@@ -72,6 +72,7 @@ typedef struct {
     int jump_levels;     /* skip-list depth (0 = plain prev[] walks) */
     uint64_t jmp_walked; /* prev[] links walked by multi-step walks while jmp == NULL */
     uint32_t last_insert;
+    uint32_t rle_start;
     uint32_t rle_end;
     int num_strides;
     uint32_t strides[8];
@@ -104,6 +105,7 @@ typedef struct {
     lz0_win_info *wins;
     uint32_t n_wins;
     uint32_t cur_win;
+    size_t ultra_peak_ram;
 } lz0_finder;
 
 typedef struct {

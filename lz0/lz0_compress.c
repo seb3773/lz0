@@ -681,8 +681,6 @@ int lz0_compress(const unsigned char *in, size_t in_sz,
         int k = f.opts.max_states > 0 ? f.opts.max_states : 4;
         stats->peak_ram += lz0_ram_sdp((uint32_t)in_sz, k);
     }
-    if (f.opts.parser == LZ0_PARSE_ULTRA)
-        stats->peak_ram += lz0_ram_ultra_c(&f.opts, (uint32_t)in_sz);
 
     lz0_toklist tl;
     lz0_toklist_init(&tl);
@@ -698,6 +696,8 @@ int lz0_compress(const unsigned char *in, size_t in_sz,
     else
         rc = -1;
     double t2 = now_ms();
+    if (f.opts.parser == LZ0_PARSE_ULTRA)
+        stats->peak_ram += f.ultra_peak_ram;
     if (f.jmp)
         stats->peak_ram += (size_t)in_sz * (size_t)f.jump_levels * sizeof(uint32_t);
     if (rc < 0 || !lz0_tokens_valid(&tl, (uint32_t)in_sz)) {

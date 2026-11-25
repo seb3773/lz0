@@ -1388,7 +1388,11 @@ static uint32_t chain_skip(lz0_finder *f, uint32_t cur, int steps, int *taken) {
         *taken = t;
         if (steps >= 2 && f->jump_levels > 0 && !f->jmp) {
             f->jmp_walked += (uint64_t)t;
-            if (f->jmp_walked > (uint64_t)f->jump_levels * f->last_insert)
+            /* With a large suffix-array window (L9), moderate hash-chain walks
+             * take negligible time compared to allocating 48 B/byte for jmp[];
+             * only activate jmp[] once chain walks clearly outgrow init+table cost. */
+            uint64_t mult = (f->sa_win >= 128) ? 6u : 1u;
+            if (f->jmp_walked > (uint64_t)f->jump_levels * (f->last_insert + 4096u) * mult)
                 skip_activate(f);
         }
         return cur;
@@ -1515,28 +1519,19 @@ static inline int lz0_kc_ctz32(uint32_t v) {
  * change of a slot's score or length invalidates kc_worst. The list always
  * restarts empty, so entries beyond *n are never read. Thread-safe per
  * finder instance. */
-static int keep_candidate(lz0_finder *f, lz0_match *out, int *n, int max_c, lz0_match m) {
-    if (!is_valid_candidate(f, m.length, m.offset))
-        return 0;
-    if (max_c > 64)
-        max_c = 64;
+#if defined(__GNUC__) || defined(__clang__)
+#define LZ0_PREFETCH_R(p) __builtin_prefetch((const void *)(p), 0, 3)
+#define LZ0_ALWAYS_INLINE inline __attribute__((always_inline))
+#define LZ0_NOINLINE __attribute__((noinline))
+#else
+#define LZ0_PREFETCH_R(p) ((void)(p))
+#define LZ0_ALWAYS_INLINE inline
+#define LZ0_NOINLINE
+#endif
+
+static LZ0_NOINLINE int keep_candidate_slow(lz0_finder *f, lz0_match *out, int *n, int max_c,
+                                            lz0_match m, int m_score, int worst) {
     int cnt = *n;
-    int m_score = -1;
-    int worst = -1;
-
-    if (cnt == max_c) {
-        worst = f->kc_worst;
-        if (worst < 0) {
-            worst = cnt <= LZ0_KC_SCALAR_MAX ? lz0_kc_worst_c(f->kc_score, out, cnt)
-                                             : lz0_simd_kc_worst(f->kc_score, out, cnt);
-            f->kc_worst = worst;
-        }
-        int worst_score = f->kc_score[worst];
-        m_score = match_score(m);
-        if (m_score <= worst_score)
-            return 0;
-    }
-
     int i;
     if (cnt <= LZ0_KC_SCALAR_MAX) {
         /* short lists (fast levels): an inline scan beats a kernel call.
@@ -1583,6 +1578,31 @@ static int keep_candidate(lz0_finder *f, lz0_match *out, int *n, int max_c, lz0_
     f->kc_score[worst] = m_score;
     f->kc_worst = -1;
     return 1;
+}
+
+static LZ0_ALWAYS_INLINE int keep_candidate(lz0_finder *f, lz0_match *out, int *n, int max_c,
+                                            lz0_match m) {
+    if (!is_valid_candidate(f, m.length, m.offset))
+        return 0;
+    if (max_c > 64)
+        max_c = 64;
+    int cnt = *n;
+    int m_score = -1;
+    int worst = -1;
+
+    if (cnt == max_c) {
+        worst = f->kc_worst;
+        if (worst < 0) {
+            worst = cnt <= LZ0_KC_SCALAR_MAX ? lz0_kc_worst_c(f->kc_score, out, cnt)
+                                             : lz0_simd_kc_worst(f->kc_score, out, cnt);
+            f->kc_worst = worst;
+        }
+        int worst_score = f->kc_score[worst];
+        m_score = match_score(m);
+        if (m_score <= worst_score)
+            return 0;
+    }
+    return keep_candidate_slow(f, out, n, max_c, m, m_score, worst);
 }
 
 static int sa_probe_side(lz0_finder *f, uint32_t pos, uint32_t src, int known,
@@ -1666,15 +1686,7 @@ static int sa_probe_side(lz0_finder *f, uint32_t pos, uint32_t src, int known,
 #define LZ0_SA_PF_MIN_INPUT (2u << 20)
 #endif
 
-#if defined(__GNUC__) || defined(__clang__)
-/* prefetcht0 on x86-64, prfm pldl1keep on AArch64, prefetch.r with Zicbop on
- * RISC-V (nothing otherwise). */
-#define LZ0_PREFETCH_R(p) __builtin_prefetch((const void *)(p), 0, 3)
-#define LZ0_ALWAYS_INLINE inline __attribute__((always_inline))
-#else
-#define LZ0_PREFETCH_R(p) ((void)(p))
-#define LZ0_ALWAYS_INLINE inline
-#endif
+/* Prefetch and always-inline macros defined above keep_candidate(). */
 
 /* Next probe distance (lz0_sa_multiscale stride schedule). */
 static inline int sa_next_d(int d, int ms) {
@@ -1886,7 +1898,7 @@ int lz0_find_last_len(lz0_finder *f, uint32_t pos, uint32_t last_offset) {
     if (max_left < 1)
         return 0;
     if (last_offset >= 1 && last_offset <= pos) {
-        if (last_offset == 1 && pos < f->rle_end) {
+        if (pos >= f->rle_start && pos < f->rle_end && last_offset <= pos - f->rle_start) {
             int ml = (int)(f->rle_end - pos);
             if (ml > max_left)
                 ml = max_left;
@@ -2563,12 +2575,14 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
         rlen = (int)(f->rle_end - pos);
     } else if (pos > 0 && in[pos] == in[pos - 1]) {
         rlen = lz0_simd_matchlen(in + pos, in + pos - 1, maxl);
-        if (rlen >= 16)
+        if (rlen >= 16) {
+            f->rle_start = pos - 1u;
             f->rle_end = pos + (uint32_t)rlen;
+        }
     }
 
     if (last_offset >= 1 && last_offset <= pos) {
-        if (last_offset == 1 && pos < f->rle_end) {
+        if (pos >= f->rle_start && pos < f->rle_end && last_offset <= pos - f->rle_start) {
             int ml = (int)(f->rle_end - pos);
             if (ml > max_left)
                 ml = max_left;
