@@ -39,11 +39,13 @@ jobs:
       - name: Install cross-compilers and QEMU user emulators
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get install -y \
             gcc-aarch64-linux-gnu \
-            gcc-riscv64-linux-gnu
-          sudo apt-get install -y --no-install-recommends qemu-user-static || \
-            sudo apt-get install -y --no-install-recommends qemu-user
+            libc6-dev-arm64-cross \
+            gcc-riscv64-linux-gnu \
+            libc6-dev-riscv64-cross
+          sudo apt-get install -y qemu-user-static || \
+            sudo apt-get install -y qemu-user
 
       - name: Run ARM64 tests under QEMU
         run: |
@@ -115,10 +117,12 @@ jobs:
       - name: Install Linux/Windows cross-compilers and zip
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get install -y \
             gcc-mingw-w64-x86-64 \
             gcc-aarch64-linux-gnu \
+            libc6-dev-arm64-cross \
             gcc-riscv64-linux-gnu \
+            libc6-dev-riscv64-cross \
             zip
 
       - name: Setup musl static cross-toolchains for compact ARM64/RV64 binaries
