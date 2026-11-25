@@ -119,9 +119,6 @@ lz0dec_fast_riscv64:
     bgez a5, .Lml_elias_loop
 
 .Lmatch_last_have_len:
-    # Validate last_offset >= 1
-    blez a7, .Lfail
-
     # Check src = out_ptr - last_offset >= out_start
     sub t3, a4, a7          # t3 = src
     bltu t3, a2, .Lfail
@@ -228,7 +225,6 @@ lz0dec_fast_riscv64:
     j .Lmain_loop_after_literal
 
 .Llit_large_16:
-    li t0, 16
 .Llit_large_loop:
     bltu t2, t0, .Llit_large_tail
     ld t4, 0(a0)
@@ -260,13 +256,13 @@ lz0dec_fast_riscv64:
     j .Lmain_loop_after_literal
 
 .Llit_byte_loop:
-    beqz t2, .Lmain_loop_after_literal
     lbu t0, 0(a0)
     sb t0, 0(a4)
     addi a0, a0, 1
     addi a4, a4, 1
     addi t2, t2, -1
-    j .Llit_byte_loop
+    bnez t2, .Llit_byte_loop
+    j .Lmain_loop_after_literal
 
     .p2align 3
 .Lenter_new_loop:
@@ -315,19 +311,16 @@ lz0dec_fast_riscv64:
     j .Lfail
 
 .Lmsb_elias_done:
-    blez t1, .Lfail
-
     # Read raw LSB byte
     bgeu a0, a1, .Lfail
     lbu t4, 0(a0)
     addi a0, a0, 1
 
-    # offset = msb * 256 - t
+    # offset = msb * 256 - t (>= 1 guaranteed)
     slli a7, t1, 8
     sub a7, a7, t4          # a7 = last_offset
 
-    # Validate offset: 1 <= offset <= (out_ptr - out_start)
-    blez a7, .Lfail
+    # Validate offset <= (out_ptr - out_start)
     sub t0, a4, a2
     bltu t0, a7, .Lfail
 
@@ -419,9 +412,7 @@ lz0dec_fast_riscv64:
     sub t3, a4, a7          # t3 = src
 
 .Ldo_match_copy:
-    # Copy t2 bytes from t3 to a4
-    blez t2, .Lafter_match
-
+    # Copy t2 bytes (>= 1 guaranteed) from t3 to a4
     li t0, 16
     bltu a7, t0, .Lmatch_under_16
 
@@ -439,7 +430,6 @@ lz0dec_fast_riscv64:
     j .Lafter_match
 
 .Lmatch_large_16:
-    li t0, 16
 .Lmatch_16_loop:
     bltu t2, t0, .Lmatch_16_tail
     ld t4, 0(t3)
@@ -549,11 +539,11 @@ lz0dec_fast_riscv64:
     j .Lafter_match
 
 .Lfill1_bytes:
-    beqz t2, .Lafter_match
     sb t0, 0(a4)
     addi a4, a4, 1
     addi t2, t2, -1
-    j .Lfill1_bytes
+    bnez t2, .Lfill1_bytes
+    j .Lafter_match
 
 .Lmatch_periodic_2_7:
     # Check boundary: if out_ptr + len + 8 > out_end, use safe byte copy
@@ -611,8 +601,7 @@ lz0dec_fast_riscv64:
 
 .Lmatch_byte_loop:
 .Lmatch_short_bytes:
-    # Partial overlaps (offset 2..7) or boundary fallback
-    beqz t2, .Lafter_match
+    # Partial overlaps (offset 2..7) or boundary fallback (t2 >= 1 guaranteed)
 1:
     lbu t0, 0(t3)
     sb t0, 0(a4)

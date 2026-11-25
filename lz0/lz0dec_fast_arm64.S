@@ -135,93 +135,20 @@
     lsr \reg, x15, #8           /* 1 d1 .. dn */
 .endm
 
-/* Match copy: x14 = len, x5 = offset (validated). Done -> fall through or
-   jump to \cont. Within 16 bytes of out_end -> \fb, nothing written. */
-.macro COPY_FAST fb, cont
+/* Match copy: x14 = len, x5 = offset (validated). Done -> caller falls
+   through/branches to .F_decide. Within 16 bytes of out_end -> .Ff_copy. */
+.macro COPY_FAST
     add x13, x3, x14
     cmp x13, x7
-    b.hi \fb
+    b.hi .Ff_copy
     sub x15, x3, x5
     cmp x5, #16
-    b.lo 8881f
+    b.lo .Lcopy_cold_lt16
     ldr q0, [x15]
     str q0, [x3]
     cmp x14, #16
-    b.hi 8882f
+    b.hi .Lcopy_cold_gt16
     mov x3, x13
-  .subsection 1
-8882:                           /* offset >= 16, len > 16 */
-    add x15, x15, #16
-    add x17, x3, #16
-1:
-    ldr q0, [x15], #16
-    str q0, [x17], #16
-    cmp x17, x13
-    b.lo 1b
-    mov x3, x13
-    b \cont
-8881:
-    cmp x5, #8
-    b.lo 2f
-    /* offset 8..15: lo = out[-off..-off+7] and hi = out[-8..-1] together
-       hold the whole period (off <= 16) and both loads end before out.
-       Each step stores lo at q and hi at q+off-8, then q += off. */
-    ldr x16, [x15]              /* lo */
-    sub x17, x3, #8
-    ldr x17, [x17]              /* hi */
-    sub x14, x5, #8             /* off - 8 */
-1:
-    str x16, [x3]
-    str x17, [x3, x14]
-    add x3, x3, x5
-    cmp x3, x13
-    b.lo 1b
-    mov x3, x13
-    b \cont
-2:
-    cmp x5, #2
-    b.hi 4f
-    b.lo 21f
-    ld1r {v0.8h}, [x15]        /* offset 2: halfword broadcast */
-20:
-    str q0, [x3], #16
-    cmp x3, x13
-    b.lo 20b
-    mov x3, x13
-    b \cont
-21:
-    ld1r {v0.16b}, [x15]       /* offset 1: byte broadcast */
-    b 20b
-4:
-    cmp x5, #4
-    b.ne 3f
-    ld1r {v0.4s}, [x15]        /* offset 4: word broadcast */
-    b 20b
-3:  /* offset p = 3, 5, 6, 7: build y = p-periodic doubleword in a register.
-       Mask low p bytes with shl/lsr by 64-8p, then duplicate via shifts.
-       Store y every s = p*floor(8/p) bytes: no byte loop, one load. */
-    lsl x14, x5, #3             /* 8p */
-    mov x16, #64
-    sub x16, x16, x14           /* 64 - 8p */
-    ldr x17, [x15]
-    lsl x17, x17, x16
-    lsr x17, x17, x16
-    lsl x15, x17, x14
-    orr x17, x17, x15
-    lsl x15, x15, x14
-    orr x17, x17, x15
-    lsl x15, x15, x14
-    orr x17, x17, x15
-    add x16, x12, #256          /* .Ls_tab at .Lunzip + 256 */
-    ldrb w16, [x16, x5]
-1:
-    str x17, [x3]
-    add x3, x3, x16
-    cmp x3, x13
-    b.lo 1b
-    mov x3, x13
-    b \cont
-  .subsection 0
 .endm
 
 /* ============================ entry ============================ */
@@ -278,20 +205,13 @@ lz0dec_fast_arm64:
 .F_seg_b:
     WINDOW
     lsr x14, x10, #61           /* 3-bit length code */
+    lsl x10, x10, #3            /* consume length code bits up front */
+    add x9, x9, #3
     cmp x14, #7
     b.eq .F_len_elias
     add x14, x14, #2
-    COPY_FAST .Ff_copy3, .F_mn_decide
-.F_mn_decide:                   /* bits: [len3][decision][enter] */
-    tbz x10, #60, .F_mn_lit
-    tbz x10, #59, .Leof
-    lsl x10, x10, #5
-    add x9, x9, #5
-    b .F_mn
-.F_mn_lit:
-    lsl x10, x10, #4
-    add x9, x9, #4
-    b .F_lit
+    COPY_FAST
+    b .F_decide
 
     .p2align 4
 .F_decide:                      /* after a copy: [decision][enter] */
@@ -332,7 +252,7 @@ lz0dec_fast_arm64:
     add x9, x9, #2
     mov x14, #1
 .F_copy:
-    COPY_FAST .Ff_copy, .F_decide
+    COPY_FAST
     b .F_decide
 
 .F_al_new:
@@ -353,8 +273,6 @@ lz0dec_fast_arm64:
     b .F_lit_have
 
 .F_len_elias:
-    lsl x10, x10, #3
-    add x9, x9, #3
     ELIAS_FAST x14, 0, .Ff_len
     add x14, x14, #8
     b .F_copy
@@ -468,9 +386,6 @@ lz0dec_fast_arm64:
     COMMIT
     TO_SAFE
     b .S_literal
-.Ff_copy3:
-    lsl x10, x10, #3            /* consume the 3-bit length code */
-    add x9, x9, #3
 .Ff_copy:
     COMMIT
     TO_SAFE
@@ -623,6 +538,76 @@ lz0dec_fast_arm64:
 .Lfail:
     mov x0, #-1
     ret
+
+    /* Shared cold / long-match / small-offset copy paths (single instance). */
+    .subsection 1
+.Lcopy_cold_gt16:               /* offset >= 16, len > 16 */
+    add x15, x15, #16
+    add x17, x3, #16
+1:
+    ldr q0, [x15], #16
+    str q0, [x17], #16
+    cmp x17, x13
+    b.lo 1b
+    mov x3, x13
+    b .F_decide
+.Lcopy_cold_lt16:
+    cmp x5, #8
+    b.lo 2f
+    ldr x16, [x15]
+    sub x17, x3, #8
+    ldr x17, [x17]
+    sub x14, x5, #8
+1:
+    str x16, [x3]
+    str x17, [x3, x14]
+    add x3, x3, x5
+    cmp x3, x13
+    b.lo 1b
+    mov x3, x13
+    b .F_decide
+2:
+    cmp x5, #2
+    b.hi 4f
+    b.lo 21f
+    ld1r {v0.8h}, [x15]        /* offset 2: halfword broadcast */
+20:
+    str q0, [x3], #16
+    cmp x3, x13
+    b.lo 20b
+    mov x3, x13
+    b .F_decide
+21:
+    ld1r {v0.16b}, [x15]       /* offset 1: byte broadcast */
+    b 20b
+4:
+    cmp x5, #4
+    b.ne 3f
+    ld1r {v0.4s}, [x15]        /* offset 4: word broadcast */
+    b 20b
+3:                              /* offset p = 3, 5, 6, 7 */
+    lsl x14, x5, #3
+    mov x16, #64
+    sub x16, x16, x14
+    ldr x17, [x15]
+    lsl x17, x17, x16
+    lsr x17, x17, x16
+    lsl x15, x17, x14
+    orr x17, x17, x15
+    lsl x15, x15, x14
+    orr x17, x17, x15
+    lsl x15, x15, x14
+    orr x17, x17, x15
+    add x16, x12, #256
+    ldrb w16, [x16, x5]
+1:
+    str x17, [x3]
+    add x3, x3, x16
+    cmp x3, x13
+    b.lo 1b
+    mov x3, x13
+    b .F_decide
+    .subsection 0
 #if defined(__ELF__)
     .size lz0dec_fast_arm64, .-lz0dec_fast_arm64
 #endif

@@ -143,107 +143,22 @@
     mov \reg, rax
 .endm
 
-/* Match copy, rcx = len, rbx = offset (validated). Falls through / jumps
-   to \cont when done; jumps to \fb (nothing written) if within 16 bytes of
-   out_end. Clobbers rax rdx rsi (rcx kept when jumping to \fb). */
-.macro COPY_FAST fb, cont
+/* Match copy, rcx = len, rbx = offset (validated). Falls through when done
+   to .F_decide (caller falls into or jumps to .F_decide); jumps to .Ff_copy
+   (nothing written) if within 16 bytes of out_end. Clobbers rax rdx rsi. */
+.macro COPY_FAST
     lea rax, [r12 + rcx]
     cmp rax, r11
-    ja \fb
+    ja .Ff_copy
     mov rsi, r12
     sub rsi, rbx
     cmp rbx, 16
-    jb 8881f
+    jb .Lcopy_cold_lt16
     movdqu xmm0, xmmword ptr [rsi]
     movdqu xmmword ptr [r12], xmm0
-    cmp rcx, 16
-    ja 8882f
+    cmp ecx, 16
+    ja .Lcopy_cold_gt16
     mov r12, rax
-  .subsection 1
-8882:                           /* offset >= 16, len > 16 */
-    add rsi, 16
-    lea rdx, [r12 + 16]
-1:
-    movdqu xmm0, xmmword ptr [rsi]
-    movdqu xmmword ptr [rdx], xmm0
-    add rsi, 16
-    add rdx, 16
-    cmp rdx, rax
-    jb 1b
-    mov r12, rax
-    jmp \cont
-8881:
-    cmp rbx, 8
-    jb 2f
-    /* offset 8..15: lo = out[-off..-off+7] and hi = out[-8..-1] together
-       hold the whole period (off <= 16) and both loads end before out, so
-       they never wait on a store of this match. Each step stores lo at q
-       and hi at q+off-8, then q += off. */
-    mov rdx, qword ptr [rsi]
-    mov rsi, qword ptr [r12 - 8]
-1:
-    mov qword ptr [r12], rdx
-    mov qword ptr [r12 + rbx - 8], rsi
-    add r12, rbx
-    cmp r12, rax
-    jb 1b
-    mov r12, rax
-    jmp \cont
-2:
-    cmp rbx, 2
-    ja 4f
-    je 22f
-    movzx edx, byte ptr [rsi]   /* offset 1: byte broadcast */
-    mov rcx, 0x0101010101010101
-    imul rdx, rcx
-    movq xmm0, rdx
-    punpcklqdq xmm0, xmm0
-20:
-    movdqu xmmword ptr [r12], xmm0
-    add r12, 16
-    cmp r12, rax
-    jb 20b
-    mov r12, rax
-    jmp \cont
-22:                             /* offset 2: halfword broadcast */
-    movzx edx, word ptr [rsi]
-    imul edx, edx, 0x00010001
-    movd xmm0, edx
-    pshufd xmm0, xmm0, 0
-    jmp 20b
-4:
-    cmp rbx, 4
-    jne 3f
-    movd xmm0, dword ptr [rsi]   /* offset 4: dword broadcast */
-    pshufd xmm0, xmm0, 0
-    jmp 20b
-3:  /* offset p = 3, 5, 6, 7: build y = p-periodic qword in a register.
-       x = low p bytes of the qword at out-p (shl/shr by 64-8p clears the
-       bytes at out.., read inside the wild margin), then
-       y = x | x<<8p | x<<16p | x<<24p. The shifts accumulate with count
-       8p < 64, so copies past bit 63 drop out instead of wrapping.
-       Store y every s = p*floor(8/p) bytes: no byte loop, one load. */
-    imul ecx, ebx, -8           /* count & 63 = 64 - 8p */
-    mov rdx, qword ptr [rsi]
-    shl rdx, cl
-    shr rdx, cl
-    neg ecx                     /* 8p */
-    mov rsi, rdx
-    shl rsi, cl
-    or rdx, rsi
-    shl rsi, cl
-    or rdx, rsi
-    shl rsi, cl
-    or rdx, rsi
-    movzx ecx, byte ptr [r15 + rbx + 256]   /* .Ls_tab[p] = s */
-1:
-    mov qword ptr [r12], rdx
-    add r12, rcx
-    cmp r12, rax
-    jb 1b
-    mov r12, rax
-    jmp \cont
-  .subsection 0
 .endm
 
 /* ============================ entry ============================ */
@@ -320,23 +235,15 @@ lz0dec_fast_x86_64:
     WINDOW
     mov rcx, rdi
     shr rcx, 61                 /* 3-bit length code */
+    shl rdi, 3                  /* consume length code bits up front */
+    add rbp, 3
     cmp ecx, 7
     je .F_len_elias
     add ecx, 2
-    COPY_FAST .Ff_copy3, .F_mn_decide
-.F_mn_decide:
-    /* bits after the length code: [decision][enter]... */
-    lea rbp, [rbp + 4]
-    shl rdi, 4                  /* CF = decision bit */
-    jnc .F_mn_lit
-    inc rbp
-    add rdi, rdi                /* CF = enter bit: 0 -> EOF */
-    jc .F_mn
-    jmp .Leof
-.F_mn_lit:                      /* rdi already at the literal Elias */
-    jmp .F_lit_x
+    COPY_FAST
+    jmp .F_decide
 
-    .p2align 4
+    .p2align 5
 .F_decide:
     inc rbp
     add rdi, rdi
@@ -349,7 +256,6 @@ lz0dec_fast_x86_64:
 
     .p2align 4
 .F_lit:
-.F_lit_x:
     test rdi, rdi
     jns .F_lit_gen
     add rdi, rdi                /* Elias == 1 */
@@ -382,7 +288,7 @@ lz0dec_fast_x86_64:
     inc rbp
     mov ecx, 1
 .F_copy:
-    COPY_FAST .Ff_copy, .F_decide
+    COPY_FAST
     jmp .F_decide
 
     .p2align 4
@@ -395,10 +301,8 @@ lz0dec_fast_x86_64:
     jmp .F_lit_have
 
 .F_len_elias:
-    shl rdi, 3
-    add rbp, 3
     ELIAS_FAST rcx, 0, .Ff_len
-    add rcx, 8
+    add ecx, 8
     jmp .F_copy
 
 .F_lit_long:                    /* first 16 done; margins guaranteed */
@@ -519,9 +423,6 @@ lz0dec_fast_x86_64:
     COMMIT
     TO_SAFE
     jmp .S_literal
-.Ff_copy3:
-    shl rdi, 3                  /* consume the 3-bit length code */
-    add rbp, 3
 .Ff_copy:
     mov rsi, rcx
     COMMIT
@@ -693,7 +594,7 @@ lz0dec_fast_x86_64:
     sub rax, r10
     jmp .Lret
 .Lfail:
-    mov rax, -1
+    or rax, -1
 .Lret:
     add rsp, 16
     pop r15
@@ -703,6 +604,84 @@ lz0dec_fast_x86_64:
     pop rbp
     pop rbx
     ret
+
+    /* Shared cold / long-match / small-offset copy paths (single instance). */
+    .subsection 1
+.Lcopy_cold_gt16:               /* offset >= 16, len > 16 */
+    add rsi, 16
+    lea rdx, [r12 + 16]
+1:
+    movdqu xmm0, xmmword ptr [rsi]
+    movdqu xmmword ptr [rdx], xmm0
+    add rsi, 16
+    add rdx, 16
+    cmp rdx, rax
+    jb 1b
+    mov r12, rax
+    jmp .F_decide
+.Lcopy_cold_lt16:
+    cmp rbx, 8
+    jb 2f
+    mov rdx, qword ptr [rsi]
+    mov rsi, qword ptr [r12 - 8]
+1:
+    mov qword ptr [r12], rdx
+    mov qword ptr [r12 + rbx - 8], rsi
+    add r12, rbx
+    cmp r12, rax
+    jb 1b
+    mov r12, rax
+    jmp .F_decide
+2:
+    cmp rbx, 2
+    ja 4f
+    je 22f
+    movzx edx, byte ptr [rsi]   /* offset 1: byte broadcast */
+    mov rcx, 0x0101010101010101
+    imul rdx, rcx
+    movq xmm0, rdx
+    punpcklqdq xmm0, xmm0
+20:
+    movdqu xmmword ptr [r12], xmm0
+    add r12, 16
+    cmp r12, rax
+    jb 20b
+    mov r12, rax
+    jmp .F_decide
+22:                             /* offset 2: halfword broadcast */
+    movzx edx, word ptr [rsi]
+    imul edx, edx, 0x00010001
+    movd xmm0, edx
+    pshufd xmm0, xmm0, 0
+    jmp 20b
+4:
+    cmp rbx, 4
+    jne 3f
+    movd xmm0, dword ptr [rsi]  /* offset 4: dword broadcast */
+    pshufd xmm0, xmm0, 0
+    jmp 20b
+3:                              /* offset p = 3, 5, 6, 7 */
+    imul ecx, ebx, -8
+    mov rdx, qword ptr [rsi]
+    shl rdx, cl
+    shr rdx, cl
+    neg ecx
+    mov rsi, rdx
+    shl rsi, cl
+    or rdx, rsi
+    shl rsi, cl
+    or rdx, rsi
+    shl rsi, cl
+    or rdx, rsi
+    movzx ecx, byte ptr [r15 + rbx + 256]
+1:
+    mov qword ptr [r12], rdx
+    add r12, rcx
+    cmp r12, rax
+    jb 1b
+    mov r12, rax
+    jmp .F_decide
+    .subsection 0
 .Lfail_early:
     mov eax, -1
     ret

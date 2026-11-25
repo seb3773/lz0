@@ -48,7 +48,7 @@ lz0dec_x86_64:
     movsxd rax, ecx
     lea r11, [rdx + rax]            /* out_end */
 
-    mov rbx, 1                      /* last_offset = 1 */
+    mov ebx, 1                      /* last_offset = 1 */
     mov r8d, 0x80                   /* sentinel bit reader: empty */
 
     jmp .do_literal
@@ -84,12 +84,9 @@ lz0dec_x86_64:
 
 .match_last_full_elias:
     call .read_elias_rest
-    mov rcx, rax
+    mov ecx, eax
 
 .match_last_have_len:
-    test rbx, rbx
-    jle .fail
-
     mov rsi, rbp
     sub rsi, rbx
     cmp rsi, r10
@@ -141,7 +138,7 @@ lz0dec_x86_64:
 
 .lit_full_elias:
     call .read_elias_rest
-    mov rcx, rax
+    mov ecx, eax
 
 .lit_have_len:
     mov rax, r11
@@ -154,11 +151,8 @@ lz0dec_x86_64:
     cmp rcx, rax
     ja .fail
 
-    /* Fast literal copy */
-    test rcx, rcx
-    jle .fail
-
-    cmp rcx, 8
+    /* Fast literal copy (L >= 2 guaranteed by .read_elias_rest) */
+    cmp ecx, 8
     ja .lit_large
 
     /* Short literal (1..8 bytes) */
@@ -178,17 +172,17 @@ lz0dec_x86_64:
 .lit_large:
     /* Large literal (>8 bytes) */
 .lit_large_loop:
-    cmp rcx, 8
+    cmp ecx, 8
     jb .lit_large_tail
     mov rax, [rdi]
     mov [rbp], rax
     add rdi, 8
     add rbp, 8
-    sub rcx, 8
+    sub ecx, 8
     jmp .lit_large_loop
 
 .lit_large_tail:
-    test rcx, rcx
+    test ecx, ecx
     jz .main_loop_after_literal
 
     lea rax, [rbp + 8]
@@ -205,14 +199,13 @@ lz0dec_x86_64:
     jmp .main_loop_after_literal
 
 .lit_byte_loop:
-    test rcx, rcx
-    jz .main_loop_after_literal
     mov al, [rdi]
     mov [rbp], al
     inc rdi
     inc rbp
-    dec rcx
-    jmp .lit_byte_loop
+    dec ecx
+    jnz .lit_byte_loop
+    jmp .main_loop_after_literal
 
     .p2align 4
 .enter_new_loop:
@@ -259,20 +252,15 @@ lz0dec_x86_64:
     jb .elias_inv_loop
     jmp .fail
 .elias_inv_done:
-    test eax, eax
-    jle .fail
-
     cmp rdi, r9
     jae .fail
     movzx edx, byte ptr [rdi]
     inc rdi
 
-    mov rbx, rax
+    mov ebx, eax
     shl rbx, 8
     sub rbx, rdx
 
-    test rbx, rbx
-    jle .fail
     mov rax, rbp
     sub rax, r10
     cmp rbx, rax
@@ -316,11 +304,10 @@ lz0dec_x86_64:
     cmp edx, 7
     jae .new_len_elias
     add edx, 2
-    mov rcx, rdx
+    mov ecx, edx
     jmp .new_len_ready
 
 .new_len_elias:
-    /* Elias gamma (long MatchNew length), inlined: single call site */
     mov eax, 1
 .elias_loop:
     add r8b, r8b
@@ -334,7 +321,6 @@ lz0dec_x86_64:
 1:
     jc .elias_done
 
-
     add r8b, r8b
     jnz 2f
     cmp rdi, r9
@@ -345,11 +331,11 @@ lz0dec_x86_64:
     adc r8b, r8b
 2:
     adc eax, eax
-    cmp eax, 0x40000000             /* limit check folded into the back-edge: v >= 2^30 after the shift <=> v >= 2^29 before it */
+    cmp eax, 0x40000000
     jb .elias_loop
     jmp .fail
 .elias_done:
-    lea rcx, [rax + 8]
+    lea ecx, [rax + 8]
 
 .new_len_ready:
     mov rax, r11
@@ -364,14 +350,11 @@ lz0dec_x86_64:
 
     .p2align 4
 .copy_match_fast:
-    test rcx, rcx
-    jle .copy_ret
-
     cmp rbx, 8
     jb .match_overlap_short
 
-    /* offset >= 8: Fast copy */
-    cmp rcx, 8
+    /* offset >= 8: Fast copy (rcx >= 1 guaranteed by callers) */
+    cmp ecx, 8
     ja .match_large
 
     /* Short match (1..8 bytes) with offset >= 8 */
@@ -386,18 +369,18 @@ lz0dec_x86_64:
 .match_large:
     /* Large match (>8 bytes) with offset >= 8 */
 .match_large_loop:
-    cmp rcx, 8
+    cmp ecx, 8
     jb .match_large_tail
     mov rax, [rsi]
     mov [rbp], rax
     add rsi, 8
     add rbp, 8
-    sub rcx, 8
+    sub ecx, 8
     jmp .match_large_loop
 
 .match_large_tail:
-    test rcx, rcx
-    jz .copy_ret
+    test ecx, ecx
+    jz .after_match
     lea rax, [rbp + 8]
     cmp rax, r11
     ja .match_byte_loop
@@ -407,14 +390,13 @@ lz0dec_x86_64:
     jmp .after_match
 
 .match_byte_loop:
-    test rcx, rcx
-    jz .copy_ret
     mov al, [rsi]
     mov [rbp], al
     inc rsi
     inc rbp
-    dec rcx
-    jmp .match_byte_loop
+    dec ecx
+    jnz .match_byte_loop
+    jmp .after_match
 
 .match_overlap_short:
     cmp rbx, 1
@@ -425,7 +407,7 @@ lz0dec_x86_64:
     mov rdx, 0x0101010101010101
     imul rax, rdx
 
-    cmp rcx, 8
+    cmp ecx, 8
     ja .fill1_large
 
     lea rdx, [rbp + 8]
@@ -437,25 +419,25 @@ lz0dec_x86_64:
 
 .fill1_large:
 .fill1_qwords:
-    cmp rcx, 32
+    cmp ecx, 32
     jb .fill1_8
     mov [rbp], rax
     mov [rbp + 8], rax
     mov [rbp + 16], rax
     mov [rbp + 24], rax
     add rbp, 32
-    sub rcx, 32
+    sub ecx, 32
     jmp .fill1_qwords
 .fill1_8:
-    cmp rcx, 8
+    cmp ecx, 8
     jb .fill1_tail
     mov [rbp], rax
     add rbp, 8
-    sub rcx, 8
+    sub ecx, 8
     jmp .fill1_8
 .fill1_tail:
-    test rcx, rcx
-    jz .copy_ret
+    test ecx, ecx
+    jz .after_match
     lea rdx, [rbp + 8]
     cmp rdx, r11
     ja .fill1_bytes
@@ -463,12 +445,11 @@ lz0dec_x86_64:
     add rbp, rcx
     jmp .after_match
 .fill1_bytes:
-    test rcx, rcx
-    jz .copy_ret
     mov [rbp], al
     inc rbp
-    dec rcx
-    jmp .fill1_bytes
+    dec ecx
+    jnz .fill1_bytes
+    jmp .after_match
 
 .match_short_bytes:
     /* Offsets 2..7 */
@@ -476,10 +457,8 @@ lz0dec_x86_64:
     mov [rbp], al
     inc rsi
     inc rbp
-    dec rcx
+    dec ecx
     jnz .match_short_bytes
-
-.copy_ret:
     jmp .after_match
 
     .p2align 4
@@ -527,13 +506,13 @@ lz0dec_x86_64:
 .fail_sub:                          /* failure inside .read_elias_rest */
     pop rax                         /* drop its return address */
 .fail:
-    mov rax, -1
+    or rax, -1
     pop rbp
     pop rbx
     ret
 
 .fail_early:
-    mov rax, -1
+    or rax, -1
     ret
 
 #if defined(__ELF__)

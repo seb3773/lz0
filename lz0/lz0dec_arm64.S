@@ -107,10 +107,6 @@ lz0dec_arm64:
     b.cc .ml_elias_loop
 
 .match_last_have_len:
-    /* Validate last_offset >= 1 */
-    cmp x5, #1
-    b.lt .fail
-
     /* Check src = out_ptr - last_offset >= out_start */
     sub x10, x3, x5
     cmp x10, x2
@@ -229,11 +225,11 @@ lz0dec_arm64:
     b .main_loop_after_literal
 
 .lit_byte_loop:
-    cbz x8, .main_loop_after_literal
     ldrb w9, [x0], #1
     strb w9, [x3], #1
-    sub x8, x8, #1
-    b .lit_byte_loop
+    subs x8, x8, #1
+    b.ne .lit_byte_loop
+    b .main_loop_after_literal
 
     .p2align 4
 .enter_new_loop:
@@ -280,21 +276,16 @@ lz0dec_arm64:
     b .fail
 
 .msb_elias_done:
-    cmp x8, #1
-    b.lt .fail
-
     /* Read raw LSB byte */
     cmp x0, x1
     b.hs .fail
     ldrb w12, [x0], #1
 
-    /* offset = msb * 256 - t */
+    /* offset = msb * 256 - t (>= 1 guaranteed) */
     lsl x5, x8, #8
     sub x5, x5, x12
 
-    /* Validate offset: 1 <= offset <= (out_ptr - out_start) */
-    cmp x5, #1
-    b.lt .fail
+    /* Validate offset <= (out_ptr - out_start) */
     sub x9, x3, x2
     cmp x5, x9
     b.hi .fail
@@ -383,12 +374,8 @@ lz0dec_arm64:
 
     /* Falls through directly to .do_match_copy */
 
-    .p2align 4
 .do_match_copy:
-    /* Copy x8 bytes from x10 to x3 */
-    cmp x8, #0
-    b.le .after_match
-
+    /* Copy x8 bytes (>= 1 guaranteed) from x10 to x3 */
     cmp x5, #8
     b.lo .match_overlap_short
 
@@ -399,7 +386,7 @@ lz0dec_arm64:
     /* Short match (1..8 bytes) with offset >= 8 */
     add x9, x3, #8
     cmp x9, x4
-    b.hi .match_byte_loop
+    b.hi .match_short_bytes
     ldr x9, [x10]
     str x9, [x3]
     add x3, x3, x8
@@ -419,19 +406,12 @@ lz0dec_arm64:
     cbz x8, .after_match
     add x9, x3, #8
     cmp x9, x4
-    b.hi .match_byte_loop
+    b.hi .match_short_bytes
     sub x11, x8, #8
     ldr x9, [x10, x11]
     str x9, [x3, x11]
     add x3, x3, x8
     b .after_match
-
-.match_byte_loop:
-    cbz x8, .after_match
-    ldrb w9, [x10], #1
-    strb w9, [x3], #1
-    sub x8, x8, #1
-    b .match_byte_loop
 
 .match_overlap_short:
     cmp x5, #1
@@ -478,10 +458,10 @@ lz0dec_arm64:
     add x3, x3, x8
     b .after_match
 .fill1_bytes:
-    cbz x8, .after_match
     strb w9, [x3], #1
-    sub x8, x8, #1
-    b .fill1_bytes
+    subs x8, x8, #1
+    b.ne .fill1_bytes
+    b .after_match
 
 .match_short_bytes:
     ldrb w9, [x10], #1

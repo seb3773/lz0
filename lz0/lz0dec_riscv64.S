@@ -117,11 +117,8 @@ lz0dec_riscv64:
     bgez a5, .Lml_elias_loop
 
 .Lmatch_last_have_len:
-# Validate last_offset >= 1
-    blez a7, .Lfail
-
 # Check src = out_ptr - last_offset >= out_start
-    sub t3, a4, a7          #  t3 = src 
+    sub t3, a4, a7          #  t3 = src
     bltu t3, a2, .Lfail
 
 # Check out_ptr + L <= out_end
@@ -235,13 +232,13 @@ lz0dec_riscv64:
     j .Lmain_loop_after_literal
 
 .Llit_byte_loop:
-    beqz t2, .Lmain_loop_after_literal
     lbu t0, 0(a0)
     sb t0, 0(a4)
     addi a0, a0, 1
     addi a4, a4, 1
     addi t2, t2, -1
-    j .Llit_byte_loop
+    bnez t2, .Llit_byte_loop
+    j .Lmain_loop_after_literal
 
 .Lenter_new_loop:
 # Read 1 bit: 0 -> EOF, 1 -> MatchNew
@@ -289,19 +286,16 @@ lz0dec_riscv64:
     j .Lfail
 
 .Lmsb_elias_done:
-    blez t1, .Lfail
-
 # Read raw LSB byte
     bgeu a0, a1, .Lfail
     lbu t4, 0(a0)
     addi a0, a0, 1
 
-# offset = msb * 256 - t
+# offset = msb * 256 - t (>= 1 guaranteed)
     slli a7, t1, 8
-    sub a7, a7, t4          #  a7 = last_offset 
+    sub a7, a7, t4          #  a7 = last_offset
 
-# Validate offset: 1 <= offset <= (out_ptr - out_start)
-    blez a7, .Lfail
+# Validate offset <= (out_ptr - out_start)
     sub t0, a4, a2
     bltu t0, a7, .Lfail
 
@@ -393,9 +387,7 @@ lz0dec_riscv64:
     sub t3, a4, a7          #  t3 = src 
 
 .Ldo_match_copy:
-# Copy t2 bytes from t3 to a4
-    blez t2, .Lafter_match
-
+# Copy t2 bytes (>= 1 guaranteed) from t3 to a4
     li t0, 8
     bltu a7, t0, .Lmatch_overlap_short
 
@@ -404,14 +396,13 @@ lz0dec_riscv64:
 
 # Short match (1..8 bytes) with offset >= 8
     addi t0, a4, 8
-    bgtu t0, a3, .Lmatch_byte_loop
+    bgtu t0, a3, .Lmatch_short_bytes
     ld t0, 0(t3)
     sd t0, 0(a4)
     add a4, a4, t2
     j .Lafter_match
 
 .Lmatch_large:
-    li t0, 8
 .Lmatch_large_loop:
     bltu t2, t0, .Lmatch_large_tail
     ld t1, 0(t3)
@@ -424,7 +415,7 @@ lz0dec_riscv64:
 .Lmatch_large_tail:
     beqz t2, .Lafter_match
     addi t0, a4, 8
-    bgtu t0, a3, .Lmatch_byte_loop
+    bgtu t0, a3, .Lmatch_short_bytes
     addi t1, t2, -8
     add t4, t3, t1
     add t5, a4, t1
@@ -432,15 +423,6 @@ lz0dec_riscv64:
     sd t0, 0(t5)
     add a4, a4, t2
     j .Lafter_match
-
-.Lmatch_byte_loop:
-    beqz t2, .Lafter_match
-    lbu t0, 0(t3)
-    sb t0, 0(a4)
-    addi t3, t3, 1
-    addi a4, a4, 1
-    addi t2, t2, -1
-    j .Lmatch_byte_loop
 
 .Lmatch_overlap_short:
     li t0, 1
@@ -493,11 +475,11 @@ lz0dec_riscv64:
     j .Lafter_match
 
 .Lfill1_bytes:
-    beqz t2, .Lafter_match
     sb t0, 0(a4)
     addi a4, a4, 1
     addi t2, t2, -1
-    j .Lfill1_bytes
+    bnez t2, .Lfill1_bytes
+    j .Lafter_match
 
 .Lmatch_short_bytes:
     lbu t0, 0(t3)
