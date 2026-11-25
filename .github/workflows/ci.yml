@@ -137,11 +137,11 @@ jobs:
           mkdir -p /tmp/musl-tc
           ARM64_CC_BIN="aarch64-linux-gnu-gcc"
           RV64_CC_BIN="riscv64-linux-gnu-gcc"
-          if curl -fsSL --retry 2 https://musl.cc/aarch64-linux-musl-cross.tgz -o /tmp/musl-tc/a64.tgz; then
+          if curl -4 -fsSL --connect-timeout 15 --max-time 60 --speed-limit 50000 --speed-time 15 --retry 1 https://musl.cc/aarch64-linux-musl-cross.tgz -o /tmp/musl-tc/a64.tgz; then
             tar -xzf /tmp/musl-tc/a64.tgz -C /tmp/musl-tc
             ARM64_CC_BIN="/tmp/musl-tc/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc"
           fi
-          if curl -fsSL --retry 2 https://musl.cc/riscv64-linux-musl-cross.tgz -o /tmp/musl-tc/rv64.tgz; then
+          if curl -4 -fsSL --connect-timeout 15 --max-time 60 --speed-limit 50000 --speed-time 15 --retry 1 https://musl.cc/riscv64-linux-musl-cross.tgz -o /tmp/musl-tc/rv64.tgz; then
             tar -xzf /tmp/musl-tc/rv64.tgz -C /tmp/musl-tc
             RV64_CC_BIN="/tmp/musl-tc/riscv64-linux-musl-cross/bin/riscv64-linux-musl-gcc"
           fi
