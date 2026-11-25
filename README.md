@@ -51,14 +51,16 @@ make bench_all
 
 `lz0dec` defaults to the fast assembly decoder on non-Windows x86-64, AArch64, and RV64. On Windows the assembly decoders are not built, and `fast` / `compact` both call `lz0dec_min`.
 
-The nine levels select four configurations. Within a row, the number does not change the search.
+The nine compression levels map to five distinct search presets tuned for speed, memory footprint, and compression density:
 
 | Levels | Search |
 |---|---|
-| 1–3 | SDP, K=2, hash chain 4, 8 candidates, suffix-array window 8 |
-| 4–6 | SDP, K=2, hash chain 8, 16 candidates, suffix-array window 16. Level 6 is the default (H2C8). |
-| 7–8 | SDP, K=8, hash chain 32, 32 candidates, suffix-array window 64, hash-chain skip list |
-| 9 | Ultra parser, hash chain 64, 48 candidates, suffix-array window 128 with a wider probe, binary-tree finder (depth 32) |
+| `1` | Greedy parser, hash chain 2, 4 candidates, no suffix array (`sa_win=0`) — fast low-RAM mode (`~8.5–13.7 B/byte` peak heap) |
+| `2` | SDP (`K=2`), hash chain 4, 8 candidates, no suffix array (`sa_win=0`) |
+| `3` | SDP (`K=2`), hash chain 4, 8 candidates, suffix-array window 4 (`sa_adapt=1`) |
+| `4–6` | SDP (`K=2`), hash chain 8, 16 candidates, suffix-array window 16 (`sa_adapt=1`), selective fine match emission. Level 6 is the default. |
+| `7–8` | SDP (`K=8`), hash chain 32, 32 candidates, suffix-array window 64 (`sa_adapt=1`), hash-chain skip list |
+| `9` | Ultra SoA parser (`K=128..12`), hash chain 64, 48 candidates, suffix-array window 128 (`sa_adapt=2`, skewed probing, beam-offset injection, local Pareto filtering) |
 
 ## Library
 
@@ -81,7 +83,7 @@ int n = lz0_decompress_to(raw, (int)raw_size, out, (int)out_cap);
 
 `lz0_compress` allocates the output and rejects a zero-length input. `lz0_decompress_to` writes only into the buffer you pass. On failure it returns `-1`; bytes already written are undefined. A bad offset, a truncated stream, or a write past `out_cap` all use that same code.
 
-`lz0_len_code` and `lz0_offset_lsb_bits` are process-wide. The public tools set them to 3 and 8. Other values are outside encoding v0.1.
+`lz0_config_level` initializes all parser and bitstream settings inside the caller's `lz0_config` struct (`len_code = 3`, `offset_lsb_bits = 8`). Concurrent `lz0_compress` calls using separate `lz0_config` structs are re-entrant and thread-safe (`make threadsafe`). Legacy globals `lz0_len_code` and `lz0_offset_lsb_bits` remain fixed at 3 and 8 for compatibility with encoding v0.1.
 
 ## Stream
 
@@ -111,32 +113,32 @@ Gamma coding, the length code, and the worked examples are in [docs/LZ0_FORMAT.m
 
 ## Encoder
 
-Matches come from a 3-byte hash chain (`2^17` buckets) and a suffix array built with SA-IS. A prefix-doubling builder (`lz0_sa_algo = 0`) exists to check that both builders emit the same `sa[]` and `rank[]`. The parser then picks the tokens. Level 6 keeps two live states per position and skips lengths that sit on the same Elias cost plateau. Level 9 uses `lz0/lz0_ultra.c`: the same model, states stored as 12-byte rows, a 768 MiB budget (K from 128 down to a floor of 12). From 16 MiB upward that parser calls the generic SDP parser instead, because the position no longer fits in the packed state. The level-9 finder settings stay in place, with K = 32.
+Matches come from a 3-byte hash chain (`2^17` buckets) and a suffix array built with SA-IS (enabled from level 3 upward). A prefix-doubling builder (`lz0_sa_algo = 0`) exists to check that both builders emit the same `sa[]` and `rank[]`. Every 16 KiB window is independently classified for high entropy, multi-byte raster/audio strides (`bpp`), and local table periodicity, allowing early incompressible bailout (`~280 MB/s`, `1.01 B/byte` peak heap on incompressible streams like `star.png`). Level 6 keeps two live SDP states per position with selective fine match emission and literal headroom tie-breaking. Level 9 uses `lz0/lz0_ultra.c`: states stored as 12-byte SoA rows, a 768 MiB budget (K from 128 down to a floor of 12), beam-offset match injection, and Pareto candidate filtering on local tables. From 16 MiB upward, `lz0_parse_ultra` falls back cleanly to the generic SDP parser (`K = 32`).
 
 The scalar C kernels and the x86-64, AArch64, and RISC-V vector kernels are checked against each other by `make test` (target `simd`). Any encoder that emits v0.1 is valid. H2C8 does not have to be reimplemented in order to decode LZ0. Notes on the search: [docs/LZ0_ENCODER.md](docs/LZ0_ENCODER.md).
 
 ## Decoders
 
-| File | Role |
-|---|---|
-| `lz0/lz0_decompress.c` | Library decoder, `lz0_decompress_to` |
-| `lz0/lz0dec_ref.c` | Reference, read beside the format document |
-| `lz0/lz0dec_min.c` | One C function, no heap, written to compile small |
-| `lz0/lz0dec_x86_64.S`, `lz0dec_arm64.S`, `lz0dec_riscv64.S` | Compact assembly |
-| `lz0/lz0dec_fast_x86_64.S`, `lz0dec_fast_arm64.S`, `lz0dec_fast_riscv64.S` | Larger assembly, aimed at throughput |
+| File | Role | Code Size (`.text`) |
+|---|---|---|
+| `lz0/lz0_decompress.c` | Library decoder, `lz0_decompress_to` | — |
+| `lz0/lz0dec_ref.c` | Reference, read beside the format document | — |
+| `lz0/lz0dec_min.c` | One C function, no heap, written to compile small | 994 B (x64) / 956 B (ARM64) / 722 B (RV64) at `-Os` |
+| `lz0/lz0dec_x86_64.S`, `lz0dec_arm64.S`, `lz0dec_riscv64.S` | Compact assembly, zero heap | 1,151 B (x64) / 1,296 B (ARM64) / 1,056 B (RV64) |
+| `lz0/lz0dec_fast_x86_64.S`, `lz0dec_fast_arm64.S`, `lz0dec_fast_riscv64.S` | Larger assembly, aimed at throughput | 2,866 B (x64) / 2,820 B (ARM64) / 1,408 B (RV64) |
 
-The compact AArch64 and RV64 decoders are leaves with no stack frame. The x86-64 compact decoder uses a 32-byte frame. The fast decoders keep a small constant table, copy wider in the middle of the buffer, and take a checked path for the tail. `tests/test_guard.c` maps a `PROT_NONE` page immediately after the input and the output.
+The compact AArch64 and RV64 decoders are leaf functions with zero stack frame. The x86-64 compact decoder saves only `rbx`/`rbp` plus at most one return address (`<= 32` bytes stack frame total). The fast decoders keep a small constant table, copy wider in the middle of the buffer, and take a checked path for the tail. `tests/test_guard.c` maps a `PROT_NONE` page immediately after the input and the output.
 
 ## Results
 
 Per-file numbers, the corpus, and the machine are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). Compressed size over original size, from the totals there:
 
-| Set | Raw | LZ4 | LZ4HC -9 | LZ0 -6 | LZ0 -9 |
-|---|---:|---:|---:|---:|---:|
-| 19 files | 5,861,382 B | 64.43% | 53.46% | 45.26% | 43.36% |
-| 8 concatenated blobs | 16,252,928 B | 80.85% | 75.82% | 67.53% | 67.06% |
+| Set | Raw | LZ4 | LZ4HC -9 | LZ0 -1 | LZ0 -6 | LZ0 -9 |
+|---|---:|---:|---:|---:|---:|---:|
+| 19 files | 5,861,382 B | 64.43% | 53.46% | 55.40% | 45.14% | 43.35% |
+| 8 concatenated blobs | 16,252,928 B | 80.85% | 75.82% | — | 67.72% | 67.06% |
 
-The blob set is heavy with PNG, which is why those ratios sit higher. UPKR is smaller on text, executables, and `kennedy.xls` (6.30% against 19.11% for LZ0 -9). LZ0 -9 is smaller than UPKR on the already-compressed samples in that set (`avatar.jpg`, `star.png`, `break.mp3`). ZX0 is slightly smaller than LZ0 -9 on `fields.c` and `sum`. It was not run on the larger files.
+The blob set is heavy with PNG, which is why those ratios sit higher. UPKR is smaller on text, executables, and `kennedy.xls` (6.30% against 19.10% for LZ0 -9). LZ0 -9 is smaller than UPKR on the already-compressed samples in that set (`avatar.jpg`, `star.png`, `break.mp3`), and early incompressible bailout keeps `star.png` at `100.00%` (`+5 B`) across all levels `-1..-9`. ZX0 is slightly smaller than LZ0 -9 on `fields.c` and `sum`. It was not run on the larger files.
 
 LZ4 stores the match distance in 16 bits, so neither LZ4 nor LZ4HC can see a match farther than 65,535 bytes. That shows up on `blob_png_5m` and on the raw textures. LZ4 still decompresses several times faster. The 400–1400 MB/s band is the fast x86-64 decoder on the megabyte text and binaries. The multi-GB/s cells are short files or inputs that stay mostly literal. AArch64 and RISC-V figures in that document were taken under QEMU; use them to compare decoders on that emulator.
 
