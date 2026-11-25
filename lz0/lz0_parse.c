@@ -1343,10 +1343,47 @@ static inline void sdp_relax2(sdp_st *row, uint8_t *nslot, uint32_t key, int cos
     *nslot = (uint8_t)(n + 1);
 }
 
+static inline int sdp_use_fine(const lz0_finder *f) {
+    /* Selective fine matches (`== 2`): skip tabular strided inputs (`num_strides > 0`),
+     * where sub-plateau extensions crowd 2-slot rows with redundant short offsets. */
+    return f->opts.sdp_fine_matches == 1 ||
+           (f->opts.sdp_fine_matches == 2 && f->num_strides == 0);
+}
+
 static void sdp_emit_last2(const lz0_finder *f, sdp_st *st, uint8_t *ns, uint32_t i, int L,
                            uint32_t last_off, int cost, uint8_t slot) {
     lz0_sdp_census *cen = (lz0_sdp_census *)f->census;
+    int fine = sdp_use_fine(f);
     if (f->opts.len_code == 3) {
+        if (fine) {
+            static const uint8_t cost_last_1_8[] = {0, 2, 4, 4, 6, 6, 6, 6, 8};
+            int max_fine = L < 8 ? L : 8;
+            for (int l = 1; l <= max_fine; l++) {
+                sdp_relax2(st + (size_t)(i + (uint32_t)l) * 2u, &ns[i + (uint32_t)l],
+                           last_off, cost + (int)cost_last_1_8[l], i, slot);
+                if (cen) {
+                    cen->n_trans_last++;
+                    cen->n_last_plat++;
+                }
+            }
+            if (L <= 8)
+                return;
+            uint32_t hi = 15u;
+            int add = 8;
+            for (;;) {
+                int end = hi < (uint32_t)L ? (int)hi : L;
+                sdp_relax2(st + (size_t)(i + (uint32_t)end) * 2u, &ns[i + (uint32_t)end],
+                           last_off, cost + add, i, slot);
+                if (cen) {
+                    cen->n_trans_last++;
+                    cen->n_last_plat++;
+                }
+                if (end == L)
+                    return;
+                hi = (hi << 1) | 1u;
+                add += 2;
+            }
+        }
         /* last-match cost = 1 + elias(end); Elias plateaus end at 2^k - 1,
          * where the cost is 1 + (2k - 1) = 2k */
         uint32_t hi = 1u;
@@ -1366,6 +1403,18 @@ static void sdp_emit_last2(const lz0_finder *f, sdp_st *st, uint8_t *ns, uint32_
         }
     }
     int start = 1;
+    if (fine) {
+        int max_fine = L < 8 ? L : 8;
+        for (int l = 1; l <= max_fine; l++) {
+            sdp_relax2(st + (size_t)(i + (uint32_t)l) * 2u, &ns[i + (uint32_t)l], last_off,
+                       cost + lz0_cost_last_c(&f->opts, l), i, slot);
+            if (cen) {
+                cen->n_trans_last++;
+                cen->n_last_plat++;
+            }
+        }
+        start = 9;
+    }
     while (start <= L) {
         int end = lz0_next_plateau_last_c(&f->opts, start, L);
         sdp_relax2(st + (size_t)(i + (uint32_t)end) * 2u, &ns[i + (uint32_t)end], last_off,
@@ -1396,15 +1445,23 @@ static inline void sdp_emit_one_new2(sdp_st *st, uint8_t *ns, uint32_t i, int en
 static void sdp_emit_new2(const lz0_finder *f, sdp_st *st, uint8_t *ns, uint32_t i, int L, uint32_t off,
                           int cost, uint8_t slot) {
     lz0_sdp_census *cen = (lz0_sdp_census *)f->census;
-    if (L < 2)
-        return;
-    if (L == 2 && !lz0_is_len2_allowed(f, off))
+    int len2 = lz0_is_len2_allowed(f, off);
+    if (L < 2 || (L == 2 && !len2))
         return;
     if (f->opts.len_code == 3 && f->opts.offset_lsb_bits == 8) {
         int cbase = cost + 10 + sdp_elias_bits((((int)off - 1) >> 8) + 1);
-        sdp_emit_one_new2(st, ns, i, L < 8 ? L : 8, off, cbase + 3, slot, cen);
-        if (cen)
-            cen->n_new_plat_fixed++;
+        if (sdp_use_fine(f)) {
+            int max_fine = L < 8 ? L : 8;
+            for (int l = len2 ? 2 : 3; l <= max_fine; l++) {
+                sdp_emit_one_new2(st, ns, i, l, off, cbase + 3, slot, cen);
+                if (cen)
+                    cen->n_new_plat_fixed++;
+            }
+        } else {
+            sdp_emit_one_new2(st, ns, i, L < 8 ? L : 8, off, cbase + 3, slot, cen);
+            if (cen)
+                cen->n_new_plat_fixed++;
+        }
         if (L < 9)
             return;
         sdp_emit_one_new2(st, ns, i, 9, off, cbase + 4, slot, cen);
@@ -1740,8 +1797,9 @@ static inline void sdp_relax(sdp_rows *d, uint32_t pos, uint32_t key, int cost,
 
 static void sdp_emit_last(const lz0_finder *f, sdp_rows *d, uint32_t i, int L, uint32_t last_off,
                           int cost, uint8_t slot, lz0_sdp_census *cen) {
+    int fine = sdp_use_fine(f);
     if (f->opts.len_code == 3) {
-        if (f->opts.sdp_fine_matches) {
+        if (fine) {
             static const uint8_t cost_last_1_8[] = {0, 2, 4, 4, 6, 6, 6, 6, 8};
             int max_fine = L < 8 ? L : 8;
             for (int l = 1; l <= max_fine; l++)
@@ -1771,7 +1829,7 @@ static void sdp_emit_last(const lz0_finder *f, sdp_rows *d, uint32_t i, int L, u
         }
     }
     int start = 1;
-    if (f->opts.sdp_fine_matches) {
+    if (fine) {
         int max_fine = L < 8 ? L : 8;
         for (int l = 1; l <= max_fine; l++)
             sdp_relax(d, i + (uint32_t)l, last_off, cost + lz0_cost_last_c(&f->opts, l), i, slot, cen);
@@ -1791,7 +1849,7 @@ static void sdp_emit_new(const lz0_finder *f, sdp_rows *d, uint32_t i, int L, ui
         return;
     if (f->opts.len_code == 3 && f->opts.offset_lsb_bits == 8) {
         int cbase = cost + 10 + sdp_elias_bits((((int)off - 1) >> 8) + 1);
-        if (f->opts.sdp_fine_matches) {
+        if (sdp_use_fine(f)) {
             int max_fine = L < 8 ? L : 8;
             for (int l = len2 ? 2 : 3; l <= max_fine; l++)
                 sdp_relax(d, i + (uint32_t)l, off, cbase + 3, i, slot, cen);
@@ -1825,7 +1883,7 @@ static void sdp_emit_new(const lz0_finder *f, sdp_rows *d, uint32_t i, int L, ui
         return;
     }
     int start;
-    if (f->opts.sdp_fine_matches) {
+    if (sdp_use_fine(f)) {
         int max_fine = L < 8 ? L : 8;
         for (int l = len2 ? 2 : 3; l <= max_fine; l++)
             sdp_relax(d, i + (uint32_t)l, off, cost + lz0_cost_new_c(&f->opts, (int)off, l), i, slot, cen);

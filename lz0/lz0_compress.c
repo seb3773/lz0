@@ -51,8 +51,23 @@ void lz0_config_level(lz0_config *cfg, int level) {
     cfg->isolated = 1;
     cfg->level = level;
 
-    if (level <= 3) {
-        // Fast mode
+    if (level == 1) {
+        // Fast mode (hash-only Greedy, no SA-IS, minimal memory)
+        cfg->min_match = 2;
+        cfg->max_chain = 2;
+        cfg->max_candidates = 4;
+        cfg->parser = LZ0_PARSE_GREEDY;
+        cfg->score_k = 8;
+        cfg->max_states = 2;
+        cfg->jump_levels = 0;
+        cfg->bt_depth = 0;
+        cfg->sa_win = 0;
+        cfg->sa_adapt = 0;
+        cfg->sdp_fine_matches = 0;
+        cfg->deep_probe = 0;
+        cfg->hash4_probe = 0;
+    } else if (level == 2) {
+        // Fast SDP (hash-only, zero SA-IS allocation)
         cfg->min_match = 2;
         cfg->max_chain = 4;
         cfg->max_candidates = 8;
@@ -61,7 +76,22 @@ void lz0_config_level(lz0_config *cfg, int level) {
         cfg->max_states = 2;
         cfg->jump_levels = 0;
         cfg->bt_depth = 0;
-        cfg->sa_win = 8;
+        cfg->sa_win = 0;
+        cfg->sa_adapt = 0;
+        cfg->sdp_fine_matches = 0;
+        cfg->deep_probe = 0;
+        cfg->hash4_probe = 0;
+    } else if (level == 3) {
+        // Balanced fast SA + SDP K=2
+        cfg->min_match = 2;
+        cfg->max_chain = 4;
+        cfg->max_candidates = 8;
+        cfg->parser = LZ0_PARSE_SDP;
+        cfg->score_k = 8;
+        cfg->max_states = 2;
+        cfg->jump_levels = 0;
+        cfg->bt_depth = 0;
+        cfg->sa_win = 4;
         cfg->sa_adapt = 1;
         cfg->sdp_fine_matches = 0;
         cfg->deep_probe = 0;
@@ -78,7 +108,7 @@ void lz0_config_level(lz0_config *cfg, int level) {
         cfg->bt_depth = 0;
         cfg->sa_win = 16;
         cfg->sa_adapt = 1;
-        cfg->sdp_fine_matches = 0;
+        cfg->sdp_fine_matches = 2;
         cfg->deep_probe = 0;
         cfg->hash4_probe = 0;
     } else if (level <= 8) {
