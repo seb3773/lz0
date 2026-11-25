@@ -18,7 +18,7 @@ LZ0_SRC = lz0/lz0_cost.c lz0/lz0_find.c lz0/lz0_parse.c \
 
 LZ0DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.S lz0/lz0dec_fast_x86_64.S
 
-.PHONY: all bench clean test smoke bounds diag sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz guard simd sa_probe enc_bench enc_tiers find_bench mem_peak lz0 lz0dec cli sanitize valgrind bench_all bench_ratio bench_dec bench_dec_arm64 bench_dec_riscv64 bench_blobs test_arm64 arm64 test_riscv64 riscv64 windows dist dist_linux dist_arm64 dist_riscv64 dist_windows
+.PHONY: all bench clean test smoke bounds limits diag sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz guard simd sa_probe enc_bench enc_tiers find_bench mem_peak lz0 lz0dec cli sanitize valgrind bench_all bench_ratio bench_dec bench_dec_arm64 bench_dec_riscv64 bench_blobs test_arm64 arm64 test_riscv64 riscv64 windows dist dist_linux dist_arm64 dist_riscv64 dist_windows
 
 all: bin/lz0 bin/lz0dec bench/lz0_bench bench/lz0_smoke bench/lz0_bounds bench/lz0_diag_rep bench/lz0_sdp32 bench/lz0_scale bench/lz0_prof bench/lz0_cmpfind bench/lz0_jumpsweep bench/lz0_pruneab bench/lz0_bits bench/lz0_final
 
@@ -283,6 +283,12 @@ tests/test_window: tests/test_window.c $(LZ0_SRC) $(LZ0DEC_SRC)
 window: tests/test_window
 	./tests/test_window
 
+tests/test_limits: tests/test_limits.c $(LZ0_SRC) $(LZ0DEC_SRC)
+	$(CC) $(CFLAGS) -o $@ tests/test_limits.c $(LZ0_SRC) $(LZ0DEC_SRC)
+
+limits: tests/test_limits
+	./tests/test_limits
+
 bench/lz0_enc_bench: bench/enc_bench.c $(LZ0_SRC) $(LZ0DEC_SRC)
 	$(CC) $(CFLAGS) -o $@ bench/enc_bench.c $(LZ0_SRC) $(LZ0DEC_SRC) -lm
 
@@ -332,6 +338,8 @@ sanitize:
 	./tests/test_fuzz
 	$(CC) $(SANITIZE_CFLAGS) -o tests/test_simd tests/test_simd.c $(LZ0_SIMD_SRC)
 	./tests/test_simd 50000
+	$(CC) $(SANITIZE_CFLAGS) -o tests/test_limits tests/test_limits.c $(LZ0_SRC) $(LZ0DEC_SRC)
+	./tests/test_limits
 	@echo "All tests passed cleanly under ASan + UBSan."
 
 valgrind: bin/lz0
@@ -341,7 +349,7 @@ valgrind: bin/lz0
 	rm -f /tmp/lz0_vg.lz0 /tmp/lz0_vg.out
 	@echo "Valgrind: zero leaks detected."
 
-test: smoke bounds bench/lz0_bench vectors boundary malformed guard simd threadsafe window
+test: smoke bounds limits bench/lz0_bench vectors boundary malformed guard simd threadsafe window
 	./bench/lz0_bench --quick
 
 ARM64_CC = aarch64-linux-gnu-gcc
@@ -397,5 +405,5 @@ riscv64: test_riscv64
 
 clean:
 	rm -f bench/lz0_* bench/dump_rep bench/debug_a3 bench/count_bench bench/scatter_bench
-	rm -f bin/lz0* tests/test_vectors tests/test_boundary tests/test_malformed tests/test_fuzz tests/test_guard tests/test_simd tests/test_sa_probe tests/test_threadsafe tests/test_window tests/*_arm64 tests/*_riscv64
+	rm -f bin/lz0* tests/test_vectors tests/test_boundary tests/test_malformed tests/test_fuzz tests/test_guard tests/test_simd tests/test_sa_probe tests/test_threadsafe tests/test_window tests/test_limits tests/*_arm64 tests/*_riscv64
 	rm -rf dist build

@@ -2,6 +2,7 @@
 #include "lz0.h"
 #include "lz0dec.h"
 #include "lz0_stdio.h"
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -98,8 +99,12 @@ static int cmd_d(const char *in_path, const char *out_path) {
         free(cont);
         return 1;
     }
-    int d = lz0dec_fast(pay, (int)psz, out, (int)sz);
-    if (d < 0 || (uint32_t)d != sz) {
+    int64_t d;
+    if (psz <= (size_t)INT_MAX && sz <= (uint32_t)INT_MAX)
+        d = lz0dec_fast(pay, (int)psz, out, (int)sz);
+    else
+        d = lz0_decompress_ex(pay, psz, out, (size_t)sz);
+    if (d < 0 || (uint64_t)d != (uint64_t)sz) {
         fprintf(stderr, "lz0: decompress failed\n");
         free(out);
         free(cont);

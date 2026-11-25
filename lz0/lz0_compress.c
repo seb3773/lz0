@@ -225,7 +225,7 @@ static void fill_compress_stats(lz0_stats *stats, const lz0_bitacct *acct, doubl
 int lz0_compress(const unsigned char *in, size_t in_sz,
                  unsigned char **out, size_t *out_sz,
                  const lz0_config *cfg, lz0_stats *stats) {
-    if (!in || in_sz == 0 || !out || !out_sz)
+    if (!in || in_sz == 0 || in_sz > 0xffffffffu || !out || !out_sz)
         return -1;
     lz0_config local;
     if (!cfg) {

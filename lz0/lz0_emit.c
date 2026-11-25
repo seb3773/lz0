@@ -4,15 +4,15 @@
 
 typedef struct {
     unsigned char *data;
-    int index;
-    int bit_index;
+    size_t index;
+    size_t bit_index;
     int bit_mask;
     int backtrack;
     lz0_bitacct *acct;
 } wr_t;
 
-static void wr_byte(wr_t *w, int value) {
-    w->data[w->index++] = (unsigned char)value;
+static void wr_byte(wr_t *w, unsigned char value) {
+    w->data[w->index++] = value;
 }
 
 static void wr_bit(wr_t *w, int value, int cat) {
@@ -40,54 +40,55 @@ static void wr_bit(wr_t *w, int value, int cat) {
     w->bit_mask >>= 1;
 }
 
-static void wr_elias(wr_t *w, int value, int invert, int cat) {
-    int i;
-    for (i = 2; i <= value; i <<= 1)
-        ;
-    i >>= 1;
-    while (i >>= 1) {
+static void wr_elias(wr_t *w, uint32_t value, int invert, int cat) {
+    uint32_t tmp = value;
+    int hi = 0;
+    while (tmp >>= 1)
+        hi++;
+    for (int b = hi - 1; b >= 0; b--) {
+        int bit = (int)((value >> b) & 1u);
         wr_bit(w, 0, cat);
-        wr_bit(w, invert ? !(value & i) : (value & i), cat);
+        wr_bit(w, invert ? !bit : bit, cat);
     }
     wr_bit(w, 1, cat);
 }
 
-static void wr_len_coded(wr_t *w, int v, int cat, int code) {
+static void wr_len_coded(wr_t *w, uint32_t v, int cat, int code) {
     if (code == 1) {
-        if (v <= 7) {
-            for (int i = 1; i < v; i++)
+        if (v <= 7u) {
+            for (uint32_t i = 1; i < v; i++)
                 wr_bit(w, 1, cat);
             wr_bit(w, 0, cat);
             return;
         }
         for (int i = 0; i < 7; i++)
             wr_bit(w, 1, cat);
-        wr_elias(w, v - 7, 0, cat);
+        wr_elias(w, v - 7u, 0, cat);
         return;
     }
     if (code == 2) {
-        if (v <= 7) {
-            int x = v - 1;
-            wr_bit(w, (x >> 2) & 1, cat);
-            wr_bit(w, (x >> 1) & 1, cat);
-            wr_bit(w, x & 1, cat);
+        if (v <= 7u) {
+            uint32_t x = v - 1u;
+            wr_bit(w, (int)((x >> 2) & 1u), cat);
+            wr_bit(w, (int)((x >> 1) & 1u), cat);
+            wr_bit(w, (int)(x & 1u), cat);
             return;
         }
         wr_bit(w, 1, cat);
         wr_bit(w, 1, cat);
         wr_bit(w, 1, cat);
-        wr_elias(w, v - 7, 0, cat);
+        wr_elias(w, v - 7u, 0, cat);
         return;
     }
     wr_elias(w, v, 0, cat);
 }
 
-static void wr_len(wr_t *w, int v, int cat, int lcode) {
+static void wr_len(wr_t *w, uint32_t v, int cat, int lcode) {
     int code = (lcode == 3) ? 0 : lcode;
     wr_len_coded(w, v, cat, code);
 }
 
-static void wr_len_new(wr_t *w, int v, int cat, int lcode) {
+static void wr_len_new(wr_t *w, uint32_t v, int cat, int lcode) {
     int code = (lcode == 3) ? 2 : lcode;
     wr_len_coded(w, v, cat, code);
 }
@@ -118,8 +119,8 @@ int lz0_emit_cfg(const unsigned char *in, uint32_t n, const lz0_toklist *tl,
 
     for (uint32_t k = 0; k < tl->n; k++) {
         const lz0_token *t = &tl->t[k];
-        if ((size_t)w.index + 32 + t->length >= cap) {
-            cap = cap * 2 + t->length + 64;
+        if (w.index + 32u + (size_t)t->length >= cap) {
+            cap = cap * 2u + (size_t)t->length + 64u;
             unsigned char *nb = (unsigned char *)realloc(w.data, cap);
             if (!nb) {
                 free(w.data);
@@ -129,7 +130,7 @@ int lz0_emit_cfg(const unsigned char *in, uint32_t n, const lz0_toklist *tl,
         }
         if (!t->offset) {
             wr_bit(&w, 0, 0);
-            wr_len(&w, (int)t->length, 1, lcode);
+            wr_len(&w, t->length, 1, lcode);
             for (uint32_t i = 0; i < t->length; i++) {
                 wr_byte(&w, in[t->pos + i]);
                 if (acct)
@@ -156,7 +157,7 @@ int lz0_emit_cfg(const unsigned char *in, uint32_t n, const lz0_toklist *tl,
             can_last = 1;
         } else if (t->offset == last_off && can_last) {
             wr_bit(&w, 0, 0);
-            wr_len(&w, (int)t->length, 1, lcode);
+            wr_len(&w, t->length, 1, lcode);
             if (sc) {
                 sc->n_last++;
                 sc->bytes_last += t->length;
@@ -183,31 +184,31 @@ int lz0_emit_cfg(const unsigned char *in, uint32_t n, const lz0_toklist *tl,
                 if (sh < 1)
                     sh = 7;
                 uint32_t mod = 1u << sh;
-                int msb = (int)(((t->offset - 1) / mod) + 1);
-                int rem = (int)((t->offset - 1) % mod);
+                uint32_t msb = ((t->offset - 1u) / mod) + 1u;
+                uint32_t rem = (t->offset - 1u) % mod;
                 wr_elias(&w, msb, 1, 2);
                 if (sh == 7) {
-                    wr_byte(&w, (127 - rem) << 1);
+                    wr_byte(&w, (unsigned char)((127u - rem) << 1));
                     if (acct)
                         acct->bits_offset += 8;
                     w.backtrack = 1;
                 } else if (sh == 8) {
-                    wr_byte(&w, (unsigned char)(255 - rem));
+                    wr_byte(&w, (unsigned char)(255u - rem));
                     if (acct)
                         acct->bits_offset += 8;
                     w.backtrack = 0;
                 } else {
-                    int inv = (int)(mod - 1u) - rem;
+                    uint32_t inv = (mod - 1u) - rem;
                     for (int b = sh - 1; b >= 0; b--)
-                        wr_bit(&w, (inv >> b) & 1, 2);
+                        wr_bit(&w, (int)((inv >> b) & 1u), 2);
                     w.backtrack = 0;
                 }
-                wr_len_new(&w, (int)t->length - 1, 1, lcode);
+                wr_len_new(&w, t->length - 1u, 1, lcode);
                 if (sc) {
                     sc->n_new++;
                     sc->bytes_new += t->length;
                     sc->bits_new_flag += 2;
-                    sc->bits_new_off_elias += (uint64_t)lz0_elias_bits(msb);
+                    sc->bits_new_off_elias += (uint64_t)lz0_elias_bits((int)msb);
                     sc->bits_new_off_lsb += (sh == 7) ? 8u : (uint64_t)sh;
                     sc->bits_new_len += (uint64_t)lz0_len_new_payload_bits_c(cfg, (int)t->length - 1);
                     sc->sum_off += t->offset;
@@ -236,8 +237,8 @@ int lz0_emit_cfg(const unsigned char *in, uint32_t n, const lz0_toklist *tl,
         }
     }
 
-    if ((size_t)w.index + 32 >= cap) {
-        cap += 64;
+    if (w.index + 32u >= cap) {
+        cap += 64u;
         unsigned char *nb = (unsigned char *)realloc(w.data, cap);
         if (!nb) {
             free(w.data);
@@ -251,7 +252,7 @@ int lz0_emit_cfg(const unsigned char *in, uint32_t n, const lz0_toklist *tl,
         sc->bits_eof += 2;
 
     *out = w.data;
-    *out_sz = (size_t)w.index;
+    *out_sz = w.index;
     return 0;
 }
 

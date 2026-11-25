@@ -8,6 +8,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "lz0dec.h"
 #include "lz0_stdio.h"
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -63,6 +64,10 @@ static int run_benchmark(const char *path, const unsigned char *pay, size_t psz,
 
     if (uncomp_sz == 0) {
         printf("Empty file (0 bytes), benchmark skipped.\n");
+        return 0;
+    }
+    if (psz > (size_t)INT_MAX || uncomp_sz > (uint32_t)INT_MAX) {
+        printf("Stream larger than 2 GiB (-b supports <= 2 GiB), benchmark skipped.\n");
         return 0;
     }
 
@@ -243,8 +248,15 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    int decomp_len = dec(payload, (int)payload_sz, out, (int)uncomp_sz);
-    if (decomp_len < 0 || (uint32_t)decomp_len != uncomp_sz) {
+    int64_t decomp_len;
+    if (payload_sz <= (size_t)INT_MAX && uncomp_sz <= (uint32_t)INT_MAX) {
+        decomp_len = dec(payload, (int)payload_sz, out, (int)uncomp_sz);
+    } else {
+        if (strcmp(engine_name, "min") != 0)
+            fprintf(stderr, "lz0dec: notice: >2GiB stream uses 64-bit min engine\n");
+        decomp_len = lz0dec_min_ex(payload, payload_sz, out, (size_t)uncomp_sz);
+    }
+    if (decomp_len < 0 || (uint64_t)decomp_len != (uint64_t)uncomp_sz) {
         fprintf(stderr, "lz0dec: error: decompression failed (corrupt or truncated stream)\n");
         free(out);
         free(cont);

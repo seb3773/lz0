@@ -95,6 +95,9 @@ int lz0_compress(const unsigned char *in, size_t in_sz,
 int lz0_decompress_to(const unsigned char *in, int in_size,
                       unsigned char *out, int out_max);
 
+int64_t lz0_decompress_ex(const unsigned char *in, size_t in_size,
+                          unsigned char *out, size_t out_max);
+
 #ifdef __cplusplus
 }
 #endif
