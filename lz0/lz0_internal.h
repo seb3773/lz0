@@ -15,6 +15,19 @@ typedef struct {
     uint32_t length;
 } lz0_match;
 
+#define LZ0_WIN_SHIFT 14
+#define LZ0_WIN_SIZE  (1u << LZ0_WIN_SHIFT)
+
+typedef struct {
+    uint8_t is_high_entropy;
+    uint8_t is_stereo_16;
+    uint8_t num_strides;
+    uint8_t num_diag;
+    uint32_t bpp;
+    uint32_t strides[8];
+    uint32_t diag_offsets[16];
+} lz0_win_info;
+
 typedef struct {
     const unsigned char *in;
     uint32_t n;
@@ -65,6 +78,10 @@ typedef struct {
     double sa_build_ms;
     void *census;
     void *dp_census;
+    /* Per-16 KiB window classification table (NULL on single-window / small inputs). */
+    lz0_win_info *wins;
+    uint32_t n_wins;
+    uint32_t cur_win;
 } lz0_finder;
 
 typedef struct {
@@ -106,6 +123,7 @@ int lz0_next_plateau_lit_c(const lz0_config *cfg, int len, int max_len);
 
 int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
                     const lz0_config *cfg);
+int lz0_is_early_incompressible(const unsigned char *in, uint32_t n);
 void lz0_finder_free(lz0_finder *f);
 void lz0_finder_insert_upto(lz0_finder *f, uint32_t pos);
 int lz0_matchlen(const unsigned char *a, const unsigned char *b, int max);

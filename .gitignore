@@ -20,6 +20,7 @@ tests/test_guard
 tests/test_simd
 tests/test_sa_probe
 tests/test_threadsafe
+tests/test_window
 tests/*_arm64
 tests/*_riscv64
 

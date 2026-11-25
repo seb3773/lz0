@@ -869,14 +869,191 @@ static int lz0_detect_high_entropy(const unsigned char *in, uint32_t n) {
     return (distinct >= 250 && (uint64_t)max_c * 1000u < (uint64_t)sample * 18u);
 }
 
-static inline void add_diag_offset(lz0_finder *f, uint32_t off) {
-    if (off < 2 || f->num_diag >= 16)
+static inline void win_add_diag_offset(lz0_win_info *wi, uint32_t off) {
+    if (off < 2 || wi->num_diag >= 16)
         return;
-    for (int i = 0; i < f->num_diag; i++) {
-        if (f->diag_offsets[i] == off)
+    for (int i = 0; i < (int)wi->num_diag; i++) {
+        if (wi->diag_offsets[i] == off)
             return;
     }
-    f->diag_offsets[f->num_diag++] = off;
+    wi->diag_offsets[wi->num_diag++] = off;
+}
+
+static void lz0_populate_win_diag(lz0_win_info *wi) {
+    wi->bpp = 0;
+    wi->is_stereo_16 = 0;
+    wi->num_diag = 0;
+    for (int i = 0; i < (int)wi->num_strides; i++) {
+        uint32_t s = wi->strides[i];
+        if (s >= 2 && s <= 8 && wi->bpp == 0)
+            wi->bpp = s;
+        if (s == 4)
+            wi->is_stereo_16 = 1;
+    }
+    if (wi->bpp > 0) {
+        uint32_t bpp = wi->bpp;
+        for (int s = 0; s < (int)wi->num_strides && wi->num_diag < 12; s++) {
+            uint32_t stride = wi->strides[s];
+            if (stride >= 64 && stride > 2 * bpp) {
+                /* Row 1 diagonals */
+                win_add_diag_offset(wi, stride - bpp);
+                win_add_diag_offset(wi, stride + bpp);
+                if (stride > 4 * bpp) {
+                    win_add_diag_offset(wi, stride - 2 * bpp);
+                    win_add_diag_offset(wi, stride + 2 * bpp);
+                }
+                /* Row 2 diagonals */
+                win_add_diag_offset(wi, 2 * stride - bpp);
+                win_add_diag_offset(wi, 2 * stride + bpp);
+                if (stride > 4 * bpp) {
+                    win_add_diag_offset(wi, 2 * stride - 2 * bpp);
+                    win_add_diag_offset(wi, 2 * stride + 2 * bpp);
+                }
+            }
+        }
+        if (wi->is_stereo_16) {
+            win_add_diag_offset(wi, 2);
+            win_add_diag_offset(wi, 6);
+        }
+    } else if (!wi->is_high_entropy && wi->num_strides > 0) {
+        /* Piste E: Skewed strides & column offsets for tabular and structured data */
+        for (int s = 0; s < (int)wi->num_strides && wi->num_diag < 12; s++) {
+            uint32_t stride = wi->strides[s];
+            if (stride >= 16 && stride <= 4096) {
+                win_add_diag_offset(wi, stride - 1);
+                win_add_diag_offset(wi, stride + 1);
+                win_add_diag_offset(wi, stride - 2);
+                win_add_diag_offset(wi, stride + 2);
+                win_add_diag_offset(wi, stride - 3);
+                win_add_diag_offset(wi, stride + 3);
+                win_add_diag_offset(wi, stride - 4);
+                win_add_diag_offset(wi, stride + 4);
+            }
+        }
+    }
+}
+
+static uint32_t lz0_win_detect_bpp(const unsigned char *win, uint32_t wlen) {
+    uint32_t m = wlen < 4096u ? wlen : 4096u;
+    if (m < 128u)
+        return 0;
+    double best_rate = 0.18;
+    uint32_t best_p = 0;
+    for (uint32_t p = 2u; p <= 8u; p++) {
+        uint32_t cmp_len = m - p;
+        size_t matches = lz0_simd_count_eq(win + p, win, cmp_len, 1u);
+        double rate = (double)matches / (double)cmp_len;
+        if (rate > best_rate) {
+            best_rate = rate;
+            best_p = p;
+        }
+    }
+    return best_p;
+}
+
+static void lz0_apply_win_info(lz0_finder *f, const lz0_win_info *wi) {
+    f->is_high_entropy = wi->is_high_entropy;
+    f->is_stereo_16 = wi->is_stereo_16;
+    f->bpp = wi->bpp;
+    f->num_strides = wi->num_strides;
+    for (int i = 0; i < (int)wi->num_strides; i++)
+        f->strides[i] = wi->strides[i];
+    f->num_diag = wi->num_diag;
+    for (int i = 0; i < (int)wi->num_diag; i++)
+        f->diag_offsets[i] = wi->diag_offsets[i];
+}
+
+static inline void lz0_finder_sync_win(lz0_finder *f, uint32_t pos) {
+    if (!f->wins || f->n_wins == 0)
+        return;
+    uint32_t w = pos >> LZ0_WIN_SHIFT;
+    if (w >= f->n_wins)
+        w = f->n_wins - 1u;
+    if (w == f->cur_win)
+        return;
+    f->cur_win = w;
+    lz0_apply_win_info(f, &f->wins[w]);
+}
+
+int lz0_is_early_incompressible(const unsigned char *in, uint32_t n) {
+    if (!in || n < 4096u)
+        return 0;
+    lz0_simd_init();
+
+    /* 1. Every 4 KiB slice (plus overlapping tail if needed) must have flat byte
+     * distribution and almost no 4-byte constant runs. */
+    uint32_t total_r4 = 0;
+    uint32_t max_total_r4 = 4u + (n >> 18);
+    for (uint32_t off = 0; off < n; off += 4096u) {
+        const unsigned char *s = in + off;
+        uint32_t slen = n - off;
+        if (slen > 4096u) {
+            slen = 4096u;
+        } else if (slen < 1024u) {
+            /* Short unaligned tail: re-check the final 4 KiB window and finish. */
+            s = in + n - 4096u;
+            slen = 4096u;
+        }
+        uint32_t counts[256] = {0};
+        for (uint32_t j = 0; j < slen; j++)
+            counts[s[j]]++;
+        int distinct = 0;
+        uint32_t max_c = 0;
+        for (int i = 0; i < 256; i++) {
+            if (counts[i] > 0)
+                distinct++;
+            if (counts[i] > max_c)
+                max_c = counts[i];
+        }
+        if (distinct < 250 || (uint64_t)max_c * 1000u >= (uint64_t)slen * 18u)
+            return 0;
+
+        uint32_t local_r4 = 0;
+        for (uint32_t j = 0; j + 3u < slen; j++) {
+            if (s[j] == s[j + 1] && s[j] == s[j + 2] && s[j] == s[j + 3])
+                local_r4++;
+        }
+        total_r4 += local_r4;
+        if (local_r4 >= 3u || total_r4 >= max_total_r4)
+            return 0;
+        if (n - off < 4096u)
+            break;
+    }
+
+    /* 2. Reject periodic byte correlations (noisy PCM audio or raw RGB raster). */
+    for (uint32_t p = 2u; p <= 16u; p++) {
+        uint32_t len = 4096u - p;
+        if (lz0_simd_count_eq(in + p, in, len, 1u) * 10u >= len)
+            return 0;
+    }
+
+    /* 3. Content-defined 4-byte anchor sampling (modulo-aliasing free for any
+     * period, catching periodic waveforms and duplicated compressed/random chunks). */
+    uint32_t ht[4096];
+    memset(ht, 0, sizeof(ht));
+    uint32_t hits6 = 0;
+    uint32_t max_hits6 = (n >> 14) + 3u;
+    for (uint32_t pos = 0; pos + 12u <= n; pos++) {
+        uint32_t v;
+        memcpy(&v, in + pos, 4u);
+        uint32_t h = v * 0x9E3779B1u;
+        if ((h & 31u) != 0)
+            continue;
+        uint32_t slot = (h >> 20) & 4095u;
+        uint32_t prev1 = ht[slot];
+        if (prev1) {
+            uint32_t prev = prev1 - 1u;
+            if (memcmp(in + prev, in + pos, 6u) == 0) {
+                if (memcmp(in + prev, in + pos, 12u) == 0)
+                    return 0;
+                hits6++;
+                if (hits6 > max_hits6)
+                    return 0;
+            }
+        }
+        ht[slot] = pos + 1u;
+    }
+    return 1;
 }
 
 int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
@@ -989,67 +1166,92 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
         memset(f->bt_head2, 0xff, (size_t)65536 * sizeof(uint32_t));
         f->bt_next = 0;
     }
+    f->cur_win = UINT32_MAX;
+    f->wins = NULL;
+    f->n_wins = 0;
     f->num_strides = 0;
     f->bpp = 0;
     f->is_stereo_16 = 0;
-    f->is_high_entropy = (uint8_t)lz0_detect_high_entropy(in, n);
+    f->is_high_entropy = 0;
     f->num_diag = 0;
-    if (f->opts.max_candidates >= 16) {
-        int single_win = f->opts.legacy_single_window_scan;
-        f->num_strides = lz0_detect_strides(in, n, f->strides, single_win ? 4 : 8, single_win);
-        for (int i = 0; i < f->num_strides; i++) {
-            uint32_t s = f->strides[i];
-            if (s >= 2 && s <= 8 && f->bpp == 0)
-                f->bpp = s;
-            if (s == 4)
-                f->is_stereo_16 = 1;
+
+    if (n <= LZ0_WIN_SIZE || f->opts.legacy_single_window_scan) {
+        lz0_win_info wi;
+        memset(&wi, 0, sizeof(wi));
+        wi.is_high_entropy = (uint8_t)lz0_detect_high_entropy(in, n);
+        if (f->opts.max_candidates >= 16) {
+            int single_win = f->opts.legacy_single_window_scan;
+            wi.num_strides =
+                (uint8_t)lz0_detect_strides(in, n, wi.strides, single_win ? 4 : 8, single_win);
+            lz0_populate_win_diag(&wi);
         }
-        if (f->bpp > 0) {
-            uint32_t bpp = f->bpp;
-            for (int s = 0; s < f->num_strides && f->num_diag < 12; s++) {
-                uint32_t stride = f->strides[s];
-                if (stride >= 64 && stride > 2 * bpp) {
-                    /* Row 1 diagonals */
-                    add_diag_offset(f, stride - bpp);
-                    add_diag_offset(f, stride + bpp);
-                    if (stride > 4 * bpp) {
-                        add_diag_offset(f, stride - 2 * bpp);
-                        add_diag_offset(f, stride + 2 * bpp);
+        lz0_apply_win_info(f, &wi);
+    } else {
+        uint32_t g_strides[8] = {0};
+        uint8_t g_num_strides = 0;
+        uint32_t g_bpp = 0;
+        if (f->opts.max_candidates >= 16) {
+            g_num_strides = (uint8_t)lz0_detect_strides(in, n, g_strides, 8, 0);
+            for (int i = 0; i < (int)g_num_strides; i++) {
+                if (g_strides[i] >= 2u && g_strides[i] <= 8u && g_bpp == 0)
+                    g_bpp = g_strides[i];
+            }
+        }
+        uint32_t nw = (n + LZ0_WIN_SIZE - 1u) >> LZ0_WIN_SHIFT;
+        lz0_win_info *wins = (lz0_win_info *)calloc((size_t)nw, sizeof(lz0_win_info));
+        if (wins) {
+            for (uint32_t w = 0; w < nw; w++) {
+                uint32_t off = w << LZ0_WIN_SHIFT;
+                uint32_t wlen = n - off;
+                if (wlen > LZ0_WIN_SIZE)
+                    wlen = LZ0_WIN_SIZE;
+                lz0_win_info *wi = &wins[w];
+                wi->is_high_entropy =
+                    (wlen >= 1024u)
+                        ? (uint8_t)lz0_detect_high_entropy(in + off, wlen)
+                        : (w > 0 ? wins[w - 1u].is_high_entropy : 0);
+                if (f->opts.max_candidates >= 16) {
+                    uint32_t local_bpp = lz0_win_detect_bpp(in + off, wlen);
+                    if (local_bpp > 0 && g_bpp == 0) {
+                        /* Local interleaved raster/audio slice missed by global coarse scan */
+                        wi->num_strides = (uint8_t)lz0_detect_strides_win(in + off, wlen,
+                                                                          wi->strides, 0, 8);
+                    } else if (g_bpp > 0 && local_bpp == 0) {
+                        /* Non-raster slice within a buffer that elsewhere contains pixel/audio bpp */
+                        int kept = 0;
+                        for (int i = 0; i < (int)g_num_strides; i++) {
+                            if (g_strides[i] > 8u)
+                                wi->strides[kept++] = g_strides[i];
+                        }
+                        wi->num_strides = (uint8_t)kept;
+                    } else {
+                        wi->num_strides = g_num_strides;
+                        memcpy(wi->strides, g_strides, sizeof(g_strides));
                     }
-                    /* Row 2 diagonals */
-                    add_diag_offset(f, 2 * stride - bpp);
-                    add_diag_offset(f, 2 * stride + bpp);
-                    if (stride > 4 * bpp) {
-                        add_diag_offset(f, 2 * stride - 2 * bpp);
-                        add_diag_offset(f, 2 * stride + 2 * bpp);
-                    }
+                    lz0_populate_win_diag(wi);
                 }
             }
-            if (f->is_stereo_16) {
-                add_diag_offset(f, 2);
-                add_diag_offset(f, 6);
-            }
-        } else if (!f->is_high_entropy && f->num_strides > 0) {
-            /* Piste E: Skewed strides & column offsets for tabular and structured data */
-            for (int s = 0; s < f->num_strides && f->num_diag < 12; s++) {
-                uint32_t stride = f->strides[s];
-                if (stride >= 16 && stride <= 4096) {
-                    add_diag_offset(f, stride - 1);
-                    add_diag_offset(f, stride + 1);
-                    add_diag_offset(f, stride - 2);
-                    add_diag_offset(f, stride + 2);
-                    add_diag_offset(f, stride - 3);
-                    add_diag_offset(f, stride + 3);
-                    add_diag_offset(f, stride - 4);
-                    add_diag_offset(f, stride + 4);
-                }
-            }
+            f->wins = wins;
+            f->n_wins = nw;
+            lz0_finder_sync_win(f, 0);
+        } else {
+            lz0_win_info wi;
+            memset(&wi, 0, sizeof(wi));
+            wi.is_high_entropy = (uint8_t)lz0_detect_high_entropy(in, n);
+            wi.num_strides = g_num_strides;
+            memcpy(wi.strides, g_strides, sizeof(g_strides));
+            lz0_populate_win_diag(&wi);
+            lz0_apply_win_info(f, &wi);
         }
     }
     return 0;
 }
 
 void lz0_finder_free(lz0_finder *f) {
+    free(f->wins);
+    f->wins = NULL;
+    f->n_wins = 0;
+    f->cur_win = UINT32_MAX;
     free(f->bt_son);
     free(f->bt_head);
     free(f->bt_head2);
@@ -1665,6 +1867,7 @@ int lz0_find_last_len(lz0_finder *f, uint32_t pos, uint32_t last_offset) {
         cen->n_last_len++;
     if (pos >= f->n)
         return 0;
+    lz0_finder_sync_win(f, pos);
     int max_left = (int)(f->n - pos);
     if (max_left < 1)
         return 0;
@@ -2329,6 +2532,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
         cen->n_find++;
     if (pos >= f->n)
         return 0;
+    lz0_finder_sync_win(f, pos);
 
     const unsigned char *in = f->in;
     uint32_t n = f->n;

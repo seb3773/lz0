@@ -290,6 +290,12 @@ tests/test_threadsafe: tests/test_threadsafe.c $(LZ0_SRC) $(LZ0DEC_SRC)
 threadsafe: tests/test_threadsafe
 	./tests/test_threadsafe
 
+tests/test_window: tests/test_window.c $(LZ0_SRC) $(LZ0DEC_SRC)
+	$(CC) $(CFLAGS) -o $@ tests/test_window.c $(LZ0_SRC) $(LZ0DEC_SRC)
+
+window: tests/test_window
+	./tests/test_window
+
 bench/lz0_enc_bench: bench/enc_bench.c $(LZ0_SRC) $(LZ0DEC_SRC)
 	$(CC) $(CFLAGS) -o $@ bench/enc_bench.c $(LZ0_SRC) $(LZ0DEC_SRC) -lm
 
@@ -348,7 +354,7 @@ valgrind: bin/lz0
 	rm -f /tmp/lz0_vg.lz0 /tmp/lz0_vg.out
 	@echo "Valgrind: zero leaks detected."
 
-test: smoke bounds bench/lz0_bench vectors boundary malformed guard simd threadsafe
+test: smoke bounds bench/lz0_bench vectors boundary malformed guard simd threadsafe window
 	./bench/lz0_bench --quick
 
 ARM64_CC = aarch64-linux-gnu-gcc
@@ -404,5 +410,5 @@ riscv64: test_riscv64
 
 clean:
 	rm -f bench/lz0_* bench/dump_rep bench/debug_a3 bench/count_bench bench/scatter_bench
-	rm -f bin/lz0* tests/test_vectors tests/test_boundary tests/test_malformed tests/test_fuzz tests/test_guard tests/test_simd tests/test_sa_probe tests/test_threadsafe tests/*_arm64 tests/*_riscv64
+	rm -f bin/lz0* tests/test_vectors tests/test_boundary tests/test_malformed tests/test_fuzz tests/test_guard tests/test_simd tests/test_sa_probe tests/test_threadsafe tests/test_window tests/*_arm64 tests/*_riscv64
 	rm -rf dist build

@@ -164,6 +164,33 @@ static double now_ms(void) {
 }
 #endif
 
+static int emit_single_literal(const unsigned char *in, uint32_t n, const lz0_config *cfg,
+                               unsigned char **out, size_t *out_sz, lz0_bitacct *acct) {
+    lz0_toklist single_tl;
+    lz0_toklist_init(&single_tl);
+    if (lz0_toklist_push(&single_tl, 0, n, 0) < 0) {
+        lz0_toklist_free(&single_tl);
+        return -1;
+    }
+    int rc = lz0_emit_cfg(in, n, &single_tl, out, out_sz, acct, cfg);
+    lz0_toklist_free(&single_tl);
+    return rc;
+}
+
+static void fill_compress_stats(lz0_stats *stats, const lz0_bitacct *acct, double t0,
+                                double t1, double t2, double t3) {
+    stats->finder_ms = t1 - t0;
+    stats->parse_ms = t2 - t1;
+    stats->emit_ms = t3 - t2;
+    stats->total_ms = t3 - t0;
+    stats->bits_decision = acct->bits_decision;
+    stats->bits_elias_len = acct->bits_elias_len;
+    stats->bits_offset = acct->bits_offset;
+    stats->bits_literal = acct->bits_literal;
+    stats->bits_total = acct->bits_decision + acct->bits_elias_len +
+                        acct->bits_offset + acct->bits_literal;
+}
+
 int lz0_compress(const unsigned char *in, size_t in_sz,
                  unsigned char **out, size_t *out_sz,
                  const lz0_config *cfg, lz0_stats *stats) {
@@ -187,6 +214,18 @@ int lz0_compress(const unsigned char *in, size_t in_sz,
     memset(stats, 0, sizeof(*stats));
 
     double t0 = now_ms();
+    if (in_sz >= 4096u && lz0_is_early_incompressible(in, (uint32_t)in_sz)) {
+        double t1 = now_ms();
+        lz0_bitacct acct;
+        int rc = emit_single_literal(in, (uint32_t)in_sz, cfg, out, out_sz, &acct);
+        double t3 = now_ms();
+        if (rc == 0) {
+            stats->n_literals = 1;
+            fill_compress_stats(stats, &acct, t0, t1, t1, t3);
+        }
+        return rc;
+    }
+
     lz0_finder f;
     if (lz0_finder_init(&f, in, (uint32_t)in_sz, cfg) < 0)
         return -1;
@@ -256,25 +295,21 @@ int lz0_compress(const unsigned char *in, size_t in_sz,
             k++;
         size_t single_sz = in_sz + (size_t)(2 * k + 10) / 8;
         if (*out_sz > single_sz) {
-            lz0_toklist single_tl;
-            lz0_toklist_init(&single_tl);
-            lz0_toklist_push(&single_tl, 0, (uint32_t)in_sz, 0);
             unsigned char *alt_out = NULL;
             size_t alt_sz = 0;
             lz0_bitacct alt_acct;
-            if (lz0_emit_cfg(in, (uint32_t)in_sz, &single_tl, &alt_out, &alt_sz, &alt_acct, &f.opts) == 0 && alt_sz < *out_sz) {
+            if (emit_single_literal(in, (uint32_t)in_sz, &f.opts, &alt_out, &alt_sz, &alt_acct) == 0 &&
+                alt_sz < *out_sz) {
                 free(*out);
                 *out = alt_out;
                 *out_sz = alt_sz;
                 acct = alt_acct;
-                lz0_toklist_free(&tl);
-                tl = single_tl;
-                single_tl.t = NULL;
-                single_tl.n = 0;
-                single_tl.cap = 0;
+                tl.n = 1;
+                tl.t[0].pos = 0;
+                tl.t[0].length = (uint32_t)in_sz;
+                tl.t[0].offset = 0;
             } else {
                 free(alt_out);
-                lz0_toklist_free(&single_tl);
             }
         }
     }
@@ -293,15 +328,7 @@ int lz0_compress(const unsigned char *in, size_t in_sz,
         }
     }
 
-    stats->finder_ms = t1 - t0;
-    stats->parse_ms = t2 - t1;
-    stats->emit_ms = t3 - t2;
-    stats->total_ms = t3 - t0;
-    stats->bits_decision = acct.bits_decision;
-    stats->bits_elias_len = acct.bits_elias_len;
-    stats->bits_offset = acct.bits_offset;
-    stats->bits_literal = acct.bits_literal;
-    stats->bits_total = acct.bits_decision + acct.bits_elias_len + acct.bits_offset + acct.bits_literal;
+    fill_compress_stats(stats, &acct, t0, t1, t2, t3);
 
     lz0_toklist_free(&tl);
     lz0_finder_free(&f);
