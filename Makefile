@@ -1,5 +1,5 @@
 CC ?= gcc
-VERSION ?= 0.6.0-dev
+VERSION ?= 0.6.0
 UNAME_S := $(shell uname -s 2>/dev/null || echo Linux)
 UNAME_M := $(shell uname -m 2>/dev/null || echo x86_64)
 DARWIN_CFLAGS := $(if $(filter Darwin,$(UNAME_S)),-D_DARWIN_C_SOURCE,)
