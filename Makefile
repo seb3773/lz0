@@ -17,7 +17,7 @@ LZ0_SRC = lz0/lz0_cost.c lz0/lz0_find.c lz0/lz0_parse.c \
 
 LZ0DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.S lz0/lz0dec_fast_x86_64.S
 
-VERSION ?= 0.4.0
+VERSION ?= 0.5.0
 
 .PHONY: all bench clean test smoke bounds diag lite32 state sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz guard simd sa_probe enc_bench enc_tiers find_bench mem_peak lz0 lz0dec cli sanitize valgrind bench_all bench_ratio bench_dec bench_dec_arm64 bench_dec_riscv64 bench_blobs test_arm64 arm64 test_riscv64 riscv64 windows dist dist_linux dist_arm64 dist_riscv64 dist_windows
 
