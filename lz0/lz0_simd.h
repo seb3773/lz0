@@ -24,9 +24,9 @@
 #include <stdint.h>
 #include <string.h>
 
-#if !defined(LZ0_NO_SIMD) && defined(__ELF__) && defined(__x86_64__) && !defined(_WIN32)
+#if !defined(LZ0_NO_SIMD) && (defined(__ELF__) || defined(_WIN32) || defined(__APPLE__)) && (defined(__x86_64__) || defined(_M_X64))
 #define LZ0_SIMD_X86_64 1
-#elif !defined(LZ0_NO_SIMD) && defined(__ELF__) && defined(__aarch64__) && !defined(_WIN32)
+#elif !defined(LZ0_NO_SIMD) && (defined(__ELF__) || defined(__APPLE__)) && defined(__aarch64__) && !defined(_WIN32)
 #define LZ0_SIMD_ARM64 1
 #elif !defined(LZ0_NO_SIMD) && defined(__ELF__) && defined(__riscv) && __riscv_xlen == 64 && !defined(_WIN32)
 /* RVV 1.0 and '.option arch, +v' require binutils >= 2.38 (GCC >= 12 or Clang >= 14) */

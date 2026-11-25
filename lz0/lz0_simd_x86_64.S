@@ -42,20 +42,85 @@
  *               max <= 0); reads only a[0..max) and b[0..max).
  */
 
-#if defined(__ELF__) && defined(__x86_64__) && !defined(_WIN32)
+#if (defined(__ELF__) || defined(_WIN32) || defined(__APPLE__)) && defined(__x86_64__)
 
         .text
 
 /* Symbol helper: global but hidden (never exported from a shared object,
  * so internal tail-jumps stay direct), function type, 16-byte aligned. */
-#define FUNC(name)              \
-        .globl  name;           \
-        .hidden name;           \
-        .type   name, @function;\
-        .p2align 4;             \
-name:
+#if defined(__APPLE__)
+#define CSYM(name) _##name
+#else
+#define CSYM(name) name
+#endif
 
+#define BODY(name) .Lbody_##name
+
+#if defined(_WIN32)
+/* Win64 -> SysV ABI wrapper preserving rdi, rsi (and xmm6..xmm8 for mru). */
+#define FUNC(name)                  \
+        .globl  name;               \
+        .p2align 4;                 \
+name:                               \
+        pushq   %rdi;               \
+        pushq   %rsi;               \
+        movq    %rcx, %rdi;         \
+        movq    %rdx, %rsi;         \
+        movq    %r8,  %rdx;         \
+        movq    %r9,  %rcx;         \
+        call    BODY(name);         \
+        popq    %rsi;               \
+        popq    %rdi;               \
+        ret;                        \
+BODY(name):
+
+#define FUNC_XMM8(name)             \
+        .globl  name;               \
+        .p2align 4;                 \
+name:                               \
+        pushq   %rdi;               \
+        pushq   %rsi;               \
+        subq    $56, %rsp;          \
+        movdqa  %xmm6, (%rsp);      \
+        movdqa  %xmm7, 16(%rsp);    \
+        movdqa  %xmm8, 32(%rsp);    \
+        movq    %rcx, %rdi;         \
+        movq    %rdx, %rsi;         \
+        movq    %r8,  %rdx;         \
+        movq    %r9,  %rcx;         \
+        call    BODY(name);         \
+        movdqa  (%rsp), %xmm6;      \
+        movdqa  16(%rsp), %xmm7;    \
+        movdqa  32(%rsp), %xmm8;    \
+        addq    $56, %rsp;          \
+        popq    %rsi;               \
+        popq    %rdi;               \
+        ret;                        \
+BODY(name):
+
+#define ENDF(name)
+#elif defined(__APPLE__)
+#define FUNC(name)                  \
+        .globl  CSYM(name);         \
+        .private_extern CSYM(name); \
+        .p2align 4;                 \
+CSYM(name):                         \
+BODY(name):
+
+#define FUNC_XMM8(name) FUNC(name)
+#define ENDF(name)
+#else
+#define FUNC(name)                  \
+        .globl  name;               \
+        .hidden name;               \
+        .type   name, @function;    \
+        .p2align 4;                 \
+name:                               \
+BODY(name):
+
+#define FUNC_XMM8(name) FUNC(name)
 #define ENDF(name) .size name, .-name
+#endif
 
 /* ------------------------------------------------------------------------
  * lz0_find_u32_sse2(p=rdi, n=esi, key=edx) -> eax
@@ -138,7 +203,7 @@ ENDF(lz0_find_u32_sse2)
  * ---------------------------------------------------------------------- */
 FUNC(lz0_find_u32_avx2)
         cmpl    $8, %esi
-        jl      lz0_find_u32_sse2
+        jl      BODY(lz0_find_u32_sse2)
         movslq  %esi, %rsi
         vmovd   %edx, %xmm0
         vpbroadcastd %xmm0, %ymm0           /* ymm0 = key x8 */
@@ -235,7 +300,7 @@ FUNC(lz0_argmax_i32_sse2)
         pshufd  $0xb1, %xmm0, %xmm1
         SSE2_MAXSD(%xmm1, %xmm0, %xmm2)
         movd    %xmm0, %edx
-        jmp     lz0_find_u32_sse2           /* rdi, esi unchanged */
+        jmp     BODY(lz0_find_u32_sse2)     /* rdi, esi unchanged */
 .Lam_s_small:                               /* n in 1..3 */
         xorl    %eax, %eax
         movl    (%rdi), %edx
@@ -260,7 +325,7 @@ ENDF(lz0_argmax_i32_sse2)
  * ---------------------------------------------------------------------- */
 FUNC(lz0_argmax_i32_avx2)
         cmpl    $8, %esi
-        jl      lz0_argmax_i32_sse2
+        jl      BODY(lz0_argmax_i32_sse2)
         movslq  %esi, %rsi
         vmovdqu (%rdi), %ymm0
         vmovdqa %ymm0, %ymm1
@@ -289,7 +354,7 @@ FUNC(lz0_argmax_i32_avx2)
         vpshufd $0xb1, %xmm0, %xmm1
         vpmaxsd %xmm1, %xmm0, %xmm0
         vmovd   %xmm0, %edx
-        jmp     lz0_find_u32_avx2           /* n >= 8, VZEROUPPER done there */
+        jmp     BODY(lz0_find_u32_avx2)     /* n >= 8, VZEROUPPER done there */
 ENDF(lz0_argmax_i32_avx2)
 
 /* ------------------------------------------------------------------------
@@ -363,7 +428,7 @@ ENDF(lz0_find_off_sse2)
  * ---------------------------------------------------------------------- */
 FUNC(lz0_find_off_avx2)
         cmpl    $4, %esi
-        jl      lz0_find_off_sse2
+        jl      BODY(lz0_find_off_sse2)
         movslq  %esi, %rsi
         vmovd   %edx, %xmm0
         vpbroadcastd %xmm0, %ymm0
@@ -518,7 +583,7 @@ ENDF(lz0_kc_worst_sse2)
  * ---------------------------------------------------------------------- */
 FUNC(lz0_kc_worst_avx2)
         cmpl    $8, %edx
-        jl      lz0_kc_worst_sse2
+        jl      BODY(lz0_kc_worst_sse2)
         movslq  %edx, %rdx
         vmovdqu (%rdi), %ymm0
         movl    $8, %eax
@@ -703,7 +768,7 @@ ENDF(lz0_count_eq_avx2)
  *   new  = lanes 0..idx from [off, m0, m1, ..., m6], lanes > idx unchanged
  * which is exactly the scalar move-to-front / insert-at-front of mru_add().
  * ---------------------------------------------------------------------- */
-FUNC(lz0_mru_batch_sse2)
+FUNC_XMM8(lz0_mru_batch_sse2)
         movdqu  (%rdi), %xmm0
         movdqu  16(%rdi), %xmm1
         movl    (%rsi), %r8d                /* n_mru */
@@ -892,7 +957,7 @@ ENDF(lz0_matchlen_sse2)
  * ---------------------------------------------------------------------- */
 FUNC(lz0_matchlen_avx2)
         cmpl    $32, %edx
-        jl      lz0_matchlen_sse2
+        jl      BODY(lz0_matchlen_sse2)
         movslq  %edx, %rdx
         xorl    %eax, %eax
         leaq    -64(%rdx), %rcx             /* last start of a 64-byte block */
@@ -947,7 +1012,13 @@ FUNC(lz0_matchlen_avx2)
         ret
 ENDF(lz0_matchlen_avx2)
 
+#if defined(_WIN32)
+        .section .rdata,"dr"
+#elif defined(__APPLE__)
+        .section __TEXT,__const
+#else
         .section .rodata
+#endif
         .p2align 5
 .Lmru_lanes:
         .long   0, 1, 2, 3, 4, 5, 6, 7

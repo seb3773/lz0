@@ -18,8 +18,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
 #include <sys/mman.h>
 #include <unistd.h>
+#endif
 
 static uint64_t rs = 0x9E3779B97F4A7C15ull;
 static uint32_t rnd(void) {
@@ -37,15 +42,29 @@ static size_t guard_len;
 /* Returns a pointer such that [p, p + bytes) ends exactly at the guard page
  * of the given slot. */
 static void *guarded_slot(int slot, size_t bytes) {
-    long pg = sysconf(_SC_PAGESIZE);
     if (!guard_base[slot]) {
-        guard_len = (size_t)pg * 8;
-        unsigned char *g = mmap(NULL, guard_len + (size_t)pg, PROT_READ | PROT_WRITE,
+#if defined(_WIN32)
+        SYSTEM_INFO si;
+        GetSystemInfo(&si);
+        size_t pg = (size_t)si.dwPageSize;
+        guard_len = pg * 8;
+        unsigned char *g = (unsigned char *)VirtualAlloc(
+            NULL, guard_len + pg, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        DWORD old = 0;
+        if (!g || !VirtualProtect(g + guard_len, pg, PAGE_NOACCESS, &old)) {
+            fprintf(stderr, "VirtualAlloc/VirtualProtect failed\n");
+            exit(2);
+        }
+#else
+        size_t pg = (size_t)sysconf(_SC_PAGESIZE);
+        guard_len = pg * 8;
+        unsigned char *g = mmap(NULL, guard_len + pg, PROT_READ | PROT_WRITE,
                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (g == MAP_FAILED || mprotect(g + guard_len, (size_t)pg, PROT_NONE)) {
+        if (g == MAP_FAILED || mprotect(g + guard_len, pg, PROT_NONE)) {
             perror("mmap/mprotect");
             exit(2);
         }
+#endif
         guard_base[slot] = g;
     }
     return guard_base[slot] + guard_len - bytes;

@@ -1,4 +1,10 @@
-#if defined(__ELF__) && defined(__x86_64__) && !defined(_WIN32)
+#if (defined(__ELF__) || defined(_WIN32) || defined(__APPLE__)) && defined(__x86_64__)
+
+#if defined(__APPLE__)
+#define CSYM(name) _##name
+#else
+#define CSYM(name) name
+#endif
 
 .intel_syntax noprefix
 /*
@@ -164,12 +170,44 @@
 /* ============================ entry ============================ */
 
     .text
-    .globl lz0dec_fast_x86_64
+    .globl CSYM(lz0dec_fast_x86_64)
 #if defined(__ELF__)
-    .type lz0dec_fast_x86_64, @function
+    .type CSYM(lz0dec_fast_x86_64), @function
 #endif
     .p2align 5
-lz0dec_fast_x86_64:
+CSYM(lz0dec_fast_x86_64):
+#if defined(_WIN32)
+    test rcx, rcx
+    jz .Lfail_early
+    test edx, edx
+    jle .Lfail_early
+    test r8, r8
+    jz .Lfail_early
+    test r9d, r9d
+    jle .Lfail_early
+
+    push rbx
+    push rbp
+    push rdi
+    push rsi
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 16
+
+    mov r14, rcx                /* in_ptr */
+    movsxd rax, edx
+    add rax, rcx
+    mov qword ptr [rsp], rax    /* in_end */
+    movsxd r11, r9d             /* load out_max before overwriting r9 */
+    lea r9, [rax - 16]          /* in_safe_end */
+    mov r10, r8                 /* out_start */
+    mov r12, r8                 /* out_ptr */
+    add r11, r8
+    mov qword ptr [rsp + 8], r11 /* out_end */
+    sub r11, 16                 /* out_safe_end */
+#else
     test rdi, rdi
     jz .Lfail_early
     test esi, esi
@@ -198,6 +236,7 @@ lz0dec_fast_x86_64:
     add rax, rdx
     mov qword ptr [rsp + 8], rax /* out_end */
     lea r11, [rax - 16]
+#endif
     mov r13, 0xAAAA800000000000
     lea r15, [rip + .Lunzip]
     mov ebx, 1                  /* last_offset = 1 */
@@ -601,12 +640,18 @@ lz0dec_fast_x86_64:
     pop r14
     pop r13
     pop r12
+#if defined(_WIN32)
+    pop rsi
+    pop rdi
+#endif
     pop rbp
     pop rbx
     ret
 
     /* Shared cold / long-match / small-offset copy paths (single instance). */
+#if defined(__ELF__)
     .subsection 1
+#endif
 .Lcopy_cold_gt16:               /* offset >= 16, len > 16 */
     add rsi, 16
     lea rdx, [r12 + 16]
@@ -681,15 +726,23 @@ lz0dec_fast_x86_64:
     jb 1b
     mov r12, rax
     jmp .F_decide
+#if defined(__ELF__)
     .subsection 0
+#endif
 .Lfail_early:
     mov eax, -1
     ret
 #if defined(__ELF__)
-    .size lz0dec_fast_x86_64, .-lz0dec_fast_x86_64
+    .size CSYM(lz0dec_fast_x86_64), .-CSYM(lz0dec_fast_x86_64)
 #endif
 
+#if defined(_WIN32)
+    .section .rdata,"dr"
+#elif defined(__APPLE__)
+    .section __TEXT,__const
+#else
     .section .rodata
+#endif
     .p2align 6
 .Lunzip:                        /* bits 6,4,2,0 of index -> 4-bit value */
     .byte 0,1,0,1,2,3,2,3,0,1,0,1,2,3,2,3
@@ -715,5 +768,5 @@ lz0dec_fast_x86_64:
     .section .note.GNU-stack,"",@progbits
 #endif
 
-#endif /* __x86_64__ && !_WIN32 */
+#endif /* (__ELF__ || _WIN32 || __APPLE__) && __x86_64__ */
 

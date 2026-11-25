@@ -1,7 +1,13 @@
-#if defined(__ELF__) && defined(__aarch64__) && !defined(_WIN32)
+#if (defined(__ELF__) || defined(__APPLE__)) && defined(__aarch64__) && !defined(_WIN32)
+
+#if defined(__APPLE__)
+#define CSYM(name) _##name
+#else
+#define CSYM(name) name
+#endif
 
 .text
-.globl lz0dec_arm64
+.globl CSYM(lz0dec_arm64)
 #if defined(__ELF__)
 .type lz0dec_arm64, %function
 #endif
@@ -22,7 +28,7 @@
  * - Broadcasted 64-bit stores for offset == 1 runs.
  */
 
-lz0dec_arm64:
+CSYM(lz0dec_arm64):
     /* Check invalid inputs early */
     cbz x0, .fail
     cmp w1, #0

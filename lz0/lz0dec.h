@@ -24,7 +24,7 @@ int lz0dec_min(const unsigned char *in, int in_size,
 int64_t lz0dec_min_ex(const unsigned char *in, size_t in_size,
                       unsigned char *out, size_t out_max);
 
-#if defined(__ELF__) && (defined(__x86_64__) || defined(_M_X64)) && !defined(_WIN32)
+#if (defined(__ELF__) || defined(_WIN32) || defined(__APPLE__)) && (defined(__x86_64__) || defined(_M_X64))
 /* Compact ASM: ~1.3 KiB, zero table, pure arithmetic */
 int lz0dec_x86_64(const unsigned char *in, int in_size,
                   unsigned char *out, int out_max);
@@ -33,7 +33,7 @@ int lz0dec_fast_x86_64(const unsigned char *in, int in_size,
                        unsigned char *out, int out_max);
 #endif
 
-#if defined(__ELF__) && (defined(__aarch64__) || defined(_M_ARM64)) && !defined(_WIN32)
+#if (defined(__ELF__) || defined(__APPLE__)) && (defined(__aarch64__) || defined(_M_ARM64)) && !defined(_WIN32)
 /* Compact ASM: ~1.3 KiB, zero table, pure arithmetic */
 int lz0dec_arm64(const unsigned char *in, int in_size,
                  unsigned char *out, int out_max);
@@ -46,15 +46,15 @@ int lz0dec_fast_arm64(const unsigned char *in, int in_size,
 /* Compact ASM: ~1.1 KiB, zero table, pure arithmetic, pure leaf */
 int lz0dec_riscv64(const unsigned char *in, int in_size,
                    unsigned char *out, int out_max);
-/* Fast ASM: dual-engine FAST/SAFE, wildcopy, pure leaf */
+/* Fast ASM: dual-engine FAST/SAFE, 64-bit window, pure leaf */
 int lz0dec_fast_riscv64(const unsigned char *in, int in_size,
                         unsigned char *out, int out_max);
 #endif
 
-#if defined(__ELF__) && (defined(__x86_64__) || defined(_M_X64)) && !defined(_WIN32)
+#if (defined(__ELF__) || defined(_WIN32) || defined(__APPLE__)) && (defined(__x86_64__) || defined(_M_X64))
 #define lz0dec_fast lz0dec_fast_x86_64
 #define lz0dec_compact lz0dec_x86_64
-#elif defined(__ELF__) && (defined(__aarch64__) || defined(_M_ARM64)) && !defined(_WIN32)
+#elif (defined(__ELF__) || defined(__APPLE__)) && (defined(__aarch64__) || defined(_M_ARM64)) && !defined(_WIN32)
 #define lz0dec_fast lz0dec_fast_arm64
 #define lz0dec_compact lz0dec_arm64
 #elif defined(__ELF__) && (defined(__riscv) && __riscv_xlen == 64) && !defined(_WIN32)

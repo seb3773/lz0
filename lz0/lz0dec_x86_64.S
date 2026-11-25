@@ -1,10 +1,16 @@
-#if defined(__ELF__) && defined(__x86_64__) && !defined(_WIN32)
+#if (defined(__ELF__) || defined(_WIN32) || defined(__APPLE__)) && defined(__x86_64__)
+
+#if defined(__APPLE__)
+#define CSYM(name) _##name
+#else
+#define CSYM(name) name
+#endif
 
 .intel_syntax noprefix
 .text
-.globl lz0dec_x86_64
+.globl CSYM(lz0dec_x86_64)
 #if defined(__ELF__)
-.type lz0dec_x86_64, @function
+.type CSYM(lz0dec_x86_64), @function
 #endif
 
 /*
@@ -25,7 +31,28 @@
  *   next bit into CF and flags exhaustion in ZF (no bit counter register).
  */
 
-lz0dec_x86_64:
+CSYM(lz0dec_x86_64):
+#if defined(_WIN32)
+    /* Check invalid inputs (Win64: rcx=in_ptr, edx=in_sz, r8=out_ptr, r9d=out_max) */
+    test rcx, rcx
+    jz .fail_early
+    test edx, edx
+    jle .fail_early
+    test r8, r8
+    jz .fail_early
+    test r9d, r9d
+    jle .fail_early
+
+    push rbx
+    push rbp
+    push rdi
+    push rsi
+
+    mov rdi, rcx                    /* in_ptr */
+    mov esi, edx                    /* in_sz */
+    mov rdx, r8                     /* out_ptr */
+    mov ecx, r9d                    /* out_max */
+#else
     /* Check invalid inputs */
     test rdi, rdi
     jz .fail_early
@@ -38,8 +65,9 @@ lz0dec_x86_64:
 
     push rbx
     push rbp
+#endif
 
-    /* rdi = in_ptr (already in place) */
+    /* rdi = in_ptr */
     movsxd rax, esi
     lea r9, [rdi + rax]            /* in_end */
 
@@ -499,6 +527,10 @@ lz0dec_x86_64:
 .eof_reached:
     mov rax, rbp
     sub rax, r10
+#if defined(_WIN32)
+    pop rsi
+    pop rdi
+#endif
     pop rbp
     pop rbx
     ret
@@ -507,6 +539,10 @@ lz0dec_x86_64:
     pop rax                         /* drop its return address */
 .fail:
     or rax, -1
+#if defined(_WIN32)
+    pop rsi
+    pop rdi
+#endif
     pop rbp
     pop rbx
     ret
@@ -516,9 +552,9 @@ lz0dec_x86_64:
     ret
 
 #if defined(__ELF__)
-.size lz0dec_x86_64, .-lz0dec_x86_64
+.size CSYM(lz0dec_x86_64), .-CSYM(lz0dec_x86_64)
 .section .note.GNU-stack,"",@progbits
 #endif
 
-#endif /* __x86_64__ && !_WIN32 */
+#endif /* (__ELF__ || _WIN32 || __APPLE__) && __x86_64__ */
 

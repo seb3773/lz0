@@ -175,15 +175,15 @@ bin/lz0dec_riscv64: lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_riscv64.S lz0/l
 	mkdir -p bin
 	$(RISCV64_CC) $(RISCV64_CFLAGS) -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_riscv64.S lz0/lz0dec_fast_riscv64.S
 
-MINGW_CC = x86_64-w64-mingw32-gcc
+MINGW_CC ?= x86_64-w64-mingw32-gcc
 
-bin/lz0.exe: lz0/lz0_cli.c $(LZ0_SRC) lz0/lz0dec_min.c
+bin/lz0.exe: lz0/lz0_cli.c $(LZ0_SRC) lz0/lz0dec_min.c lz0/lz0dec_x86_64.S lz0/lz0dec_fast_x86_64.S
 	mkdir -p bin
-	$(MINGW_CC) $(CFLAGS) -static -s -o $@ lz0/lz0_cli.c $(LZ0_SRC) lz0/lz0dec_min.c
+	$(MINGW_CC) $(CFLAGS) -static -s -o $@ lz0/lz0_cli.c $(LZ0_SRC) lz0/lz0dec_min.c lz0/lz0dec_x86_64.S lz0/lz0dec_fast_x86_64.S
 
-bin/lz0dec.exe: lz0/lz0dec_cli.c lz0/lz0dec_min.c
+bin/lz0dec.exe: lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.S lz0/lz0dec_fast_x86_64.S
 	mkdir -p bin
-	$(MINGW_CC) $(CFLAGS) -static -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_min.c
+	$(MINGW_CC) $(CFLAGS) -static -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.S lz0/lz0dec_fast_x86_64.S
 
 windows: bin/lz0.exe bin/lz0dec.exe
 

@@ -15,18 +15,26 @@
  * RBIT + CLZ gives the bit position of the lowest matching lane.
  */
 
-#if defined(__ELF__) && defined(__aarch64__) && !defined(_WIN32)
+#if (defined(__ELF__) || defined(__APPLE__)) && defined(__aarch64__) && !defined(_WIN32)
 
         .text
 
+#if defined(__APPLE__)
+#define FUNC(name)              \
+        .globl  _##name;        \
+        .private_extern _##name;\
+        .p2align 4;             \
+_##name:
+#define ENDF(name)
+#else
 #define FUNC(name)              \
         .globl  name;           \
         .hidden name;           \
         .type   name, %function;\
         .p2align 4;             \
 name:
-
 #define ENDF(name) .size name, .-name
+#endif
 
 /* ------------------------------------------------------------------------
  * int lz0_find_u32_neon(const uint32_t *p = x0, int n = w1, uint32_t key = w2)
@@ -417,8 +425,13 @@ ENDF(lz0_count_eq_neon)
 FUNC(lz0_mru_batch_neon)
         ldp     q0, q1, [x0]
         ldr     w4, [x1]                    /* n_mru */
+#if defined(__APPLE__)
+        adrp    x5, .Lmru_lanes@PAGE
+        add     x5, x5, .Lmru_lanes@PAGEOFF
+#else
         adrp    x5, .Lmru_lanes
         add     x5, x5, :lo12:.Lmru_lanes
+#endif
         ldp     q6, q7, [x5]                /* {0..3}, {4..7} */
         sxtw    x3, w3
         mov     x6, #0                      /* i */
@@ -473,7 +486,11 @@ FUNC(lz0_mru_batch_neon)
         ret
 ENDF(lz0_mru_batch_neon)
 
+#if defined(__APPLE__)
+        .section __TEXT,__const
+#else
         .section .rodata
+#endif
         .p2align 4
 .Lmru_lanes:
         .word   0, 1, 2, 3, 4, 5, 6, 7

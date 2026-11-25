@@ -1,4 +1,10 @@
-#if defined(__ELF__) && defined(__aarch64__) && !defined(_WIN32)
+#if (defined(__ELF__) || defined(__APPLE__)) && defined(__aarch64__) && !defined(_WIN32)
+
+#if defined(__APPLE__)
+#define CSYM(name) _##name
+#else
+#define CSYM(name) name
+#endif
 
 /*
  * int lz0dec_fast_arm64(const unsigned char *in, int in_size,
@@ -154,12 +160,12 @@
 /* ============================ entry ============================ */
 
     .text
-    .globl lz0dec_fast_arm64
+    .globl CSYM(lz0dec_fast_arm64)
 #if defined(__ELF__)
     .type lz0dec_fast_arm64, %function
 #endif
     .p2align 5
-lz0dec_fast_arm64:
+CSYM(lz0dec_fast_arm64):
     cbz x0, .Lfail
     cmp w1, #0
     b.le .Lfail
@@ -175,8 +181,13 @@ lz0dec_fast_arm64:
     mov x5, #1                  /* last_offset = 1 */
     movz x11, #0xAAAA, lsl #48
     movk x11, #0x8000, lsl #32
+#if defined(__APPLE__)
+    adrp x12, .Lunzip@PAGE
+    add x12, x12, .Lunzip@PAGEOFF
+#else
     adrp x12, .Lunzip
     add x12, x12, :lo12:.Lunzip
+#endif
     mov w8, #0x80000000         /* empty bit buffer */
 
     cmp x0, x6                  /* first token is always a LiteralRun */
@@ -540,7 +551,9 @@ lz0dec_fast_arm64:
     ret
 
     /* Shared cold / long-match / small-offset copy paths (single instance). */
+#if defined(__ELF__)
     .subsection 1
+#endif
 .Lcopy_cold_gt16:               /* offset >= 16, len > 16 */
     add x15, x15, #16
     add x17, x3, #16
@@ -607,12 +620,16 @@ lz0dec_fast_arm64:
     b.lo 1b
     mov x3, x13
     b .F_decide
-    .subsection 0
 #if defined(__ELF__)
+    .subsection 0
     .size lz0dec_fast_arm64, .-lz0dec_fast_arm64
 #endif
 
+#if defined(__APPLE__)
+    .section __TEXT,__const
+#else
     .section .rodata
+#endif
     .p2align 6
 .Lunzip:                        /* bits 6,4,2,0 of index -> 4-bit value */
     .byte 0,1,0,1,2,3,2,3,0,1,0,1,2,3,2,3
