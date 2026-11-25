@@ -21,8 +21,10 @@ tests/test_simd
 tests/test_sa_probe
 tests/test_threadsafe
 tests/test_window
+tests/test_limits
 tests/*_arm64
 tests/*_riscv64
+tests/*.exe
 
 # Benchmark binaries
 bench/lz0_*

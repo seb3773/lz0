@@ -24,6 +24,9 @@
 #else
 #include <sys/mman.h>
 #include <unistd.h>
+#ifndef MAP_ANONYMOUS
+#define MAP_ANONYMOUS MAP_ANON
+#endif
 #endif
 
 static uint64_t rs = 0x9E3779B97F4A7C15ull;
