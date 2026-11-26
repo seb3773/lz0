@@ -53,6 +53,7 @@ uint32_t lz0_count_eq_c(const unsigned char *a, const unsigned char *b, uint32_t
                         uint32_t step);
 void lz0_mru_batch_c(uint32_t *mru, int *n_mru, const lz0_match *m, int n);
 int lz0_matchlen_c(const unsigned char *a, const unsigned char *b, int max);
+uint64_t lz0_bin40_hits_c(const unsigned char *p, uint32_t w0, uint32_t pm);
 
 #define LZ0_SIMD_DECL(sfx)                                                          \
     int lz0_find_u32_##sfx(const uint32_t *p, int n, uint32_t key);                 \
@@ -61,7 +62,8 @@ int lz0_matchlen_c(const unsigned char *a, const unsigned char *b, int max);
     int lz0_kc_worst_##sfx(const int32_t *score, const lz0_match *m, int n);        \
     uint32_t lz0_count_eq_##sfx(const unsigned char *a, const unsigned char *b,     \
                                 uint32_t len, uint32_t step);                       \
-    int lz0_matchlen_##sfx(const unsigned char *a, const unsigned char *b, int max);
+    int lz0_matchlen_##sfx(const unsigned char *a, const unsigned char *b, int max);\
+    uint64_t lz0_bin40_hits_##sfx(const unsigned char *p, uint32_t w0, uint32_t pm);
 
 #if defined(LZ0_SIMD_X86_64)
 LZ0_SIMD_DECL(sse2)
@@ -149,6 +151,12 @@ static inline int lz0_simd_matchlen(const unsigned char *a, const unsigned char 
     }
 #endif
     return lz0_matchlen_c(a, b, max);
+}
+
+/* Bitmask b in [0, 40) of lz0_bin_offsets[b] matches at p = in + pos - 256.
+ * Reads strictly within [p, p + 256). */
+static inline uint64_t lz0_simd_bin40_hits(const unsigned char *p, uint32_t w0, uint32_t pm) {
+    return LZ0_SIMD_CALL(lz0_bin40_hits, p, w0, pm);
 }
 
 #endif

@@ -506,19 +506,12 @@ lz0dec_fast_riscv64:
 
 .Ff_ml:
     ELIAS9_15 0, .Ff_ml_safe
-    j     .Ff_long_copy
+    j     .F_copy
 
 .Ff_len:
     ELIAS9_15 0, .Ff_len_safe
     addi  t4, t4, 8
-
-.Ff_long_copy:
-    /* Copy via SAFE semantics then return cleanly with refreshed WINDOW if possible;
-       keeps >= 57 valid bits guaranteed for any subsequent token without inflating
-       FAST hot paths. */
-    COMMIT
-    TO_SAFE
-    j     .S_copy
+    j     .F_copy
 
 .Ff_len_safe:
     COMMIT

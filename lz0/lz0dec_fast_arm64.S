@@ -261,6 +261,13 @@ CSYM(lz0dec_fast_arm64):
     tbz x10, #62, .F_ml_gen
     lsl x10, x10, #2            /* decision 0 + Elias == 1 */
     add x9, x9, #2
+    cmp x3, x7
+    b.hs .F_ml1_safe
+    sub x15, x3, x5
+    ldrb w13, [x15]
+    strb w13, [x3], #1
+    b .F_decide
+.F_ml1_safe:
     mov x14, #1
 .F_copy:
     COPY_FAST

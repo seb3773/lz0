@@ -950,6 +950,8 @@ int lz0_parse_sdp(lz0_finder *f, lz0_toklist *tl) {
         K = 8;
     if (K == 2)
         return lz0_parse_sdp_k2(f, tl);
+    if (!f->census && n <= 0x00ffffffu)
+        return lz0_parse_ultra_sdp(f, tl);
     /* offsets must leave room for the literal flag in the packed key */
     if (n >= SDP_LIT_FLAG)
         return -1;

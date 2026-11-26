@@ -598,10 +598,98 @@ FUNC lz0_matchlen_neon
         b.ne    .Lml_bret
         add     x3, x3, #1
         b       .Lml_bytes
+.Lbret_zero:
 .Lml_bret:
         mov     w0, w3
         ret
 ENDF lz0_matchlen_neon
+
+/* ------------------------------------------------------------------------
+ * uint64_t lz0_bin40_hits_neon(const uint8_t *p = x0, uint32_t w0 = w1,
+ *                              uint32_t pm = w2)
+ * Bitmask b in [0, 40) of positions matching (ld16(p+256-off) & pm) == w0.
+ * Uses only caller-saved registers x0..x7 and v0..v7, v16..v20.
+ * ---------------------------------------------------------------------- */
+FUNC lz0_bin40_hits_neon
+        uxth    w1, w1
+        uxth    w2, w2
+        dup     v0.8h, w1                   /* vw0 */
+        dup     v1.8h, w2                   /* vpm */
+#if defined(__APPLE__)
+        adrp    x5, .Lb40_weights@PAGE
+        add     x5, x5, .Lb40_weights@PAGEOFF
+#else
+        adrp    x5, .Lb40_weights
+        add     x5, x5, :lo12:.Lb40_weights
+#endif
+        ldr     q2, [x5]                    /* {128..1, 128..1} */
+
+        /* G0: b=7..0 from p+224..255 */
+        ldp     q16, q17, [x0, #224]
+        uzp1    v6.8h, v16.8h, v17.8h
+        and     v6.16b, v6.16b, v1.16b
+        cmeq    v6.8h, v6.8h, v0.8h
+
+        /* G1: b=15..8 from p+192..223 */
+        ldp     q16, q17, [x0, #192]
+        uzp1    v7.8h, v16.8h, v17.8h
+        and     v7.16b, v7.16b, v1.16b
+        cmeq    v7.8h, v7.8h, v0.8h
+
+        /* G2: b=23..16 from p+128..191 */
+        ldp     q16, q17, [x0, #160]
+        ldp     q18, q19, [x0, #128]
+        uzp1    v16.4s, v16.4s, v17.4s
+        uzp1    v18.4s, v18.4s, v19.4s
+        uzp1    v16.8h, v18.8h, v16.8h
+        and     v16.16b, v16.16b, v1.16b
+        cmeq    v16.8h, v16.8h, v0.8h
+
+        /* G3: b=31..24 from p+64..127 */
+        ldp     q17, q18, [x0, #96]
+        ldp     q19, q20, [x0, #64]
+        uzp1    v17.4s, v17.4s, v18.4s
+        uzp1    v19.4s, v19.4s, v20.4s
+        uzp1    v17.8h, v19.8h, v17.8h
+        and     v17.16b, v17.16b, v1.16b
+        cmeq    v17.8h, v17.8h, v0.8h
+
+        /* G4: b=39..32 from p+0..63 */
+        ldp     q18, q19, [x0, #32]
+        ldp     q20, q3, [x0, #0]
+        uzp1    v18.4s, v18.4s, v19.4s
+        uzp1    v20.4s, v20.4s, v3.4s
+        uzp1    v18.8h, v20.8h, v18.8h
+        and     v18.16b, v18.16b, v1.16b
+        cmeq    v18.8h, v18.8h, v0.8h
+
+        /* Narrow 5 groups -> bitmask bytes 0..4 via weights + addp */
+        movi    v5.16b, #0
+        uzp1    v3.16b, v6.16b, v7.16b
+        uzp1    v4.16b, v16.16b, v17.16b
+        uzp1    v5.16b, v18.16b, v5.16b
+        and     v3.16b, v3.16b, v2.16b
+        and     v4.16b, v4.16b, v2.16b
+        and     v5.16b, v5.16b, v2.16b
+        addp    v3.16b, v3.16b, v4.16b
+        addp    v5.16b, v5.16b, v5.16b
+        addp    v3.16b, v3.16b, v5.16b
+        addp    v3.16b, v3.16b, v3.16b
+        fmov    x0, d3
+        ubfx    x0, x0, #0, #40
+        ret
+ENDF lz0_bin40_hits_neon
+
+#if defined(__APPLE__)
+        .section __TEXT,__const
+#else
+        .section .rodata
+#endif
+        .p2align 4
+.Lb40_weights:
+        .byte   128, 64, 32, 16, 8, 4, 2, 1
+        .byte   128, 64, 32, 16, 8, 4, 2, 1
+        .text
 
 #if defined(__ELF__)
         .section .note.GNU-stack, "", %progbits

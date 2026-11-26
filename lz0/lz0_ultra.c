@@ -227,13 +227,12 @@ static inline void u_row_init(u_row_hdr *r, int tier, int shift, int use_ht) {
     r->shift = (uint8_t)shift;
     r->worst = 0xff;
     r->tier = (uint8_t)tier;
-    if (tier == 1) {
+    if (tier == 1 || (tier == 2 && !use_ht)) {
         uint64_t *b4 = u_row_bloom4(r);
         b4[0] = b4[1] = b4[2] = b4[3] = 0;
     } else if (tier == 2) {
         u_tier2_extra *e = u_row_t2(r);
-        if (use_ht)
-            memset(e->htab, 0xff, sizeof(e->htab));
+        memset(e->htab, 0xff, sizeof(e->htab));
         e->bw_dirty = 0;
         e->bw_inited = 0;
         e->tomb = 0;
@@ -311,13 +310,13 @@ static U_NOINLINE u_row_hdr *u_row_promote(u_dp *d, uint32_t pos, u_row_hdr *old
     memcpy(nk, u_row_key(old_r), (size_t)old_ns * sizeof(uint32_t));
     memcpy(u_row_cost(nr), u_row_cost(old_r), (size_t)old_ns * sizeof(int32_t));
     memcpy(u_row_bt(nr), u_row_bt(old_r), (size_t)old_ns * sizeof(uint32_t));
-    if (nr->tier == 1) {
+    if (nr->tier == 1 || (nr->tier == 2 && !d->use_ht)) {
         uint64_t *b4 = u_row_bloom4(nr);
         for (int s = 0; s < old_ns; s++) {
             uint32_t h = u_h256(nk[s]);
             b4[h >> 6] |= 1ull << (h & 63u);
         }
-    } else if (nr->tier == 2 && d->use_ht) {
+    } else if (nr->tier == 2) {
         u_tier2_extra *e = u_row_t2(nr);
         for (int s = 0; s < old_ns; s++) {
             uint32_t p = u_h256(nk[s]) & 255u;
@@ -378,7 +377,7 @@ static inline int u_block_argmax(const int32_t *rcost, int lo, int hi) {
 static U_NOINLINE void u_find_worst(u_dp *d, uint32_t pos, u_row_hdr *r) {
     const int32_t *rcost = u_row_cost(r);
     int K = d->K;
-    if (r->tier != 2) {
+    if (r->tier != 2 || !d->use_ht) {
         int w = lz0_simd_argmax_i32(rcost, K);
         r->worst = (uint8_t)w;
         d->lim[pos].worst = rcost[w];
@@ -419,7 +418,7 @@ static U_NOINLINE void u_find_worst(u_dp *d, uint32_t pos, u_row_hdr *r) {
 }
 
 static U_ALWAYS_INLINE void u_t2_mark_dirty(u_dp *d, uint32_t pos, u_row_hdr *r, int s) {
-    if (r->tier == 2) {
+    if (r->tier == 2 && d->use_ht) {
         u_tier2_extra *m = u_row_t2(r);
         if (m->bw_inited && m->bw_slot[s >> 4] == (uint8_t)s)
             m->bw_dirty |= (uint16_t)(1u << (s >> 4));
@@ -468,7 +467,7 @@ static U_NOINLINE void u_relax_append(u_dp *d, uint32_t pos, u_row_hdr *r, int n
         while (e->htab[p] != 0xff)
             p = (p + 1u) & 255u;
         e->htab[p] = (uint8_t)n;
-    } else if (r->tier == 1) {
+    } else if (r->tier == 1 || r->tier == 2) {
         uint32_t h = u_h256(key);
         u_row_bloom4(r)[h >> 6] |= 1ull << (h & 63u);
     } else {
@@ -486,14 +485,9 @@ static U_ALWAYS_INLINE int u_find_small(const u_row_hdr *r, const uint32_t *rkey
                 return j;
         return -1;
     }
-    if (r->tier == 1) {
-        uint32_t h = u_h256(key);
-        if (!(((const uint64_t *)((const unsigned char *)(r + 1) + (12u << r->shift)))[h >> 6] &
-              (1ull << (h & 63u))))
-            return -1;
-        return lz0_simd_find_u32(rkey, n, key);
-    }
-    if (!(r->bloom & (1ull << u_hbit(key))))
+    uint32_t h = u_h256(key);
+    if (!(((const uint64_t *)((const unsigned char *)(r + 1) + (12u << r->shift)))[h >> 6] &
+          (1ull << (h & 63u))))
         return -1;
     return lz0_simd_find_u32(rkey, n, key);
 }
@@ -501,7 +495,7 @@ static U_ALWAYS_INLINE int u_find_small(const u_row_hdr *r, const uint32_t *rkey
 static U_ALWAYS_INLINE void u_relax_um(u_dp *d, uint32_t pos, uint32_t key, int cost,
                                        const u_src_ref *sref, int um, const int lit_tie) {
     u_pos_lim *pl = &d->lim[pos];
-    if (cost > pl->best + um)
+    if (um < INT_MAX / 8 && cost > pl->best + um)
         return;
     if (!lit_tie && cost >= pl->worst)
         return;
@@ -581,7 +575,7 @@ static U_ALWAYS_INLINE void u_relax_um(u_dp *d, uint32_t pos, uint32_t key, int 
             r->ns = (uint8_t)(n + 1);
             if (is_ht)
                 u_row_t2(r)->htab[ht_ins] = (uint8_t)n;
-            else if (r->tier == 1) {
+            else if (r->tier == 1 || r->tier == 2) {
                 uint32_t h = u_h256(key);
                 u_row_bloom4(r)[h >> 6] |= 1ull << (h & 63u);
             } else {
@@ -619,7 +613,7 @@ static U_ALWAYS_INLINE void u_relax_um(u_dp *d, uint32_t pos, uint32_t key, int 
         rcost[w] = cost;
         rbt[w] = new_bt;
         bt_dec(d, old_bt);
-        if (r->tier == 1) {
+        if (r->tier == 1 || r->tier == 2) {
             uint32_t h = u_h256(key);
             u_row_bloom4(r)[h >> 6] |= 1ull << (h & 63u);
         } else {
@@ -632,50 +626,66 @@ static U_ALWAYS_INLINE void u_relax_um(u_dp *d, uint32_t pos, uint32_t key, int 
 static U_ALWAYS_INLINE void u_relax_fast(u_dp *d, uint32_t pos, uint32_t key, int cost,
                                          const u_src_ref *sref, int um) {
     u_pos_lim pl = d->lim[pos];
-    if (cost <= pl.best + um && cost < pl.worst)
+    if ((um >= INT_MAX / 8 || cost <= pl.best + um) && cost < pl.worst)
         u_relax_um(d, pos, key, cost, sref, um, 0);
 }
 
 static void u_emit_last(const lz0_finder *f, u_dp *d, uint32_t i, int L, uint32_t off,
-                        int cost, const u_src_ref *sref, int um) {
-    if (f->opts.len_code == 3 && f->opts.ultra_fine == 8) {
-        static const uint8_t cost_last_1_8[] = {0, 2, 4, 4, 6, 6, 6, 6, 8};
-        int fine = L < 8 ? L : 8;
-        for (int l = 1; l <= fine; l++)
-            u_relax_fast(d, i + (uint32_t)l, off, cost + (int)cost_last_1_8[l], sref, um);
-        if (L < 9)
-            return;
-        for (int k = 4; k < 31; k++) {
-            int h = (int)((1u << k) - 1u);
-            int end = L < h ? L : h;
-            u_relax_fast(d, i + (uint32_t)end, off, cost + 2 * k, sref, um);
-            if (L <= h)
+                        int cost, const u_src_ref *sref, int um, int fine_lim) {
+    if (f->opts.len_code == 3) {
+        if (fine_lim == 8) {
+            static const uint8_t cost_last_1_8[] = {0, 2, 4, 4, 6, 6, 6, 6, 8};
+            int fine = L < 8 ? L : 8;
+            for (int l = 1; l <= fine; l++)
+                u_relax_fast(d, i + (uint32_t)l, off, cost + (int)cost_last_1_8[l], sref, um);
+            if (L < 9)
                 return;
+            for (int k = 4; k < 31; k++) {
+                int h = (int)((1u << k) - 1u);
+                int end = L < h ? L : h;
+                u_relax_fast(d, i + (uint32_t)end, off, cost + 2 * k, sref, um);
+                if (L <= h)
+                    return;
+            }
+            return;
         }
-        return;
+        if (fine_lim == 0) {
+            for (int k = 1; k < 31; k++) {
+                int h = (int)((1u << k) - 1u);
+                int end = L < h ? L : h;
+                u_relax_fast(d, i + (uint32_t)end, off, cost + 2 * k, sref, um);
+                if (L <= h)
+                    return;
+            }
+            return;
+        }
     }
-    int fine = L < f->opts.ultra_fine ? L : f->opts.ultra_fine;
+    int fine = L < fine_lim ? L : fine_lim;
     for (int l = 1; l <= fine; l++)
-        u_relax_fast(d, i + (uint32_t)l, off, cost + u_cost_last(l), sref, um);
+        u_relax_fast(d, i + (uint32_t)l, off, cost + lz0_cost_last_c(&f->opts, l), sref, um);
     int start = fine + 1;
     while (start <= L) {
         int end = lz0_next_plateau_last_c(&f->opts, start, L);
-        u_relax_fast(d, i + (uint32_t)end, off, cost + u_cost_last(end), sref, um);
+        u_relax_fast(d, i + (uint32_t)end, off, cost + lz0_cost_last_c(&f->opts, end), sref, um);
         start = end + 1;
     }
 }
 
 static void u_emit_new(const lz0_finder *f, u_dp *d, uint32_t i, int L, uint32_t off,
-                       int cost, const u_src_ref *sref, int allow_len2) {
+                       int cost, const u_src_ref *sref, int allow_len2, int exact, int fine_lim) {
     int off_eb = u_off_eb(off);
     int base = cost + 10 + off_eb;
-    int um = f->opts.ultra_margin + off_eb;
-    if (f->opts.len_code == 3 && f->opts.ultra_fine == 8) {
-        int fine = L < 8 ? L : 8;
-        int l = allow_len2 ? 2 : 3;
-        int c3 = base + 3;
-        for (; l <= fine; l++)
-            u_relax_fast(d, i + (uint32_t)l, off, c3, sref, um);
+    int um = exact ? (INT_MAX / 8) : (f->opts.ultra_margin + off_eb);
+    if (f->opts.len_code == 3 && f->opts.offset_lsb_bits == 8 && (fine_lim == 8 || exact)) {
+        if (fine_lim >= 8) {
+            int fine = L < 8 ? L : 8;
+            int l = allow_len2 ? 2 : 3;
+            int c3 = base + 3;
+            for (; l <= fine; l++)
+                u_relax_fast(d, i + (uint32_t)l, off, c3, sref, um);
+        } else {
+            u_relax_fast(d, i + (uint32_t)(L < 8 ? L : 8), off, base + 3, sref, um);
+        }
         if (L < 9)
             return;
         u_relax_fast(d, i + 9u, off, base + 4, sref, um);
@@ -701,18 +711,19 @@ static void u_emit_new(const lz0_finder *f, u_dp *d, uint32_t i, int L, uint32_t
         }
         return;
     }
-    int fine = L < f->opts.ultra_fine ? L : f->opts.ultra_fine;
+    int fine = L < fine_lim ? L : fine_lim;
     for (int l = 2; l <= fine; l++) {
         if (l == 2 && !allow_len2)
             continue;
         u_relax_fast(d, i + (uint32_t)l, off, base + u_len_new(l), sref, um);
     }
     int start = fine + 1;
-    if (start < 2)
-        start = 2;
+    if (start < (allow_len2 ? 2 : 3))
+        start = allow_len2 ? 2 : 3;
     while (start <= L) {
         int end = lz0_next_plateau_new_c(&f->opts, start, L);
-        u_relax_fast(d, i + (uint32_t)end, off, base + u_len_new(end), sref, um);
+        u_relax_fast(d, i + (uint32_t)end, off,
+                     cost + lz0_cost_new_c(&f->opts, (int)off, end), sref, um);
         start = end + 1;
     }
 }
@@ -760,13 +771,12 @@ static void u_free(u_dp *d) {
     free(d->bt);
 }
 
-int lz0_parse_ultra(lz0_finder *f, lz0_toklist *tl) {
+static int u_dp_run(lz0_finder *f, lz0_toklist *tl, int K, int exact) {
     uint32_t n = f->n;
     if (n == 0)
         return -1;
     if (n > U_POS_MASK)
-        return lz0_parse_sdp(f, tl);
-    int K = lz0_ultra_states_for_c(&f->opts, n);
+        return -1;
     u_dp d;
     memset(&d, 0, sizeof(d));
     d.n = n;
@@ -774,13 +784,13 @@ int lz0_parse_ultra(lz0_finder *f, lz0_toklist *tl) {
     d.use_ht = (K > 32 && K <= 128);
     d.bt_free = U_BT_NIL;
 
-    int t_shifts[3] = {3, 5, K <= 128 ? 7 : 8};
+    int t_shifts[3] = {3, 5, K <= 64 ? 6 : K <= 128 ? 7 : 8};
     for (int t = 0; t < 3; t++) {
         d.tiers[t].shift = t_shifts[t];
         d.tiers[t].cap = 1 << t_shifts[t];
         d.tiers[t].free_head = NULL;
         size_t base = sizeof(u_row_hdr) + ((size_t)12u << t_shifts[t]);
-        size_t extra = (t == 1) ? 32u : (t == 2) ? sizeof(u_tier2_extra) : 0u;
+        size_t extra = (t == 1 || (t == 2 && !d.use_ht)) ? 32u : (t == 2) ? sizeof(u_tier2_extra) : 0u;
         d.tiers[t].stride = (base + extra + 7u) & ~(size_t)7u;
     }
 
@@ -813,12 +823,19 @@ int lz0_parse_ultra(lz0_finder *f, lz0_toklist *tl) {
     d.lim[0].best = 0;
 
     lz0_match cands[64];
-    const int lit1 = 10; /* u_cost_lit(1) = 1 + elias(1) + 8 */
+    const int is_len3 = (f->opts.len_code == 3);
+    const int lit1 = is_len3 ? 10 : lz0_cost_literal_c(&f->opts, 1);
     const unsigned char *in = f->in;
     const int margin = f->opts.ultra_margin;
-    const int always_len2 = (f->opts.len2_max_off <= 0);
+    const int always_len2 = !exact && (f->opts.len2_max_off <= 0);
     const int has_census = (f->census != NULL);
     const int full_tier = (K > 32) ? 2 : (K > 8) ? 1 : 0;
+    const int use_inj = !exact && f->opts.ultra_inject;
+    const int fine_lim = exact ? ((f->opts.sdp_fine_matches == 1 ||
+                                   (f->opts.sdp_fine_matches == 2 && f->num_strides == 0))
+                                      ? 8
+                                      : 0)
+                               : f->opts.ultra_fine;
     uint32_t anchor[256];
 
     for (uint32_t i = 0; i < n; i++) {
@@ -858,23 +875,26 @@ int lz0_parse_ultra(lz0_finder *f, lz0_toklist *tl) {
             uint32_t key = rkey_i[s];
             uint32_t off = key & ~U_LIT_FLAG;
             int cost = rcost_i[s];
-            int um = u_margin(off, margin);
-            if (cost > row_best + um)
+            int um = exact ? (INT_MAX / 8) : u_margin(off, margin);
+            if (!exact && cost > row_best + um)
                 continue;
             if (b < 0 || cost < rcost_i[b])
                 b = s;
             uint32_t orig_bt = rbt_i[s];
             if (!(key & U_LIT_FLAG)) {
                 int lcost = cost + lit1;
-                if (lcost <= d.lim[i + 1].best + um) {
+                if (exact || lcost <= d.lim[i + 1].best + um) {
                     u_src_ref sref = {i, key, orig_bt, i, &anchor[s]};
                     u_relax_um(&d, i + 1, off | U_LIT_FLAG, lcost, &sref, um, 1);
                 }
             } else {
                 uint32_t opos = bt_pos(&d, orig_bt);
-                int ocost = cost - u_cost_lit((int)(i - opos));
-                int lcost = ocost + u_cost_lit((int)(i + 1 - opos));
-                if (lcost <= d.lim[i + 1].best + um) {
+                int prev_lit = is_len3 ? u_cost_lit((int)(i - opos))
+                                       : lz0_cost_literal_c(&f->opts, (int)(i - opos));
+                int next_lit = is_len3 ? u_cost_lit((int)(i + 1 - opos))
+                                       : lz0_cost_literal_c(&f->opts, (int)(i + 1 - opos));
+                int lcost = (cost - prev_lit) + next_lit;
+                if (exact || lcost <= d.lim[i + 1].best + um) {
                     u_src_ref lit_ref = {i, key, orig_bt, opos, NULL};
                     u_relax_um(&d, i + 1, key, lcost, &lit_ref, um, 1);
                 }
@@ -893,7 +913,7 @@ int lz0_parse_ultra(lz0_finder *f, lz0_toklist *tl) {
                         L = max_left;
                     if (L >= 1) {
                         u_src_ref m_ref = {i, key, orig_bt, i, &anchor[s]};
-                        u_emit_last(f, &d, i, L, off, cost, &m_ref, um);
+                        u_emit_last(f, &d, i, L, off, cost, &m_ref, um, fine_lim);
                     }
                 }
             }
@@ -904,7 +924,7 @@ int lz0_parse_ultra(lz0_finder *f, lz0_toklist *tl) {
             u_free(&d);
             return -1;
         }
-        if (f->opts.ultra_inject && i > 0 && b >= 0 && max_left >= 2 && nc < 64) {
+        if (use_inj && i > 0 && b >= 0 && max_left >= 2 && nc < 64) {
             uint32_t cur16 = lz0_ld16(in + i);
             uint32_t inj_off[8];
             int32_t inj_cost[8];
@@ -989,7 +1009,7 @@ int lz0_parse_ultra(lz0_finder *f, lz0_toklist *tl) {
                     src = b2;
                 }
                 u_src_ref nref = {i, rkey_i[src], rbt_i[src], i, &anchor[src]};
-                u_emit_new(f, &d, i, L, off, rcost_i[src], &nref, l2ok);
+                u_emit_new(f, &d, i, L, off, rcost_i[src], &nref, l2ok, exact, fine_lim);
                 if (d.oom)
                     break;
             }
@@ -1068,4 +1088,21 @@ int lz0_parse_ultra(lz0_finder *f, lz0_toklist *tl) {
     f->ultra_peak_ram = d.alloc_bytes;
     u_free(&d);
     return 0;
+}
+
+int lz0_parse_ultra(lz0_finder *f, lz0_toklist *tl) {
+    if (f->n > U_POS_MASK)
+        return lz0_parse_sdp(f, tl);
+    return u_dp_run(f, tl, lz0_ultra_states_for_c(&f->opts, f->n), 0);
+}
+
+int lz0_parse_ultra_sdp(lz0_finder *f, lz0_toklist *tl) {
+    int K = f->max_states > 0 ? f->max_states : 2;
+    if (K > 32)
+        K = 32;
+    if (K > 16 && f->n > 512 * 1024)
+        K = 16;
+    if (K > 8 && f->n > 2048 * 1024)
+        K = 8;
+    return u_dp_run(f, tl, K, 1);
 }

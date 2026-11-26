@@ -159,21 +159,38 @@ int lz0_next_plateau_lit(int len, int max_len) {
     return lz0_next_plateau_lit_c(NULL, len, max_len);
 }
 
+static int finder_hash_bits(const lz0_config *cfg, uint32_t n) {
+    int sa_win = cfg ? cfg->sa_win : lz0_sa_win;
+    if (sa_win < 16)
+        return LZ0_HASH_BITS;
+    int hb = 11;
+    uint32_t lim = n + (n >> 1);
+    while (hb < LZ0_HASH_BITS && (1u << (hb + 1)) <= lim)
+        hb++;
+    return hb;
+}
+
 size_t lz0_ram_finder_c(const lz0_config *cfg, uint32_t n, int jump_levels) {
     size_t ram = 0;
     int sa_hybrid = cfg ? cfg->sa_hybrid : lz0_sa_hybrid;
     int sa_win = cfg ? cfg->sa_win : lz0_sa_win;
     int sa_sample = cfg ? cfg->sa_sample : lz0_sa_sample;
     int sa_lcp = cfg ? cfg->sa_lcp : lz0_sa_lcp;
+    int hash4_probe = cfg ? cfg->hash4_probe : lz0_hash4_probe;
+    int bt_depth = cfg ? cfg->bt_depth : 0;
     int need_hash = (sa_hybrid != 0) || (sa_win <= 0);
     int need_sa = (sa_win > 0);
     if (need_hash) {
-        if (jump_levels < 0)
-            jump_levels = 0;
-        if (jump_levels > LZ0_JUMP_LEVELS)
-            jump_levels = LZ0_JUMP_LEVELS;
-        ram += (size_t)n * sizeof(uint32_t) * (1u + (uint32_t)jump_levels) +
-               (size_t)LZ0_HASH_SIZE * sizeof(uint32_t);
+        size_t hsz = (size_t)1u << finder_hash_bits(cfg, n);
+        int jslots = 0;
+        if (jump_levels > 0) {
+            int max_s = (n < 262144u) ? 3 : 4;
+            jslots = jump_levels < max_s ? jump_levels : max_s;
+        }
+        ram += (size_t)n * sizeof(uint32_t) * (1u + (uint32_t)jslots) +
+               hsz * sizeof(uint32_t);
+        if (hash4_probe)
+            ram += hsz * sizeof(uint32_t);
     }
     if (need_sa) {
         int samp = sa_sample > 0 ? sa_sample : 1;
@@ -185,6 +202,17 @@ size_t lz0_ram_finder_c(const lz0_config *cfg, uint32_t n, int jump_levels) {
             if (sa_lcp)
                 ram += (size_t)n * sizeof(uint32_t);
         }
+    }
+    if (bt_depth > 0) {
+        int bhb = 11;
+        int max_bhb = (n < 262144u) ? 16 : 21;
+        while (bhb < max_bhb && (1u << bhb) < n)
+            bhb++;
+        int bh2b = 11;
+        while (bh2b < 16 && (1u << bh2b) < n)
+            bh2b++;
+        ram += (size_t)n * 2u * sizeof(uint32_t) +
+               (((size_t)1u << bhb) + ((size_t)1u << bh2b)) * sizeof(uint32_t);
     }
     return ram;
 }
@@ -200,7 +228,11 @@ size_t lz0_ram_sdp(uint32_t n, int k) {
         k = 32;
     if (k == 2) /* K = 2 parser: 12-byte AoS states (key, cost, prev_pos|slot) + live count */
         return (size_t)(n + 1) * 2u * 12u + (size_t)(n + 1);
-    /* generic parser: 13-byte SoA states (key, cost, prev_pos, prev_slot)
-     * + live count, cached worst slot and 64-bit key filter per position */
+    if (n <= 0x00ffffffu) {
+        /* Sparse slab-backed DP (lz0_parse_ultra_sdp): 16 B/pos index + active rows */
+        size_t active_est = (size_t)n < 512u ? (size_t)n : 512u;
+        return ((size_t)n + 1) * 16u + active_est * ((size_t)k * 12u + 16u);
+    }
+    /* generic parser (>16 MiB fallback): 13-byte SoA states + metadata */
     return (size_t)(n + 1) * (size_t)k * 13u + (size_t)(n + 1) * 10u;
 }

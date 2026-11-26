@@ -70,6 +70,9 @@ typedef struct {
     int score_k;
     int max_states;
     int jump_levels;     /* skip-list depth (0 = plain prev[] walks) */
+    int jmp_slots;       /* words per byte in jmp[] (compact stride table) */
+    int hash_bits;       /* dynamic log2 table size for head/head3/head4 */
+    int hash_shift;      /* 32 - hash_bits */
     uint64_t jmp_walked; /* prev[] links walked by multi-step walks while jmp == NULL */
     uint32_t last_insert;
     uint32_t rle_start;
@@ -90,6 +93,7 @@ typedef struct {
     uint32_t bt_next;
     int bt_depth;
     int bt_hbits;
+    int bt_h2bits;
     int kc_score[64];
     /* Mirror of out[i].offset for the current candidate list (contiguous,
      * for vector search) and cached index of the worst slot (-1 = stale).
@@ -191,6 +195,7 @@ lz0_token *lz0_toklist_extend(lz0_toklist *tl, uint32_t m);
 int lz0_parse_greedy(lz0_finder *f, lz0_toklist *tl);
 int lz0_parse_sdp(lz0_finder *f, lz0_toklist *tl);
 int lz0_parse_ultra(lz0_finder *f, lz0_toklist *tl);
+int lz0_parse_ultra_sdp(lz0_finder *f, lz0_toklist *tl);
 extern int lz0_ultra_states;
 extern size_t lz0_ultra_budget;
 int lz0_ultra_states_for(uint32_t n);
@@ -317,6 +322,14 @@ typedef struct {
 
 extern lz0_stream_census *lz0_stream_census_out;
 extern int lz0_legacy_single_window_scan;
+
+typedef struct {
+    uint16_t code;
+    uint16_t inv_code;
+    uint8_t nbits;
+} lz0_elias_lut_t;
+
+extern const lz0_elias_lut_t lz0_elias_lut[256];
 
 int lz0_emit(const unsigned char *in, uint32_t n, const lz0_toklist *tl,
              unsigned char **out, size_t *out_sz, lz0_bitacct *acct);

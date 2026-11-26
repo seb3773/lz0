@@ -89,6 +89,8 @@ static LZ0_ALWAYS_INLINE void sa_ref_core(lz0_finder *f, uint32_t pos, int minm,
                                             lz0_sdp_census *cen, const int with_cen,
                                             const int with_pf) {
     (void)with_pf; /* unused when LZ0_SA_PF_K == 0 */
+    if (f->opts.sa_win <= 0 || !f->sa || !f->rank)
+        return;
     uint32_t n = f->n;
     int win = f->sa_win;
     uint32_t qpos = pos;
@@ -104,7 +106,7 @@ static LZ0_ALWAYS_INLINE void sa_ref_core(lz0_finder *f, uint32_t pos, int minm,
     int ns = (int)f->sa_n;
     int accL = INT_MAX;
     int accR = INT_MAX;
-    int use_lcp = (f->opts.sa_lcp && f->lcp && f->sa_sample <= 1);
+    int use_lcp = (f->opts.sa_lcp && f->lcp && f->sa_sample <= 1 && !f->opts.sa_multiscale);
     int adapt = f->opts.sa_adapt;
     int ms = f->opts.sa_multiscale;
     int stop_at = 0;

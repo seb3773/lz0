@@ -133,24 +133,24 @@ void lz0_config_level(lz0_config *cfg, int level) {
         // Level 9: Ultra maximal compression (dedicated ultra parser)
         cfg->min_match = 2;
         cfg->max_chain = 64;
-        cfg->max_candidates = 48;
+        cfg->max_candidates = 32;
         cfg->parser = LZ0_PARSE_ULTRA;
         cfg->score_k = 8;
         cfg->max_states = 32;
         cfg->jump_levels = LZ0_SKIP_LEVELS_HIGH;
         cfg->bt_depth = 32;
         cfg->sa_win = 128;
-        cfg->sa_multiscale = 1;
-        cfg->sa_adapt = 0;
+        cfg->sa_multiscale = 0;
+        cfg->sa_adapt = 1;
         cfg->sdp_fine_matches = 1;
         cfg->deep_probe = 4;
         cfg->hash4_probe = 1;
         cfg->len2_max_off = 0;
         cfg->rle_tail = 64;
-        cfg->ultra_states = 0;
-        cfg->ultra_margin = 32;
+        cfg->ultra_states = 64;
+        cfg->ultra_margin = 24;
         cfg->ultra_fine = 8;
-        cfg->ultra_inject = 1;
+        cfg->ultra_inject = 0;
     }
 }
 
@@ -229,13 +229,19 @@ typedef struct {
     size_t index;
     size_t cap;
     size_t bit_index;
-    unsigned int bit_mask;
+    int bit_pos; /* bits still free in active control byte: 8 down to 0 */
+    uint8_t cur_byte;
     int backtrack;
     uint32_t n_lit;
     uint32_t n_last;
     uint32_t n_new;
     lz0_bitacct acct;
 } lz0_dwr_t;
+
+typedef struct {
+    uint32_t p0;
+    uint32_t p1;
+} lz0_l1_slot;
 
 static inline int l1_clz32(uint32_t v) {
 #if defined(__GNUC__) || defined(__clang__)
@@ -248,6 +254,35 @@ static inline int l1_clz32(uint32_t v) {
     }
     return n;
 #endif
+}
+
+static inline int l1_ctz64(uint64_t v) {
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_ctzll(v);
+#else
+    int n = 0;
+    while ((v & 1ull) == 0ull) {
+        v >>= 1;
+        n++;
+    }
+    return n;
+#endif
+}
+
+static inline int l1_matchlen(const unsigned char *a, const unsigned char *b, int max) {
+    int n = 0;
+    while (n + 8 <= max) {
+        uint64_t x, y;
+        memcpy(&x, a + n, 8);
+        memcpy(&y, b + n, 8);
+        uint64_t d = x ^ y;
+        if (d)
+            return n + (l1_ctz64(d) >> 3);
+        n += 8;
+    }
+    while (n < max && a[n] == b[n])
+        n++;
+    return n;
 }
 
 static int l1_ensure(lz0_dwr_t *w, size_t need) {
@@ -266,41 +301,64 @@ static inline void l1_byte(lz0_dwr_t *w, unsigned char v) {
     w->data[w->index++] = v;
 }
 
-static inline void l1_bit(lz0_dwr_t *w, int v, int cat) {
+static inline void l1_bits(lz0_dwr_t *w, uint32_t code, int nbits, int cat) {
     if (cat == 0)
-        w->acct.bits_decision++;
+        w->acct.bits_decision += (uint64_t)nbits;
     else if (cat == 1)
-        w->acct.bits_elias_len++;
+        w->acct.bits_elias_len += (uint64_t)nbits;
     else if (cat == 2)
-        w->acct.bits_offset++;
+        w->acct.bits_offset += (uint64_t)nbits;
     if (w->backtrack) {
-        if (v && w->index > 0)
+        if (((code >> (nbits - 1)) & 1u) && w->index > 0)
             w->data[w->index - 1u] |= 1u;
         w->backtrack = 0;
+        if (--nbits == 0)
+            return;
+        code &= (1u << nbits) - 1u;
+    }
+    if (nbits <= w->bit_pos) {
+        w->bit_pos -= nbits;
+        w->cur_byte |= (uint8_t)(code << w->bit_pos);
+        w->data[w->bit_index] = w->cur_byte;
         return;
     }
-    if (!w->bit_mask) {
-        w->bit_mask = 128u;
-        w->bit_index = w->index;
-        l1_byte(w, 0);
+    if (w->bit_pos > 0) {
+        int sh = nbits - w->bit_pos;
+        w->data[w->bit_index] = (uint8_t)(w->cur_byte | (code >> sh));
+        nbits = sh;
     }
-    if (v)
-        w->data[w->bit_index] |= (unsigned char)w->bit_mask;
-    w->bit_mask >>= 1;
+    while (nbits >= 8) {
+        nbits -= 8;
+        w->bit_index = w->index;
+        w->data[w->index++] = (uint8_t)(code >> nbits);
+    }
+    if (nbits == 0) {
+        w->bit_pos = 0;
+        return;
+    }
+    w->bit_index = w->index;
+    w->data[w->index++] = 0;
+    w->bit_pos = 8 - nbits;
+    w->cur_byte = (uint8_t)(code << w->bit_pos);
+    w->data[w->bit_index] = w->cur_byte;
 }
 
 static inline void l1_elias(lz0_dwr_t *w, uint32_t value, int invert, int cat) {
+    if (value < 256u) {
+        const lz0_elias_lut_t *e = &lz0_elias_lut[value];
+        l1_bits(w, invert ? e->inv_code : e->code, e->nbits, cat);
+        return;
+    }
     int hi = 31 - l1_clz32(value);
     for (int b = hi - 1; b >= 0; b--) {
-        int bit = (int)((value >> b) & 1u);
-        l1_bit(w, 0, cat);
-        l1_bit(w, invert ? !bit : bit, cat);
+        uint32_t bit = ((value >> b) & 1u) ^ (uint32_t)(invert != 0);
+        l1_bits(w, bit, 2, cat);
     }
-    l1_bit(w, 1, cat);
+    l1_bits(w, 1u, 1, cat);
 }
 
 static inline void l1_emit_lit(lz0_dwr_t *w, const unsigned char *p, uint32_t L) {
-    l1_bit(w, 0, 0);
+    l1_bits(w, 0u, 1, 0);
     l1_elias(w, L, 0, 1);
     memcpy(w->data + w->index, p, L);
     w->index += L;
@@ -309,14 +367,16 @@ static inline void l1_emit_lit(lz0_dwr_t *w, const unsigned char *p, uint32_t L)
 }
 
 static inline void l1_emit_last(lz0_dwr_t *w, uint32_t L) {
-    l1_bit(w, 0, 0);
+    l1_bits(w, 0u, 1, 0);
     l1_elias(w, L, 0, 1);
     w->n_last++;
 }
 
 static inline void l1_emit_new(lz0_dwr_t *w, uint32_t off, uint32_t L) {
-    l1_bit(w, 1, 0);
-    l1_bit(w, 1, 2);
+    l1_bits(w, 3u, 2, 0); /* 1 decision + 1 offset present (acct split below) */
+    /* Adjust per-category bit split while emitting via single multi-bit write */
+    w->acct.bits_decision -= 1;
+    w->acct.bits_offset += 1;
     uint32_t msb = ((off - 1u) >> 8) + 1u;
     uint32_t rem = (off - 1u) & 255u;
     l1_elias(w, msb, 1, 2);
@@ -325,14 +385,9 @@ static inline void l1_emit_new(lz0_dwr_t *w, uint32_t off, uint32_t L) {
     w->backtrack = 0;
     uint32_t v = L - 1u;
     if (v <= 7u) {
-        uint32_t x = v - 1u;
-        l1_bit(w, (int)((x >> 2) & 1u), 1);
-        l1_bit(w, (int)((x >> 1) & 1u), 1);
-        l1_bit(w, (int)(x & 1u), 1);
+        l1_bits(w, v - 1u, 3, 1);
     } else {
-        l1_bit(w, 1, 1);
-        l1_bit(w, 1, 1);
-        l1_bit(w, 1, 1);
+        l1_bits(w, 7u, 3, 1);
         l1_elias(w, v - 7u, 0, 1);
     }
     w->n_new++;
@@ -356,9 +411,32 @@ static inline uint32_t l1_h3(const unsigned char *p, int shift) {
     return (v * 2654435761u) >> shift;
 }
 
+static inline void l1_ht_push(lz0_l1_slot *ht, const unsigned char *in, uint32_t pos, int shift) {
+    uint32_t hv = l1_h3(in + pos, shift);
+    ht[hv].p1 = ht[hv].p0;
+    ht[hv].p0 = pos;
+}
+
+static inline uint32_t l1_insert_to(lz0_l1_slot *ht, const unsigned char *in, uint32_t n,
+                                    uint32_t ins, uint32_t target, int shift) {
+    const uint32_t cap = 12u;
+    if (target - ins > cap) {
+        for (uint32_t k = 0; k < 6u && ins + k + 2u < n; k++)
+            l1_ht_push(ht, in, ins + k, shift);
+        for (uint32_t k = 6u; k >= 1u; k--) {
+            if (target >= k && target - k >= ins && target - k + 2u < n)
+                l1_ht_push(ht, in, target - k, shift);
+        }
+        return target;
+    }
+    for (; ins < target && ins + 2u < n; ins++)
+        l1_ht_push(ht, in, ins, shift);
+    return ins;
+}
+
 static int l1_win_high_entropy(const unsigned char *in, uint32_t len) {
     uint32_t counts[256] = {0};
-    uint32_t step = len > 16384u ? (len >> 14) : 1u;
+    uint32_t step = len > 2048u ? (len >> 11) : 1u;
     uint32_t sample = 0;
     for (uint32_t i = 0; i < len; i += step) {
         counts[in[i]]++;
@@ -384,88 +462,80 @@ static inline int l1_better(int bk, int bl, int bc, int L, int c) {
     return lhs < rhs || (lhs == rhs && L > bl);
 }
 
+static inline void l1_check_pos(const unsigned char *in, uint32_t i, int max_left,
+                                uint32_t p, uint32_t w0, uint32_t last_off, uint32_t len2_lim,
+                                int min_len, int *bk, int *bl, int *bc, uint32_t *bo) {
+    uint32_t off = i - p;
+    if (off == last_off)
+        return;
+    if (*bk >= 0 && (*bl >= max_left || in[p + *bl] != in[i + *bl]))
+        return;
+    if (lz0_ld16(in + p) != w0)
+        return;
+    int L = 2 + l1_matchlen(in + i + 2, in + p + 2, max_left - 2);
+    if (L < min_len)
+        return;
+    if (L == 2 && (off > len2_lim || off > 256u))
+        return;
+    if (L == 3 && off > 7936u)
+        return;
+    int c = l1_cost_new(off, (uint32_t)L);
+    if ((L << 3) > c && l1_better(*bk, *bl, *bc, L, c)) {
+        *bk = 2;
+        *bl = L;
+        *bo = off;
+        *bc = c;
+    }
+}
+
 static void l1_find_best(const unsigned char *in, uint32_t n, uint32_t i,
-                         const uint32_t *h2, int shift, const uint32_t mru[4], int nmru,
+                         const lz0_l1_slot *ht, int shift, const uint32_t mru[4], int nmru,
                          uint32_t last_off, int allow_last, uint32_t len2_lim,
                          int *kind_out, uint32_t *len_out, uint32_t *off_out) {
     int max_left = (int)(n - i);
-    int bk = -1, bl = 0, bc = 0x3fffffff, bs = -1;
+    int bk = -1, bl = 0, bc = 0x3fffffff;
     uint32_t bo = 0;
     uint32_t w0 = lz0_ld16(in + i);
 
     if (allow_last && last_off >= 1u && last_off <= i && in[i] == in[i - last_off]) {
-        int L = lz0_simd_matchlen(in + i, in + i - last_off, max_left);
+        int L = l1_matchlen(in + i, in + i - last_off, max_left);
         int c = l1_cost_last((uint32_t)L);
-        int sav = (L << 3) - c;
-        if (sav > 0) {
+        if ((L << 3) > c) {
             bk = 1;
             bl = L;
             bo = last_off;
             bc = c;
-            bs = sav;
         }
     }
     if (i + 2u < n) {
-        uint32_t hv = l1_h3(in + i, shift);
-        for (int slot = 0; slot < 2; slot++) {
-            uint32_t p = h2[(size_t)hv * 2u + (uint32_t)slot];
-            if (p >= i)
+        lz0_l1_slot sl = ht[l1_h3(in + i, shift)];
+        if (sl.p0 < i)
+            l1_check_pos(in, i, max_left, sl.p0, w0, last_off, len2_lim, 2, &bk, &bl, &bc, &bo);
+        if (sl.p1 < i)
+            l1_check_pos(in, i, max_left, sl.p1, w0, last_off, len2_lim, 2, &bk, &bl, &bc, &bo);
+    }
+    if (!allow_last) {
+        for (int k = 0; k < nmru; k++) {
+            uint32_t off = mru[k];
+            if (off == 0u || off > i)
                 continue;
-            uint32_t off = i - p;
-            if (off == last_off)
-                continue;
-            if (lz0_ld16(in + p) == w0) {
-                int L = 2 + lz0_simd_matchlen(in + i + 2, in + p + 2, max_left - 2);
-                if (L == 2 && off > len2_lim)
-                    continue;
-                int c = l1_cost_new(off, (uint32_t)L);
-                int sav = (L << 3) - c;
-                if (sav > 0 && l1_better(bk, bl, bc, L, c)) {
-                    bk = 2;
-                    bl = L;
-                    bo = off;
-                    bc = c;
-                    bs = sav;
-                }
-            }
+            l1_check_pos(in, i, max_left, i - off, w0, last_off, len2_lim, 3, &bk, &bl, &bc, &bo);
         }
     }
-    for (int k = 0; k < nmru; k++) {
-        uint32_t off = mru[k];
-        if (off == 0u || off > i || off == last_off)
-            continue;
-        uint32_t p = i - off;
-        if (lz0_ld16(in + p) == w0) {
-            int L = 2 + lz0_simd_matchlen(in + i + 2, in + p + 2, max_left - 2);
-            if (L < 3)
-                continue;
-            int c = l1_cost_new(off, (uint32_t)L);
-            int sav = (L << 3) - c;
-            if (sav > 0 && l1_better(bk, bl, bc, L, c)) {
-                bk = 2;
-                bl = L;
-                bo = off;
-                bc = c;
-                bs = sav;
-            }
-        }
-    }
-    if (bs <= 0)
-        bk = -1;
     *kind_out = bk;
     *len_out = (uint32_t)bl;
     *off_out = bo;
 }
 
 static inline uint32_t l1_sync_win(const unsigned char *in, uint32_t n, uint32_t i,
-                                   uint32_t *cur_win, uint32_t cur_lim) {
-    uint32_t widx = i >> LZ0_WIN_SHIFT;
-    if (widx != *cur_win) {
-        *cur_win = widx;
+                                   uint32_t *next_win, uint32_t cur_lim) {
+    if (i >= *next_win) {
+        uint32_t widx = i >> LZ0_WIN_SHIFT;
         uint32_t off = widx << LZ0_WIN_SHIFT;
         uint32_t wlen = n - off;
         if (wlen > LZ0_WIN_SIZE)
             wlen = LZ0_WIN_SIZE;
+        *next_win = off + LZ0_WIN_SIZE;
         return (wlen >= 1024u && l1_win_high_entropy(in + off, wlen)) ? 32u : 256u;
     }
     return cur_lim;
@@ -481,30 +551,30 @@ static inline void l1_mru_push(uint32_t mru[4], int *nmru, uint32_t off) {
     }
 }
 
-/* Streaming low-RAM hash-greedy encoder for -1: replaces prev[n] + toklist
- * with a bounded 2-slot hash bucket array and direct bit emission (~1.0..3.95 B/B
- * peak heap instead of ~8..149 B/B). */
+/* Streaming low-RAM hash-greedy encoder for -1: bounded 2-slot hash buckets,
+ * multi-bit LUT bitwriter, capped match-interior inserts, and deferred MRU
+ * chaining (~1.0..2.4 B/B peak heap, >=1.5x faster than bytewise emission). */
 static int compress_fast_greedy(const unsigned char *in, uint32_t n,
                                 unsigned char **out, size_t *out_sz,
                                 const lz0_config *cfg, lz0_stats *stats, double t0) {
     lz0_simd_init();
     int hb = 10;
-    while (hb < 17 && ((size_t)1u << (hb + 1)) * 8u <= (size_t)n * 3u)
+    while (hb < 15 && ((size_t)1u << (hb + 1)) * 8u <= (size_t)n * 3u)
         hb++;
     uint32_t H = 1u << hb;
     int shift = 32 - hb;
-    size_t hbytes = (size_t)H * 2u * sizeof(uint32_t);
-    uint32_t *h2 = (uint32_t *)malloc(hbytes);
-    if (!h2)
+    size_t hbytes = (size_t)H * sizeof(lz0_l1_slot);
+    lz0_l1_slot *ht = (lz0_l1_slot *)malloc(hbytes);
+    if (!ht)
         return -1;
-    memset(h2, 0xff, hbytes);
+    memset(ht, 0xff, hbytes);
 
     lz0_dwr_t w;
     memset(&w, 0, sizeof(w));
     w.cap = (size_t)n + 128u;
     w.data = (unsigned char *)malloc(w.cap);
     if (!w.data) {
-        free(h2);
+        free(ht);
         return -1;
     }
     w.backtrack = 1;
@@ -512,7 +582,7 @@ static int compress_fast_greedy(const unsigned char *in, uint32_t n,
 
     double t1 = now_ms();
     uint32_t i = 0, last_off = LZ0_INITIAL_OFFSET, ins = 0;
-    uint32_t cur_win = UINT32_MAX, len2_lim = 256u;
+    uint32_t next_win = 0, len2_lim = 256u;
     uint32_t mru[4] = {0, 0, 0, 0};
     int nmru = 0;
 
@@ -520,25 +590,26 @@ static int compress_fast_greedy(const unsigned char *in, uint32_t n,
         uint32_t lit_start = i++;
         uint32_t c_len = 0, c_off = 0;
         int c_kind = -1;
+        uint32_t miss = 0;
         while (i < n) {
-            len2_lim = l1_sync_win(in, n, i, &cur_win, len2_lim);
-            for (; ins < i && ins + 2u < n; ins++) {
-                uint32_t hv = l1_h3(in + ins, shift);
-                h2[(size_t)hv * 2u + 1u] = h2[(size_t)hv * 2u];
-                h2[(size_t)hv * 2u] = ins;
-            }
+            len2_lim = l1_sync_win(in, n, i, &next_win, len2_lim);
+            ins = l1_insert_to(ht, in, n, ins, i, shift);
             if (n - i < 2u) {
                 i++;
                 continue;
             }
-            l1_find_best(in, n, i, h2, shift, mru, nmru, last_off, 1, len2_lim,
+            l1_find_best(in, n, i, ht, shift, mru, nmru, last_off, 1, len2_lim,
                          &c_kind, &c_len, &c_off);
             if (c_kind >= 0)
                 break;
-            i++;
+            uint32_t step = (miss >= 64u) ? 2u : 1u;
+            miss++;
+            i += step;
+            if (i > n)
+                i = n;
         }
         if (l1_ensure(&w, (size_t)(i - lit_start) + 64u) < 0) {
-            free(h2);
+            free(ht);
             free(w.data);
             return -1;
         }
@@ -546,7 +617,7 @@ static int compress_fast_greedy(const unsigned char *in, uint32_t n,
         if (i >= n || c_kind < 0)
             continue;
         if (l1_ensure(&w, 64u) < 0) {
-            free(h2);
+            free(ht);
             free(w.data);
             return -1;
         }
@@ -559,22 +630,18 @@ static int compress_fast_greedy(const unsigned char *in, uint32_t n,
         }
         i += c_len;
         while (i < n && c_kind == 2) {
-            len2_lim = l1_sync_win(in, n, i, &cur_win, len2_lim);
-            for (; ins < i && ins + 2u < n; ins++) {
-                uint32_t hv = l1_h3(in + ins, shift);
-                h2[(size_t)hv * 2u + 1u] = h2[(size_t)hv * 2u];
-                h2[(size_t)hv * 2u] = ins;
-            }
+            len2_lim = l1_sync_win(in, n, i, &next_win, len2_lim);
+            ins = l1_insert_to(ht, in, n, ins, i, shift);
             if (n - i < 2u)
                 break;
             int nk = -1;
             uint32_t nl = 0, no = 0;
-            l1_find_best(in, n, i, h2, shift, mru, nmru, last_off, 0, len2_lim,
+            l1_find_best(in, n, i, ht, shift, mru, nmru, last_off, 0, len2_lim,
                          &nk, &nl, &no);
             if (nk != 2)
                 break;
             if (l1_ensure(&w, 64u) < 0) {
-                free(h2);
+                free(ht);
                 free(w.data);
                 return -1;
             }
@@ -585,13 +652,13 @@ static int compress_fast_greedy(const unsigned char *in, uint32_t n,
         }
     }
     if (l1_ensure(&w, 16u) < 0) {
-        free(h2);
+        free(ht);
         free(w.data);
         return -1;
     }
-    l1_bit(&w, 1, 0);
-    l1_bit(&w, 0, 2);
-    free(h2);
+    l1_bits(&w, 1u, 1, 0);
+    l1_bits(&w, 0u, 1, 2);
+    free(ht);
 
     *out = w.data;
     *out_sz = w.index;
@@ -679,7 +746,8 @@ int lz0_compress(const unsigned char *in, size_t in_sz,
     stats->peak_ram = lz0_ram_finder_c(&f.opts, (uint32_t)in_sz, 0);
     if (f.opts.parser == LZ0_PARSE_SDP) {
         int k = f.opts.max_states > 0 ? f.opts.max_states : 4;
-        stats->peak_ram += lz0_ram_sdp((uint32_t)in_sz, k);
+        if (!(k > 2 && !f.census && in_sz <= 0x00ffffffu))
+            stats->peak_ram += lz0_ram_sdp((uint32_t)in_sz, k);
     }
 
     lz0_toklist tl;
@@ -696,10 +764,11 @@ int lz0_compress(const unsigned char *in, size_t in_sz,
     else
         rc = -1;
     double t2 = now_ms();
-    if (f.opts.parser == LZ0_PARSE_ULTRA)
+    if (f.opts.parser == LZ0_PARSE_ULTRA ||
+        (f.opts.parser == LZ0_PARSE_SDP && f.ultra_peak_ram > 0))
         stats->peak_ram += f.ultra_peak_ram;
     if (f.jmp)
-        stats->peak_ram += (size_t)in_sz * (size_t)f.jump_levels * sizeof(uint32_t);
+        stats->peak_ram += (size_t)in_sz * (size_t)f.jmp_slots * sizeof(uint32_t);
     if (rc < 0 || !lz0_tokens_valid(&tl, (uint32_t)in_sz)) {
         lz0_toklist_free(&tl);
         lz0_finder_free(&f);

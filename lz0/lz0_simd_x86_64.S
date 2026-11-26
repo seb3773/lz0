@@ -1012,6 +1012,171 @@ FUNC(lz0_matchlen_avx2)
         ret
 ENDF(lz0_matchlen_avx2)
 
+/* ------------------------------------------------------------------------
+ * uint64_t lz0_bin40_hits_sse2(const uint8_t *p = rdi, uint32_t w0 = esi,
+ *                              uint32_t pm = edx)
+ * Bitmask b in [0, 40) of positions in lz0_bin_offsets[b] matching
+ * (ld16(p + 256 - off) & (pm & 0xffff)) == (w0 & 0xffff).
+ * Touches only xmm0..xmm5 (Win64 ABI safe).
+ * ---------------------------------------------------------------------- */
+FUNC(lz0_bin40_hits_sse2)
+        andl    $0xffff, %esi
+        andl    $0xffff, %edx
+        movd    %esi, %xmm4
+        pshufd  $0, %xmm4, %xmm4            /* vw0 */
+        movd    %edx, %xmm5
+        pshufd  $0, %xmm5, %xmm5            /* vpm */
+        leaq    .Lb40_rev8(%rip), %rsi
+
+        /* b=0..7 */
+        movdqu  240(%rdi), %xmm0
+        movdqu  224(%rdi), %xmm1
+        pand    %xmm5, %xmm0
+        pand    %xmm5, %xmm1
+        pcmpeqd %xmm4, %xmm0
+        pcmpeqd %xmm4, %xmm1
+        movmskps %xmm0, %ecx                /* b3..0 */
+        movmskps %xmm1, %r8d                /* b7..4 */
+        shll    $4, %ecx
+        orl     %r8d, %ecx
+        movzbl  (%rsi,%rcx), %eax
+
+        /* b=8..15 */
+        movdqu  208(%rdi), %xmm0
+        movdqu  192(%rdi), %xmm1
+        pand    %xmm5, %xmm0
+        pand    %xmm5, %xmm1
+        pcmpeqd %xmm4, %xmm0
+        pcmpeqd %xmm4, %xmm1
+        movmskps %xmm0, %ecx
+        movmskps %xmm1, %r8d
+        shll    $4, %ecx
+        orl     %r8d, %ecx
+        movzbl  (%rsi,%rcx), %ecx
+        shll    $8, %ecx
+        orl     %ecx, %eax
+
+        /* b=16..23 */
+        movdqu  160(%rdi), %xmm0
+        movdqu  176(%rdi), %xmm1
+        shufps  $0x88, %xmm1, %xmm0         /* b19,18,17,16 */
+        movdqu  128(%rdi), %xmm2
+        movdqu  144(%rdi), %xmm3
+        shufps  $0x88, %xmm3, %xmm2         /* b23,22,21,20 */
+        pand    %xmm5, %xmm0
+        pand    %xmm5, %xmm2
+        pcmpeqd %xmm4, %xmm0
+        pcmpeqd %xmm4, %xmm2
+        movmskps %xmm0, %ecx
+        movmskps %xmm2, %r8d
+        shll    $4, %ecx
+        orl     %r8d, %ecx
+        movzbl  (%rsi,%rcx), %ecx
+        shll    $16, %ecx
+        orl     %ecx, %eax
+
+        /* b=24..31 */
+        movdqu  96(%rdi), %xmm0
+        movdqu  112(%rdi), %xmm1
+        shufps  $0x88, %xmm1, %xmm0
+        movdqu  64(%rdi), %xmm2
+        movdqu  80(%rdi), %xmm3
+        shufps  $0x88, %xmm3, %xmm2
+        pand    %xmm5, %xmm0
+        pand    %xmm5, %xmm2
+        pcmpeqd %xmm4, %xmm0
+        pcmpeqd %xmm4, %xmm2
+        movmskps %xmm0, %ecx
+        movmskps %xmm2, %r8d
+        shll    $4, %ecx
+        orl     %r8d, %ecx
+        movzbl  (%rsi,%rcx), %ecx
+        shll    $24, %ecx
+        orl     %ecx, %eax
+
+        /* b=32..39 */
+        movdqu  32(%rdi), %xmm0
+        movdqu  48(%rdi), %xmm1
+        shufps  $0x88, %xmm1, %xmm0
+        movdqu  (%rdi), %xmm2
+        movdqu  16(%rdi), %xmm3
+        shufps  $0x88, %xmm3, %xmm2
+        pand    %xmm5, %xmm0
+        pand    %xmm5, %xmm2
+        pcmpeqd %xmm4, %xmm0
+        pcmpeqd %xmm4, %xmm2
+        movmskps %xmm0, %ecx
+        movmskps %xmm2, %r8d
+        shll    $4, %ecx
+        orl     %r8d, %ecx
+        movzbl  (%rsi,%rcx), %ecx
+        shlq    $32, %rcx
+        orq     %rcx, %rax
+        ret
+ENDF(lz0_bin40_hits_sse2)
+
+/* ------------------------------------------------------------------------
+ * uint64_t lz0_bin40_hits_avx2(const uint8_t *p = rdi, uint32_t w0 = esi,
+ *                              uint32_t pm = edx)
+ * Touches only ymm0..ymm5 (Win64 ABI safe).
+ * ---------------------------------------------------------------------- */
+FUNC(lz0_bin40_hits_avx2)
+        andl    $0xffff, %esi
+        andl    $0xffff, %edx
+        vmovd   %esi, %xmm4
+        vpbroadcastd %xmm4, %ymm4           /* vw0 */
+        vmovd   %edx, %xmm5
+        vpbroadcastd %xmm5, %ymm5           /* vpm */
+
+        vpand   192(%rdi), %ymm5, %ymm0     /* b15..8 */
+        vpand   224(%rdi), %ymm5, %ymm1     /* b7..0 */
+        vpcmpeqd %ymm4, %ymm0, %ymm0
+        vpcmpeqd %ymm4, %ymm1, %ymm1
+        vmovmskps %ymm0, %r8d
+        vmovmskps %ymm1, %r9d
+
+        vmovdqu 128(%rdi), %ymm0
+        vmovdqu 160(%rdi), %ymm1
+        vpsllq  $32, %ymm0, %ymm0
+        vpblendd $0xAA, %ymm0, %ymm1, %ymm0
+        vpand   %ymm5, %ymm0, %ymm0
+        vpcmpeqd %ymm4, %ymm0, %ymm0
+        vmovmskps %ymm0, %r10d              /* b16..23 shuffled */
+
+        vmovdqu 64(%rdi), %ymm2
+        vmovdqu 96(%rdi), %ymm3
+        vpsllq  $32, %ymm2, %ymm2
+        vpblendd $0xAA, %ymm2, %ymm3, %ymm2
+        vpand   %ymm5, %ymm2, %ymm2
+        vpcmpeqd %ymm4, %ymm2, %ymm2
+        vmovmskps %ymm2, %r11d              /* b24..31 shuffled */
+
+        vmovdqu (%rdi), %ymm0
+        vmovdqu 32(%rdi), %ymm1
+        vpsllq  $32, %ymm0, %ymm0
+        vpblendd $0xAA, %ymm0, %ymm1, %ymm0
+        vpand   %ymm5, %ymm0, %ymm0
+        vpcmpeqd %ymm4, %ymm0, %ymm0
+        vmovmskps %ymm0, %ecx               /* b32..39 shuffled */
+
+        vzeroupper
+        leaq    .Lb40_rev8(%rip), %rsi
+        movzbl  (%rsi,%r9), %eax
+        movzbl  (%rsi,%r8), %edx
+        shll    $8, %edx
+        orl     %edx, %eax
+        movzbl  256(%rsi,%r10), %r8d
+        movzbl  256(%rsi,%r11), %r9d
+        shll    $16, %r8d
+        shll    $24, %r9d
+        orl     %r8d, %eax
+        orl     %r9d, %eax
+        movzbl  256(%rsi,%rcx), %ecx
+        shlq    $32, %rcx
+        orq     %rcx, %rax
+        ret
+ENDF(lz0_bin40_hits_avx2)
+
 #if defined(_WIN32)
         .section .rdata,"dr"
 #elif defined(__APPLE__)
@@ -1030,6 +1195,40 @@ ENDF(lz0_matchlen_avx2)
         .rept   8                           /* step 4 */
         .byte   1, 0, 0, 0
         .endr
+.Lb40_rev8:                                 /* bit-reverse 8-bit index */
+        .byte   0,128,64,192,32,160,96,224,16,144,80,208,48,176,112,240
+        .byte   8,136,72,200,40,168,104,232,24,152,88,216,56,184,120,248
+        .byte   4,132,68,196,36,164,100,228,20,148,84,212,52,180,116,244
+        .byte   12,140,76,204,44,172,108,236,28,156,92,220,60,188,124,252
+        .byte   2,130,66,194,34,162,98,226,18,146,82,210,50,178,114,242
+        .byte   10,138,74,202,42,170,106,234,26,154,90,218,58,186,122,250
+        .byte   6,134,70,198,38,166,102,230,22,150,86,214,54,182,118,246
+        .byte   14,142,78,206,46,174,110,238,30,158,94,222,62,190,126,254
+        .byte   1,129,65,193,33,161,97,225,17,145,81,209,49,177,113,241
+        .byte   9,137,73,201,41,169,105,233,25,153,89,217,57,185,121,249
+        .byte   5,133,69,197,37,165,101,229,21,149,85,213,53,181,117,245
+        .byte   13,141,77,205,45,173,109,237,29,157,93,221,61,189,125,253
+        .byte   3,131,67,195,35,163,99,227,19,147,83,211,51,179,115,243
+        .byte   11,139,75,203,43,171,107,235,27,155,91,219,59,187,123,251
+        .byte   7,135,71,199,39,167,103,231,23,151,87,215,55,183,119,247
+        .byte   15,143,79,207,47,175,111,239,31,159,95,223,63,191,127,255
+.Lb40_unshuf:                               /* .Lb40_rev8 + 256 */
+        .byte   0x00,0x08,0x80,0x88,0x04,0x0c,0x84,0x8c,0x40,0x48,0xc0,0xc8,0x44,0x4c,0xc4,0xcc
+        .byte   0x02,0x0a,0x82,0x8a,0x06,0x0e,0x86,0x8e,0x42,0x4a,0xc2,0xca,0x46,0x4e,0xc6,0xce
+        .byte   0x20,0x28,0xa0,0xa8,0x24,0x2c,0xa4,0xac,0x60,0x68,0xe0,0xe8,0x64,0x6c,0xe4,0xec
+        .byte   0x22,0x2a,0xa2,0xaa,0x26,0x2e,0xa6,0xae,0x62,0x6a,0xe2,0xea,0x66,0x6e,0xe6,0xee
+        .byte   0x01,0x09,0x81,0x89,0x05,0x0d,0x85,0x8d,0x41,0x49,0xc1,0xc9,0x45,0x4d,0xc5,0xcd
+        .byte   0x03,0x0b,0x83,0x8b,0x07,0x0f,0x87,0x8f,0x43,0x4b,0xc3,0xcb,0x47,0x4f,0xc7,0xcf
+        .byte   0x21,0x29,0xa1,0xa9,0x25,0x2d,0xa5,0xad,0x61,0x69,0xe1,0xe9,0x65,0x6d,0xe5,0xed
+        .byte   0x23,0x2b,0xa3,0xab,0x27,0x2f,0xa7,0xaf,0x63,0x6b,0xe3,0xeb,0x67,0x6f,0xe7,0xef
+        .byte   0x10,0x18,0x90,0x98,0x14,0x1c,0x94,0x9c,0x50,0x58,0xd0,0xd8,0x54,0x5c,0xd4,0xdc
+        .byte   0x12,0x1a,0x92,0x9a,0x16,0x1e,0x96,0x9e,0x52,0x5a,0xd2,0xda,0x56,0x5e,0xd6,0xde
+        .byte   0x30,0x38,0xb0,0xb8,0x34,0x3c,0xb4,0xbc,0x70,0x78,0xf0,0xf8,0x74,0x7c,0xf4,0xfc
+        .byte   0x32,0x3a,0xb2,0xba,0x36,0x3e,0xb6,0xbe,0x72,0x7a,0xf2,0xfa,0x76,0x7e,0xf6,0xfe
+        .byte   0x11,0x19,0x91,0x99,0x15,0x1d,0x95,0x9d,0x51,0x59,0xd1,0xd9,0x55,0x5d,0xd5,0xdd
+        .byte   0x13,0x1b,0x93,0x9b,0x17,0x1f,0x97,0x9f,0x53,0x5b,0xd3,0xdb,0x57,0x5f,0xd7,0xdf
+        .byte   0x31,0x39,0xb1,0xb9,0x35,0x3d,0xb5,0xbd,0x71,0x79,0xf1,0xf9,0x75,0x7d,0xf5,0xfd
+        .byte   0x33,0x3b,0xb3,0xbb,0x37,0x3f,0xb7,0xbf,0x73,0x7b,0xf3,0xfb,0x77,0x7f,0xf7,0xff
 
 #if defined(__ELF__)
         .section .note.GNU-stack, "", @progbits

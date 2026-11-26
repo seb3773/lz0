@@ -5,18 +5,20 @@
 #include <time.h>
 #include <limits.h>
 
-static inline uint32_t hash3(const unsigned char *p) {
-    return ((uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16)) * 2654435761u >> (32 - LZ0_HASH_BITS);
+static inline uint32_t hash3_s(const unsigned char *p, int shift) {
+    return ((uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16)) * 2654435761u >> shift;
 }
 
-static inline uint32_t hash2(const unsigned char *p) {
-    return ((uint32_t)p[0] | ((uint32_t)p[1] << 8)) * 2654435761u >> (32 - LZ0_HASH_BITS);
+static inline uint32_t hash2_s(const unsigned char *p, int shift) {
+    return ((uint32_t)p[0] | ((uint32_t)p[1] << 8)) * 2654435761u >> shift;
 }
 
-static inline uint32_t hash4(const unsigned char *p) {
+static inline uint32_t hash4_s(const unsigned char *p, int shift) {
     return ((uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
-            ((uint32_t)p[3] << 24)) * 2654435761u >> (32 - LZ0_HASH_BITS);
+            ((uint32_t)p[3] << 24)) * 2654435761u >> shift;
 }
+
+static const int lz0_jmp_strides[4] = {4, 32, 256, 2048};
 
 /* Out-of-line entry point for other translation units; the finder itself
  * calls the inline lz0_simd_matchlen() (8-byte scalar probe, then the
@@ -1078,6 +1080,11 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
         f->jump_levels = LZ0_JUMP_LEVELS;
     if (n < LZ0_SKIP_MIN_INPUT)
         f->jump_levels = 0;
+    f->jmp_slots = 0;
+    if (f->jump_levels > 0) {
+        int max_s = (n < 262144u) ? 3 : 4;
+        f->jmp_slots = f->jump_levels < max_s ? f->jump_levels : max_s;
+    }
     f->jmp_walked = 0;
     f->last_insert = 0;
     f->prev = NULL;
@@ -1096,24 +1103,34 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
         lz0_sa_build_ms = 0;
     int need_hash = (f->opts.sa_hybrid != 0) || (f->opts.sa_win <= 0);
     int need_sa = (f->opts.sa_win > 0);
+    int hb = LZ0_HASH_BITS;
+    if (f->opts.sa_win >= 16) {
+        hb = 11;
+        uint32_t hlim = n + (n >> 1);
+        while (hb < LZ0_HASH_BITS && (1u << (hb + 1)) <= hlim)
+            hb++;
+    }
+    f->hash_bits = hb;
+    f->hash_shift = 32 - hb;
+    size_t hsz = (size_t)1u << hb;
     if (need_hash) {
         f->prev = (uint32_t *)malloc((size_t)n * sizeof(uint32_t));
-        f->head = (uint32_t *)malloc((size_t)LZ0_HASH_SIZE * sizeof(uint32_t));
+        f->head = (uint32_t *)malloc(hsz * sizeof(uint32_t));
         if (f->opts.hash4_probe != 0) {
-            f->head4 = (uint32_t *)malloc((size_t)LZ0_HASH_SIZE * sizeof(uint32_t));
+            f->head4 = (uint32_t *)malloc(hsz * sizeof(uint32_t));
             if (!f->head4) {
                 lz0_finder_free(f);
                 return -1;
             }
-            memset(f->head4, 0xff, (size_t)LZ0_HASH_SIZE * sizeof(uint32_t));
+            memset(f->head4, 0xff, hsz * sizeof(uint32_t));
         }
         if (f->opts.chain_prune == 4) {
-            f->head3 = (uint32_t *)malloc((size_t)LZ0_HASH_SIZE * sizeof(uint32_t));
+            f->head3 = (uint32_t *)malloc(hsz * sizeof(uint32_t));
             if (!f->head3) {
                 lz0_finder_free(f);
                 return -1;
             }
-            memset(f->head3, 0xff, (size_t)LZ0_HASH_SIZE * sizeof(uint32_t));
+            memset(f->head3, 0xff, hsz * sizeof(uint32_t));
         }
         /* The skip list (jmp) is not allocated here: chain_skip() builds it
          * on demand, see skip_activate(). */
@@ -1121,7 +1138,7 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
             lz0_finder_free(f);
             return -1;
         }
-        memset(f->head, 0xff, (size_t)LZ0_HASH_SIZE * sizeof(uint32_t));
+        memset(f->head, 0xff, hsz * sizeof(uint32_t));
     }
     if (need_sa) {
         double t0 = sa_now_ms();
@@ -1150,19 +1167,24 @@ int lz0_finder_init(lz0_finder *f, const unsigned char *in, uint32_t n,
     }
     if (f->opts.bt_depth > 0) {
         f->bt_depth = f->opts.bt_depth;
-        int hb = 16;
-        while (hb < 22 && (1u << hb) < n)
-            hb++;
-        f->bt_hbits = hb;
+        int bhb = 11;
+        int max_bhb = (n < 262144u) ? 16 : 21;
+        while (bhb < max_bhb && (1u << bhb) < n)
+            bhb++;
+        f->bt_hbits = bhb;
+        int bh2b = 11;
+        while (bh2b < 16 && (1u << bh2b) < n)
+            bh2b++;
+        f->bt_h2bits = bh2b;
         f->bt_son = (uint32_t *)malloc((size_t)n * 2u * sizeof(uint32_t));
-        f->bt_head = (uint32_t *)malloc(((size_t)1 << hb) * sizeof(uint32_t));
-        f->bt_head2 = (uint32_t *)malloc((size_t)65536 * sizeof(uint32_t));
+        f->bt_head = (uint32_t *)malloc(((size_t)1 << bhb) * sizeof(uint32_t));
+        f->bt_head2 = (uint32_t *)malloc(((size_t)1 << bh2b) * sizeof(uint32_t));
         if (!f->bt_son || !f->bt_head || !f->bt_head2) {
             lz0_finder_free(f);
             return -1;
         }
-        memset(f->bt_head, 0xff, ((size_t)1 << hb) * sizeof(uint32_t));
-        memset(f->bt_head2, 0xff, (size_t)65536 * sizeof(uint32_t));
+        memset(f->bt_head, 0xff, ((size_t)1 << bhb) * sizeof(uint32_t));
+        memset(f->bt_head2, 0xff, ((size_t)1 << bh2b) * sizeof(uint32_t));
         f->bt_next = 0;
     }
     f->cur_win = UINT32_MAX;
@@ -1291,13 +1313,33 @@ void lz0_finder_free(lz0_finder *f) {
 static int bt_update(lz0_finder *f, uint32_t pos, lz0_match *out, int maxout);
 
 static inline uint32_t hash_at(lz0_finder *f, uint32_t i) {
+    int sh = f->hash_shift;
     if ((f->opts.chain_prune == 3 || f->opts.chain_prune == 4) && i + 3 < f->n)
-        return hash4(f->in + i);
+        return hash4_s(f->in + i, sh);
     if (i + 2 < f->n)
-        return hash3(f->in + i);
+        return hash3_s(f->in + i, sh);
     if (i + 1 < f->n)
-        return hash2(f->in + i);
+        return hash2_s(f->in + i, sh);
     return 0;
+}
+
+static inline void jmp_fill_row(lz0_finder *f, uint32_t *jmp, int L, uint32_t i, uint32_t p) {
+    uint32_t *row = jmp + (size_t)i * (size_t)L;
+    uint32_t c = p;
+    for (int t = 1; t < 4 && c != LZ0_CHAIN_NIL; t++)
+        c = f->prev[c];
+    row[0] = c;
+    for (int k = 1; k < L; k++) {
+        if (c == LZ0_CHAIN_NIL) {
+            for (; k < L; k++)
+                row[k] = LZ0_CHAIN_NIL;
+            return;
+        }
+        int km1 = k - 1;
+        for (int t = 1; t < 8 && c != LZ0_CHAIN_NIL; t++)
+            c = jmp[(size_t)c * (size_t)L + (size_t)km1];
+        row[k] = c;
+    }
 }
 
 void lz0_finder_insert_upto(lz0_finder *f, uint32_t pos) {
@@ -1311,116 +1353,75 @@ void lz0_finder_insert_upto(lz0_finder *f, uint32_t pos) {
     uint32_t n = f->n;
     if (pos > n)
         pos = n;
+    int sh = f->hash_shift;
     for (; i < pos && i + 1 < n; i++) {
         uint32_t h = hash_at(f, i);
         uint32_t p = f->head[h];
         f->prev[i] = p;
         f->head[h] = i;
         if (f->head3 && i + 2 < n)
-            f->head3[hash3(f->in + i)] = i;
+            f->head3[hash3_s(f->in + i, sh)] = i;
         if (f->head4 && i + 3 < n)
-            f->head4[hash4(f->in + i)] = i;
-        if (f->jmp && f->jump_levels > 0) {
-            /* position-major skip list: jmp[i * L + k] = node 2^k links
-             * behind i on its hash chain (NIL if the chain is shorter) */
-            int L = f->jump_levels;
-            uint32_t *row = f->jmp + (size_t)i * (size_t)L;
-            row[0] = p;
-            for (int k = 1; k < L; k++) {
-                uint32_t src = row[k - 1];
-                row[k] = src != LZ0_CHAIN_NIL ? f->jmp[(size_t)src * (size_t)L + (size_t)(k - 1)]
-                                              : LZ0_CHAIN_NIL;
-            }
-        }
+            f->head4[hash4_s(f->in + i, sh)] = i;
+        if (f->jmp && f->jmp_slots > 0)
+            jmp_fill_row(f, f->jmp, f->jmp_slots, i, p);
     }
     f->last_insert = i;
 }
 
 /*
- * Adaptive skip list. The table costs jump_levels words per input byte and
- * jump_levels - 1 extra loads per insertion, and only pays off when long
- * hash-chain walks happen (redundant data). Small or low-redundancy inputs
- * mostly walk 1-step links and never need it. So the table starts absent and
- * multi-step walks follow prev[] while counting the links they cross; once
- * that count exceeds what building the table for the positions inserted so
- * far costs (jump_levels words each), the table is allocated and back-filled
- * (ski-rental rule: at most ~2x the cost of the better static choice).
- *
- * Exactness: chain_skip() returns the same node and step count with or without
- * the table, and the back-filled rows equal the incrementally built ones (row i
- * only depends on prev[i] and rows of earlier positions), so this never
- * changes the matches found, only how fast they are reached.
+ * Adaptive compact skip table: stores 3..4 stride levels {4, 32, 256, 2048}
+ * (12..16 B/byte instead of 48 B/byte), skipping up to 2048 prev[] links
+ * per step on demand when long hash-chain walks happen. Exact bit-for-bit.
  */
 static void skip_activate(lz0_finder *f) {
-    int L = f->jump_levels;
-    uint32_t *jmp = (uint32_t *)malloc((size_t)f->n * (size_t)L * sizeof(uint32_t));
-    if (!jmp) {
-        f->jump_levels = 0; /* plain walks give the same result */
+    int L = f->jmp_slots;
+    if (L <= 0) {
+        f->jump_levels = 0;
         return;
     }
-    for (uint32_t i = 0; i < f->last_insert; i++) {
-        uint32_t *row = jmp + (size_t)i * (size_t)L;
-        row[0] = f->prev[i];
-        for (int k = 1; k < L; k++) {
-            uint32_t src = row[k - 1];
-            row[k] = src != LZ0_CHAIN_NIL ? jmp[(size_t)src * (size_t)L + (size_t)(k - 1)]
-                                          : LZ0_CHAIN_NIL;
-        }
+    uint32_t *jmp = (uint32_t *)malloc((size_t)f->n * (size_t)L * sizeof(uint32_t));
+    if (!jmp) {
+        f->jump_levels = 0;
+        f->jmp_slots = 0;
+        return;
     }
+    for (uint32_t i = 0; i < f->last_insert; i++)
+        jmp_fill_row(f, jmp, L, i, f->prev[i]);
     f->jmp = jmp;
 }
 
-/* Follows `steps` prev[] links from cur. Result and *taken are exactly those
- * of the plain walk:
- *     while (t < steps && cur != NIL) { cur = prev[cur]; t++; }
- * (the link that reaches NIL is counted). With a skip list (jump_levels > 0)
- * long walks become binary lifting: repeated top-level jumps, then a
- * descending greedy over the levels that finds the exact end of a short
- * chain. Every jump of level k equals 2^k plain steps, so both are exact. */
 static uint32_t chain_skip(lz0_finder *f, uint32_t cur, int steps, int *taken) {
     int t = 0;
-    int L = f->jmp ? f->jump_levels : 0;
-    if (L <= 0 || steps < 2) {
+    int L = f->jmp ? f->jmp_slots : 0;
+    if (L <= 0 || steps < 4) {
         while (t < steps && cur != LZ0_CHAIN_NIL) {
             cur = f->prev[cur];
             t++;
         }
         *taken = t;
-        if (steps >= 2 && f->jump_levels > 0 && !f->jmp) {
+        if (steps >= 2 && f->jmp_slots > 0 && !f->jmp) {
             f->jmp_walked += (uint64_t)t;
-            /* With a large suffix-array window (L9), moderate hash-chain walks
-             * take negligible time compared to allocating 48 B/byte for jmp[];
-             * only activate jmp[] once chain walks clearly outgrow init+table cost. */
-            uint64_t mult = (f->sa_win >= 128) ? 6u : 1u;
-            if (f->jmp_walked > (uint64_t)f->jump_levels * (f->last_insert + 4096u) * mult)
+            uint64_t mult = (f->sa_win >= 128) ? 8u : 2u;
+            if (f->jmp_walked > (uint64_t)f->jmp_slots * (f->last_insert + 4096u) * mult)
                 skip_activate(f);
         }
         return cur;
     }
     const uint32_t *jmp = f->jmp;
-    int top = L - 1;
-    while (cur != LZ0_CHAIN_NIL && steps - t >= (1 << top)) {
-        uint32_t nx = jmp[(size_t)cur * (size_t)L + (size_t)top];
-        if (nx == LZ0_CHAIN_NIL)
-            break;
-        cur = nx;
-        t += 1 << top;
+    for (int k = L - 1; k >= 0 && cur != LZ0_CHAIN_NIL; k--) {
+        int st = lz0_jmp_strides[k];
+        while (steps - t >= st && cur != LZ0_CHAIN_NIL) {
+            uint32_t nx = jmp[(size_t)cur * (size_t)L + (size_t)k];
+            if (nx == LZ0_CHAIN_NIL)
+                break;
+            cur = nx;
+            t += st;
+        }
     }
-    if (cur != LZ0_CHAIN_NIL && t < steps) {
-        /* largest s <= steps - t (here s < 2^(top + 1)) landing on a node */
-        const uint32_t *row = jmp + (size_t)cur * (size_t)L;
-        for (int k = top; k >= 0; k--) {
-            if (steps - t >= (1 << k) && row[k] != LZ0_CHAIN_NIL) {
-                cur = row[k];
-                t += 1 << k;
-                row = jmp + (size_t)cur * (size_t)L;
-            }
-        }
-        if (t < steps) {
-            /* the next link is the end of the chain */
-            cur = LZ0_CHAIN_NIL;
-            t++;
-        }
+    while (t < steps && cur != LZ0_CHAIN_NIL) {
+        cur = f->prev[cur];
+        t++;
     }
     *taken = t;
     return cur;
@@ -1769,11 +1770,17 @@ static LZ0_ALWAYS_INLINE void sa_probe_pair(lz0_finder *f, uint32_t pos, int lef
 /* with_cen and with_pf are compile-time constants at every call site: the
  * census-free path carries no census branches, and inputs below
  * LZ0_SA_PF_MIN_INPUT run a loop with no prefetch code at all. */
+static inline int sa_max_score(int ml) {
+    return (ml << 3) - (ml <= 8 ? 6 : 9);
+}
+
 static LZ0_ALWAYS_INLINE void sa_probe_core(lz0_finder *f, uint32_t pos, int minm, int maxl,
                                             int *best_len, lz0_match *out, int *nout,
                                             lz0_sdp_census *cen, const int with_cen,
                                             const int with_pf) {
     (void)with_pf; /* unused when LZ0_SA_PF_K == 0 */
+    if (f->opts.sa_win <= 0 || !f->sa || !f->rank)
+        return;
     uint32_t n = f->n;
     int win = f->sa_win;
     uint32_t qpos = pos;
@@ -1802,6 +1809,11 @@ static LZ0_ALWAYS_INLINE void sa_probe_core(lz0_finder *f, uint32_t pos, int min
     if (ms == 2 && max_d < 1024)
         max_d = 1024;
 
+    int left_on = 1;
+    int right_on = 1;
+    const int can_stop =
+        (!with_cen && !use_lcp && f->sa_sample <= 1 && minm >= 2 && maxl >= 2 && max_d > 32);
+    const unsigned char *in_p = f->in;
     int d = 1;
 #if LZ0_SA_PF_K > 0
     const uint32_t *sa = f->sa;
@@ -1825,7 +1837,66 @@ static LZ0_ALWAYS_INLINE void sa_probe_core(lz0_finder *f, uint32_t pos, int min
         if (with_pf && d + LZ0_SA_PF_K <= pf_lim)
             sa_pf_payload(sa, in, hot, r, ns, d + LZ0_SA_PF_K);
 #endif
-        if (!with_cen && !use_lcp && r - d >= 0 && r + d < ns) {
+        if (can_stop) {
+            int mlL = -1, mlR = -1;
+            if (left_on && right_on && r - d >= 0 && r + d < ns) {
+                uint32_t srcL = f->sa[r - d];
+                uint32_t srcR = f->sa[r + d];
+                uint32_t eqL = (srcL + 1u < n) && (lz0_ld16(in_p + srcL) == prefix);
+                uint32_t eqR = (srcR + 1u < n) && (lz0_ld16(in_p + srcR) == prefix);
+                uint32_t hits =
+                    ((uint32_t)(srcL < pos) & eqL) | (((uint32_t)(srcR < pos) & eqR) << 1);
+                if (hits & 1u)
+                    mlL = sa_probe_side(f, pos, srcL, 2, minm, maxl, best_len, out, nout, NULL);
+                if (hits & 2u)
+                    mlR = sa_probe_side(f, pos, srcR, 2, minm, maxl, best_len, out, nout, NULL);
+                if (!eqL)
+                    left_on = 0;
+                if (!eqR)
+                    right_on = 0;
+            } else {
+                if (left_on && r - d >= 0) {
+                    uint32_t srcL = f->sa[r - d];
+                    uint32_t eqL = (srcL + 1u < n) && (lz0_ld16(in_p + srcL) == prefix);
+                    if (eqL && srcL < pos)
+                        mlL = sa_probe_side(f, pos, srcL, 2, minm, maxl, best_len, out, nout, NULL);
+                    if (!eqL)
+                        left_on = 0;
+                } else {
+                    left_on = 0;
+                }
+                if (right_on && r + d < ns) {
+                    uint32_t srcR = f->sa[r + d];
+                    uint32_t eqR = (srcR + 1u < n) && (lz0_ld16(in_p + srcR) == prefix);
+                    if (eqR && srcR < pos)
+                        mlR = sa_probe_side(f, pos, srcR, 2, minm, maxl, best_len, out, nout, NULL);
+                    if (!eqR)
+                        right_on = 0;
+                } else {
+                    right_on = 0;
+                }
+            }
+            if ((mlL >= 0 || mlR >= 0)) {
+                int max_c = f->max_candidates > 64 ? 64 : f->max_candidates;
+                if (*nout == max_c) {
+                    int w = f->kc_worst;
+                    if (w < 0) {
+                        w = max_c <= LZ0_KC_SCALAR_MAX
+                                ? lz0_kc_worst_c(f->kc_score, out, max_c)
+                                : lz0_simd_kc_worst(f->kc_score, out, max_c);
+                        f->kc_worst = w;
+                    }
+                    int ws = f->kc_score[w];
+                    int bl = *best_len;
+                    if (mlL >= 0 && mlL <= bl && sa_max_score(mlL) <= ws)
+                        left_on = 0;
+                    if (mlR >= 0 && mlR <= bl && sa_max_score(mlR) <= ws)
+                        right_on = 0;
+                }
+            }
+            if (!left_on && !right_on)
+                break;
+        } else if (!with_cen && !use_lcp && r - d >= 0 && r + d < ns) {
             sa_probe_pair(f, pos, r - d, r + d, prefix, minm, maxl, best_len, out, nout);
         } else {
             if (r - d >= 0)
@@ -1927,8 +1998,10 @@ static int bt_update(lz0_finder *f, uint32_t pos, lz0_match *out, int maxout) {
     const unsigned char *in = f->in;
     uint32_t n = f->n;
     int nout = 0;
-    if (pos + 1 < n) {
+    if (f->bt_head2 && pos + 1 < n) {
         uint32_t h2 = ((uint32_t)in[pos] << 8) | in[pos + 1];
+        if (f->bt_h2bits < 16)
+            h2 = (h2 * 2654435761u) >> (32 - f->bt_h2bits);
         uint32_t c2 = f->bt_head2[h2];
         f->bt_head2[h2] = pos;
         if (out && c2 != LZ0_CHAIN_NIL && maxout > 0) {
@@ -2123,19 +2196,27 @@ static const uint16_t lz0_bin_offsets[40] = {
  * in the baseline do not change when the table gets built. */
 static uint32_t chain_node_at(const lz0_finder *f, uint32_t cur, int steps) {
     const uint32_t *jmp = f->jmp;
-    if (!jmp || steps < 2) {
+    if (!jmp || steps < 4) {
         while (steps > 0 && cur != LZ0_CHAIN_NIL) {
             cur = f->prev[cur];
             steps--;
         }
         return cur;
     }
-    const int L = f->jump_levels;
+    const int L = f->jmp_slots;
     for (int k = L - 1; k >= 0 && cur != LZ0_CHAIN_NIL; k--) {
-        while (steps >= (1 << k) && cur != LZ0_CHAIN_NIL) {
-            cur = jmp[(size_t)cur * (size_t)L + (size_t)k];
-            steps -= 1 << k;
+        int st = lz0_jmp_strides[k];
+        while (steps >= st && cur != LZ0_CHAIN_NIL) {
+            uint32_t nx = jmp[(size_t)cur * (size_t)L + (size_t)k];
+            if (nx == LZ0_CHAIN_NIL)
+                break;
+            cur = nx;
+            steps -= st;
         }
+    }
+    while (steps > 0 && cur != LZ0_CHAIN_NIL) {
+        cur = f->prev[cur];
+        steps--;
     }
     return cur;
 }
@@ -2244,9 +2325,7 @@ static LZ0_ALWAYS_INLINE void hash_probe_core(lz0_finder *f, uint32_t pos, int m
     if (f->max_candidates >= 32) {
         uint64_t hits = 0;
         if (pos >= 256u) {
-            /* every offset of the table is in range: fixed trip count */
-            for (int b = 0; b < 40; b++)
-                hits |= (uint64_t)((lz0_ld16(in + pos - lz0_bin_offsets[b]) & pm) == w0) << b;
+            hits = lz0_simd_bin40_hits(in + pos - 256u, w0, pm);
         } else {
             for (int b = 0; b < 40 && (uint32_t)lz0_bin_offsets[b] <= pos; b++)
                 hits |= (uint64_t)((lz0_ld16(in + pos - lz0_bin_offsets[b]) & pm) == w0) << b;
@@ -2318,7 +2397,7 @@ static LZ0_ALWAYS_INLINE void hash_probe_core(lz0_finder *f, uint32_t pos, int m
     }
 
     if (f->opts.chain_prune == 4 && f->head3 && pos + 2 < n) {
-        uint32_t c3 = f->head3[hash3(in + pos)];
+        uint32_t c3 = f->head3[hash3_s(in + pos, f->hash_shift)];
         if (c3 != LZ0_CHAIN_NIL && c3 < pos) {
             if (with_cen)
                 cen->n_chain_visit++;
@@ -2537,7 +2616,7 @@ static LZ0_ALWAYS_INLINE void hash_probe_core(lz0_finder *f, uint32_t pos, int m
         if (trig) {
             if (with_cen)
                 cen->n_hash4_probe++;
-            uint32_t c4 = f->head4[hash4(in + pos)];
+            uint32_t c4 = f->head4[hash4_s(in + pos, f->hash_shift)];
             if (c4 != LZ0_CHAIN_NIL && c4 < pos && (lz0_ld16(in + c4) & pm) == w0) {
                 int ml = probe_tail(f, in, pos, c4, pos - c4, minm, maxl, &best_len, out, &nout, cc);
                 if (with_cen && ml >= 0)
@@ -2642,13 +2721,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
             int nb = bt_update(f, pos, bm, 64);
             f->bt_next = pos + 1;
             for (int k = 0; k < nb; k++) {
-                int dup = -1;
-                for (int j = 0; j < nout; j++) {
-                    if (out[j].offset == bm[k].offset) {
-                        dup = j;
-                        break;
-                    }
-                }
+                int dup = lz0_simd_find_off(out, nout, bm[k].offset);
                 if (dup >= 0) {
                     if (bm[k].length > out[dup].length)
                         out[dup].length = bm[k].length;

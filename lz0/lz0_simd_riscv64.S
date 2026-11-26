@@ -318,6 +318,68 @@ FUNC(lz0_matchlen_rvv)
         ret
 ENDF(lz0_matchlen_rvv)
 
+/* ------------------------------------------------------------------------
+ * uint64_t lz0_bin40_hits_rvv(const uint8_t *p = a0, uint32_t w0 = a1,
+ *                             uint32_t pm = a2)
+ * VLEN-agnostic strip-mined strided halfword loads (stride -4 then -8).
+ * ---------------------------------------------------------------------- */
+FUNC(lz0_bin40_hits_rvv)
+        li      t6, 0xffff
+        and     a1, a1, t6
+        and     a2, a2, t6
+        li      t5, 0                       /* result bitmask */
+
+        /* Part 1: b=0..15 at p + 252, stride -4 */
+        addi    t2, a0, 252
+        li      t3, -4
+        li      t0, 16
+        li      t4, 0                       /* bit shift */
+1:
+        vsetvli t1, t0, e16, m4, ta, ma
+        vlse16.v v8, (t2), t3
+        vand.vx v8, v8, a2
+        vmseq.vx v0, v8, a1
+        vsetivli zero, 1, e64, m1, ta, ma
+        vmv.x.s a3, v0
+        li      a4, 1
+        sll     a4, a4, t1
+        addi    a4, a4, -1
+        and     a3, a3, a4
+        sll     a3, a3, t4
+        or      t5, t5, a3
+        slli    a5, t1, 2
+        sub     t2, t2, a5
+        add     t4, t4, t1
+        sub     t0, t0, t1
+        bnez    t0, 1b
+
+        /* Part 2: b=16..39 at p + 184, stride -8 */
+        addi    t2, a0, 184
+        li      t3, -8
+        li      t0, 24
+2:
+        vsetvli t1, t0, e16, m4, ta, ma
+        vlse16.v v8, (t2), t3
+        vand.vx v8, v8, a2
+        vmseq.vx v0, v8, a1
+        vsetivli zero, 1, e64, m1, ta, ma
+        vmv.x.s a3, v0
+        li      a4, 1
+        sll     a4, a4, t1
+        addi    a4, a4, -1
+        and     a3, a3, a4
+        sll     a3, a3, t4
+        or      t5, t5, a3
+        slli    a5, t1, 3
+        sub     t2, t2, a5
+        add     t4, t4, t1
+        sub     t0, t0, t1
+        bnez    t0, 2b
+
+        mv      a0, t5
+        ret
+ENDF(lz0_bin40_hits_rvv)
+
 #endif /* GCC >= 12 || Clang >= 14 */
 #if defined(__ELF__)
         .section .note.GNU-stack, "", @progbits

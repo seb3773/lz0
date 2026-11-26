@@ -322,17 +322,25 @@ CSYM(lz0dec_fast_x86_64):
     jc .F_new_enter
     /* MatchLast; offset needs no check: last_offset <= out_pos always */
     test rdi, rdi
-    jns .F_ml_gen
-    add rdi, rdi                /* Elias == 1 */
-    inc rbp
-    mov ecx, 1
+    js .F_ml1
+    ELIAS_FAST rcx, 0, .Ff_ml
 .F_copy:
     COPY_FAST
     jmp .F_decide
 
-    .p2align 4
-.F_ml_gen:
-    ELIAS_FAST rcx, 0, .Ff_ml
+.F_ml1:
+    add rdi, rdi                /* Elias == 1 */
+    inc rbp
+    cmp r12, r11
+    jae .F_ml1_safe
+    mov rsi, r12
+    sub rsi, rbx
+    movzx eax, byte ptr [rsi]
+    mov byte ptr [r12], al
+    inc r12
+    jmp .F_decide
+.F_ml1_safe:
+    mov ecx, 1
     jmp .F_copy
 
 .F_lit_gen:

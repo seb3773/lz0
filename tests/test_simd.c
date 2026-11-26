@@ -167,6 +167,40 @@ static void run_tier(int iters) {
             CHECK(lz0_simd_count_eq(abuf, b, len, st) == lz0_count_eq_c(abuf, b, len, st),
                   "count_eq len=%u step=%u", len, st);
         }
+
+        static const uint16_t b40_off[40] = {
+            4,   8,   12,  16,  20,  24,  28,  32,  36,  40,  44,  48,  52,  56,
+            60,  64,  72,  80,  88,  96,  104, 112, 120, 128, 136, 144, 152, 160,
+            168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256
+        };
+        unsigned char *b40 = guarded(256);
+        for (int i = 0; i < 256; i++)
+            b40[i] = (unsigned char)rnd();
+        uint32_t pm = (rnd() % 4 == 0) ? 0x00ffu : 0xffffu;
+        uint32_t w0 = rnd() & pm;
+        if (rnd() % 3 == 0) {
+            for (int h = 0; h < 6; h++) {
+                int slot = (int)(rnd() % 40);
+                int off = 256 - b40_off[slot];
+                b40[off] = (unsigned char)(w0 & 0xffu);
+                if (pm == 0xffffu || (rnd() & 1))
+                    b40[off + 1] = (unsigned char)((w0 >> 8) & 0xffu);
+                else
+                    b40[off + 1] = (unsigned char)rnd();
+            }
+        }
+        uint64_t want_b40 = 0;
+        for (int i = 0; i < 40; i++) {
+            uint16_t v;
+            memcpy(&v, b40 + 256 - b40_off[i], 2);
+            want_b40 |= (uint64_t)((v & pm) == w0) << i;
+        }
+        uint64_t got_b40 = lz0_simd_bin40_hits(b40, w0, pm);
+        uint64_t ref_b40 = lz0_bin40_hits_c(b40, w0, pm);
+        CHECK(got_b40 == want_b40 && ref_b40 == want_b40,
+              "bin40 got=0x%llx ref=0x%llx want=0x%llx pm=0x%x",
+              (unsigned long long)got_b40, (unsigned long long)ref_b40,
+              (unsigned long long)want_b40, pm);
     }
 }
 

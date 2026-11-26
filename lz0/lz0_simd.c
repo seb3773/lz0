@@ -109,6 +109,23 @@ int lz0_matchlen_c(const unsigned char *a, const unsigned char *b, int max) {
     return n;
 }
 
+uint64_t lz0_bin40_hits_c(const unsigned char *p, uint32_t w0, uint32_t pm) {
+    uint32_t m = pm & 0xffffu;
+    uint32_t w = w0 & 0xffffu;
+    uint64_t hits = 0;
+    for (int b = 0; b < 16; b++) {
+        uint16_t v;
+        memcpy(&v, p + (252 - b * 4), 2);
+        hits |= (uint64_t)(((uint32_t)v & m) == w) << b;
+    }
+    for (int b = 16; b < 40; b++) {
+        uint16_t v;
+        memcpy(&v, p + (184 - (b - 16) * 8), 2);
+        hits |= (uint64_t)(((uint32_t)v & m) == w) << b;
+    }
+    return hits;
+}
+
 static int lz0_simd_detect(void) {
 #if defined(LZ0_SIMD_X86_64)
     unsigned a, b, c, d;
