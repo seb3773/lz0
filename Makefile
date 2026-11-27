@@ -30,7 +30,7 @@ endif
 
 LZ0DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c $(HOST_ASM_DEC)
 
-.PHONY: all bench clean test smoke bounds limits diag sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz guard simd sa_probe enc_bench enc_tiers find_bench mem_peak lz0 lz0dec cli sanitize valgrind bench_all bench_ratio bench_dec bench_dec_arm64 bench_dec_riscv64 bench_blobs test_arm64 arm64 test_riscv64 riscv64 windows test_windows ultra16 dist dist_linux dist_arm64 dist_riscv64 dist_windows dist_macos
+.PHONY: all bench clean test smoke bounds limits diag sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz guard simd sa_probe enc_bench enc_tiers find_bench mem_peak lz0 lz0dec cli sanitize valgrind bench_all bench_ratio bench_dec bench_dec_arm64 bench_dec_riscv64 bench_dec_rust bench_blobs test_arm64 arm64 test_riscv64 riscv64 windows test_windows ultra16 test_rust dist dist_linux dist_arm64 dist_riscv64 dist_windows dist_macos
 
 all: bin/lz0 bin/lz0dec bench/lz0_bench bench/lz0_smoke bench/lz0_bounds bench/lz0_diag_rep bench/lz0_sdp32 bench/lz0_scale bench/lz0_prof bench/lz0_cmpfind bench/lz0_jumpsweep bench/lz0_pruneab bench/lz0_bits bench/lz0_final
 
@@ -490,5 +490,26 @@ test_windows: windows
 
 clean:
 	rm -f bench/lz0_* bench/dump_rep bench/debug_a3 bench/count_bench bench/scatter_bench
-	rm -f bin/lz0* tests/test_vectors tests/test_boundary tests/test_malformed tests/test_fuzz tests/test_guard tests/test_simd tests/test_sa_probe tests/test_threadsafe tests/test_window tests/test_limits tests/test_ultra16 tests/*_arm64 tests/*_riscv64 tests/*.exe
+	rm -f bin/lz0* tests/test_vectors tests/test_boundary tests/test_malformed tests/test_fuzz tests/test_guard tests/test_simd tests/test_sa_probe tests/test_threadsafe tests/test_window tests/test_limits tests/test_ultra16 tests/test_guard_rust tests/*_arm64 tests/*_riscv64 tests/*.exe
 	rm -rf dist build
+
+CARGO ?= $(shell command -v cargo 2>/dev/null || echo $(HOME)/.cargo/bin/cargo)
+RUST_LDLIBS := $(if $(filter Darwin,$(UNAME_S)),-lm,-lpthread -ldl -lm)
+RUST_SRC = rust/Cargo.toml rust/lz0-dec/Cargo.toml rust/lz0-dec-ffi/Cargo.toml $(wildcard rust/lz0-dec/src/*.rs) $(wildcard rust/lz0-dec-ffi/src/*.rs)
+
+rust/target/release/liblz0_dec_ffi.a: $(RUST_SRC)
+	PATH="$(HOME)/.cargo/bin:$(PATH)" $(CARGO) build --manifest-path rust/Cargo.toml -p lz0-dec-ffi --release
+
+tests/test_guard_rust: tests/test_guard_rust.c $(LZ0_SRC) lz0/lz0dec_ref.c rust/target/release/liblz0_dec_ffi.a
+	$(CC) $(CFLAGS) -o $@ tests/test_guard_rust.c $(LZ0_SRC) lz0/lz0dec_ref.c rust/target/release/liblz0_dec_ffi.a $(RUST_LDLIBS)
+
+test_rust: tests/test_guard_rust
+	PATH="$(HOME)/.cargo/bin:$(PATH)" $(CARGO) test --manifest-path rust/Cargo.toml -p lz0-dec --no-default-features
+	PATH="$(HOME)/.cargo/bin:$(PATH)" $(CARGO) test --manifest-path rust/Cargo.toml -p lz0-dec --all-features
+	./tests/test_guard_rust
+
+bench/lz0_bench_dec_rust: bench/bench_dec_rust.c $(LZ0_SRC) $(LZ0DEC_SRC) rust/target/release/liblz0_dec_ffi.a
+	$(CC) $(CFLAGS) -o $@ bench/bench_dec_rust.c $(LZ0_SRC) $(LZ0DEC_SRC) rust/target/release/liblz0_dec_ffi.a $(RUST_LDLIBS)
+
+bench_dec_rust: bench/lz0_bench_dec_rust
+	./bench/lz0_bench_dec_rust

@@ -1,0 +1,12 @@
+[package]
+name = "lz0-dec-ffi"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+lz0-dec = { path = "../lz0-dec", features = ["fast"] }
+

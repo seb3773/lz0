@@ -1,0 +1,12 @@
+[package]
+name = "lz0-dec"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+license = "MIT"
+repository = "https://github.com/seb3773/lz0"
+description = "Zero-allocation #![no_std] decompressor for the LZ0 v0.1 format"
+
+[features]
+default = []
+fast = []

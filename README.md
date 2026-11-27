@@ -37,6 +37,13 @@ make bench_dec_riscv64
 make bench_all
 ```
 
+For the `#![no_std]` Rust decoder crate (requires `rustc` / `cargo`):
+
+```bash
+make test_rust       # Rust crate tests + C/Rust PROT_NONE guard-page parity
+make bench_dec_rust  # x86-64 throughput comparison: C vs Rust Safe/Fast vs ASM
+```
+
 ## Command line
 
 `lz0` wraps the raw stream in an 8-byte container: the bytes `LZ01`, then the uncompressed size as a little-endian `uint32`, then the payload. An empty file is that header with size 0 and no payload. The raw decoder rejects an empty buffer. The CLI rejects inputs of 4 GiB or larger, because the size field is 32 bits.
@@ -132,6 +139,20 @@ The scalar C kernels and the x86-64 (SSE2 / AVX2), AArch64 (NEON), and RISC-V (R
 | `lz0/lz0dec_fast_x86_64.S`, `lz0dec_fast_arm64.S`, `lz0dec_fast_riscv64.S` | Larger assembly, aimed at throughput | 2,898 B (x64) / 2,852 B (ARM64) / 3,280 B (RV64) |
 
 The ultra-tiny, tiny, and compact AArch64 and RV64 decoders are leaf functions with zero stack frame (`lz0dec_tiny_x86_64` uses only `push rbp; mov rbp, rsp`; `lz0dec_ultra_tiny_x86_64` saves only `rbx` and `out_start`). The x86-64 compact decoder saves only `rbx`/`rbp` plus at most one return address (`<= 32` bytes stack frame total). The fast decoders keep a small constant table, copy wider in the middle of the buffer, and take a checked path for the tail. `tests/test_guard.c` maps a `PROT_NONE` page immediately after the input and the output (`lz0dec_ultra_tiny` is checked on valid roundtrips). `make ultra16` assembles `lz0/lz0dec_ultra_tiny_x86_16.S` to a 117 B raw 8086 binary and executes its machine bytes in segmented real-mode test cases (`DS != ES` and `DS == ES`).
+
+### Rust `#![no_std]` Decoder (`rust/lz0-dec`)
+
+A standalone zero-dependency, zero-allocation `#![no_std]` crate is provided under `rust/lz0-dec`:
+
+- **Safe by default (`default = []`, `#![forbid(unsafe_code)]`)**: exposes `decode(input: &[u8], output: &mut [u8]) -> Result<usize, DecodeError>`, `container_uncompressed_size`, and `decode_container`.
+- **Opt-in `fast` feature (`unsafe`)**: exposes `lz0_dec::fast::decode` using a segment-window `u64` bitreader, SWAR branch-free Elias decoding, `u128` wide match copies, and a safe validated tail.
+- **Verification**: tested on `x86_64` and checked for bare-metal targets (`thumbv7em-none-eabihf`, `aarch64-unknown-none`, `riscv64gc-unknown-none-elf`, `x86_64-unknown-none`), with C-FFI (`rust/lz0-dec-ffi`) `PROT_NONE` guard-page parity via `make test_rust` and benchmarking via `make bench_dec_rust`.
+
+```bash
+cargo test --manifest-path rust/Cargo.toml -p lz0-dec --no-default-features
+cargo test --manifest-path rust/Cargo.toml -p lz0-dec --all-features
+make test_rust
+```
 
 ## Results
 

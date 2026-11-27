@@ -22,9 +22,15 @@ tests/test_sa_probe
 tests/test_threadsafe
 tests/test_window
 tests/test_limits
+tests/test_ultra16
+tests/test_guard_rust
 tests/*_arm64
 tests/*_riscv64
 tests/*.exe
+
+# Rust build artifacts
+rust/**/target/
+rust/**/Cargo.lock
 
 # Benchmark binaries
 bench/lz0_*
