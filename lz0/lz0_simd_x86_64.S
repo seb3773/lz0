@@ -485,6 +485,8 @@ ENDF(lz0_find_off_avx2)
 #define KC_PICK(pfx)                                    \
         bsfq    %r9, %rax;          /* best = lowest */ \
         movl    4(%rsi,%rax,8), %r10d; /* best length */\
+        testl   %r10d, %r10d;                           \
+        jz      pfx##_done;                             \
         leaq    -1(%r9), %r11;                          \
         andq    %r11, %r9;          /* clear lowest */  \
         jz      pfx##_done;                             \
@@ -495,6 +497,8 @@ pfx##_scan:                                             \
         jae     pfx##_next;         /* unsigned, strict */ \
         movl    %r11d, %r10d;                           \
         movl    %ecx, %eax;                             \
+        testl   %r10d, %r10d;                           \
+        jz      pfx##_done;                             \
 pfx##_next:                                             \
         leaq    -1(%r9), %r11;                          \
         andq    %r11, %r9;                              \
@@ -582,6 +586,8 @@ ENDF(lz0_kc_worst_sse2)
  * lz0_kc_worst_avx2(score=rdi, m=rsi, n=edx) -> eax      (1 <= n <= 64)
  * ---------------------------------------------------------------------- */
 FUNC(lz0_kc_worst_avx2)
+        cmpl    $32, %edx
+        je      .Lkw_a_32
         cmpl    $8, %edx
         jl      BODY(lz0_kc_worst_sse2)
         movslq  %edx, %rdx
@@ -626,6 +632,38 @@ FUNC(lz0_kc_worst_avx2)
 .Lkw_a_pick:
         vzeroupper
         KC_PICK(.Lkw_a)
+        ret
+.Lkw_a_32:
+        vmovdqu (%rdi), %ymm0
+        vmovdqu 32(%rdi), %ymm1
+        vmovdqu 64(%rdi), %ymm2
+        vmovdqu 96(%rdi), %ymm3
+        vpminsd %ymm1, %ymm0, %ymm4
+        vpminsd %ymm3, %ymm2, %ymm5
+        vpminsd %ymm5, %ymm4, %ymm4
+        vextracti128 $1, %ymm4, %xmm5
+        vpminsd %xmm5, %xmm4, %xmm4
+        vpshufd $0x4e, %xmm4, %xmm5
+        vpminsd %xmm5, %xmm4, %xmm4
+        vpshufd $0xb1, %xmm4, %xmm5
+        vpminsd %xmm5, %xmm4, %xmm4
+        vpbroadcastd %xmm4, %ymm4
+        vpcmpeqd %ymm4, %ymm0, %ymm0
+        vpcmpeqd %ymm4, %ymm1, %ymm1
+        vpcmpeqd %ymm4, %ymm2, %ymm2
+        vpcmpeqd %ymm4, %ymm3, %ymm3
+        vmovmskps %ymm0, %r9d
+        vmovmskps %ymm1, %eax
+        vmovmskps %ymm2, %ecx
+        vmovmskps %ymm3, %r8d
+        shll    $8, %eax
+        shll    $16, %ecx
+        shll    $24, %r8d
+        orl     %eax, %r9d
+        orl     %ecx, %r9d
+        orl     %r8d, %r9d
+        vzeroupper
+        KC_PICK(.Lkw_a32)
         ret
 ENDF(lz0_kc_worst_avx2)
 
@@ -1229,6 +1267,643 @@ ENDF(lz0_bin40_hits_avx2)
         .byte   0x13,0x1b,0x93,0x9b,0x17,0x1f,0x97,0x9f,0x53,0x5b,0xd3,0xdb,0x57,0x5f,0xd7,0xdf
         .byte   0x31,0x39,0xb1,0xb9,0x35,0x3d,0xb5,0xbd,0x71,0x79,0xf1,0xf9,0x75,0x7d,0xf5,0xfd
         .byte   0x33,0x3b,0xb3,0xbb,0x37,0x3f,0xb7,0xbf,0x73,0x7b,0xf3,0xfb,0x77,0x7f,0xf7,0xff
+
+        .p2align 5
+.Lu_7fffffff:
+        .long 0x7fffffff, 0x7fffffff, 0x7fffffff, 0x7fffffff, 0x7fffffff, 0x7fffffff, 0x7fffffff, 0x7fffffff
+.Lu_126:
+        .long 126, 126, 126, 126, 126, 126, 126, 126
+.Lu_ones:
+        .long 1, 1, 1, 1, 1, 1, 1, 1
+.Lu_80000000:
+        .long 0x80000000, 0x80000000, 0x80000000, 0x80000000, 0x80000000, 0x80000000, 0x80000000, 0x80000000
+.Lu_hmult:
+        .long 0x9E3779B1, 0x9E3779B1, 0x9E3779B1, 0x9E3779B1, 0x9E3779B1, 0x9E3779B1, 0x9E3779B1, 0x9E3779B1
+
+        .text
+/* ------------------------------------------------------------------------
+ * void lz0_u_row_prep_avx2(lz0_u_prep *p = rdi)
+ * Guard-page clean for all 1 <= nsi <= 64, Win64/ELF/Darwin ABI safe.
+ * ---------------------------------------------------------------------- */
+FUNC(lz0_u_row_prep_avx2)
+        movq    (%rdi), %r10                /* r10 = rkey */
+        movq    8(%rdi), %r11               /* r11 = rcost */
+        movl    28(%rdi), %edx
+        movslq  %edx, %rdx                  /* rdx = nsi (1..64) */
+        cmpq    $8, %rdx
+        jl      .Lurp_small
+
+        /* 1. Find global min cost across 0..nsi-1 (overlapping in-bounds tail) */
+        vmovdqu (%r11), %ymm4
+        movl    $8, %eax
+        leaq    -8(%rdx), %r9               /* r9 = nsi - 8 >= 0 */
+        cmpq    %r9, %rax
+        jg      .Lurp_p1_red
+.Lurp_p1_loop:
+        vpminsd (%r11,%rax,4), %ymm4, %ymm4
+        addq    $8, %rax
+        cmpq    %r9, %rax
+        jle     .Lurp_p1_loop
+.Lurp_p1_red:
+        vpminsd (%r11,%r9,4), %ymm4, %ymm4  /* overlapping tail [nsi-8 .. nsi) */
+        vextracti128 $1, %ymm4, %xmm0
+        vpminsd %xmm0, %xmm4, %xmm4
+        vpshufd $0x4e, %xmm4, %xmm0
+        vpminsd %xmm0, %xmm4, %xmm4
+        vpshufd $0xb1, %xmm4, %xmm0
+        vpminsd %xmm0, %xmm4, %xmm4
+        vpbroadcastd %xmm4, %ymm4
+        xorl    %eax, %eax
+.Lurp_findb:
+        cmpq    %r9, %rax
+        jle     1f
+        movq    %r9, %rax
+1:
+        vpcmpeqd (%r11,%rax,4), %ymm4, %ymm0
+        vmovmskps %ymm0, %r8d
+        testl   %r8d, %r8d
+        jnz     .Lurp_foundb
+        addq    $8, %rax
+        jmp     .Lurp_findb
+.Lurp_foundb:
+        tzcntl  %r8d, %r8d
+        addl    %eax, %r8d
+        movl    %r8d, 44(%rdi)              /* b_out */
+        movl    (%r10,%r8,4), %r8d
+        andl    $0x7fffffff, %r8d
+        movl    %r8d, 52(%rdi)              /* boff in _pad */
+
+        /* 2. Pass 2: min2 (for off != boff), um[64], h_lit[64], pass_mask, lit_cand_mask */
+        vmovd   %r8d, %xmm4
+        vpbroadcastd %xmm4, %ymm4           /* ymm4 = boff */
+        vmovdqa .Lu_7fffffff(%rip), %ymm5   /* ymm5 = running min2 */
+        xorl    %ecx, %ecx                  /* rcx = k */
+        xorq    %rsi, %rsi                  /* rsi = pass_mask */
+        xorq    %r8, %r8                    /* r8  = lit_cand_mask */
+.Lurp_p2_loop:
+        vmovdqu (%r10,%rcx,4), %ymm0        /* key */
+        vmovmskps %ymm0, %edx               /* U_LIT_FLAG bits */
+        vpand   .Lu_7fffffff(%rip), %ymm0, %ymm1 /* off */
+        vpor    .Lu_80000000(%rip), %ymm1, %ymm2 /* lk = off | U_LIT_FLAG */
+        vpsrld  $16, %ymm2, %ymm3
+        vpxor   %ymm3, %ymm2, %ymm2
+        vpmulld .Lu_hmult(%rip), %ymm2, %ymm2
+        vpsrld  $24, %ymm2, %ymm2
+        vmovdqu %ymm2, 328(%rdi,%rcx,4)     /* h_lit */
+        vpcmpeqd %ymm4, %ymm1, %ymm2        /* off == boff */
+        vmovdqu (%r11,%rcx,4), %ymm3        /* cost */
+        vmovdqa .Lu_7fffffff(%rip), %ymm0
+        vpblendvb %ymm2, %ymm0, %ymm3, %ymm2
+        vpminsd %ymm2, %ymm5, %ymm5
+        /* lit && off <= pos check (unsigned u32 off <= pos via ^0x80000000) */
+        vmovd   24(%rdi), %xmm0
+        vpbroadcastd %xmm0, %ymm0
+        vpxor   .Lu_80000000(%rip), %ymm0, %ymm0
+        vpxor   .Lu_80000000(%rip), %ymm1, %ymm2
+        vpcmpgtd %ymm0, %ymm2, %ymm0        /* -1 if off > pos */
+        vmovmskps %ymm0, %eax
+        xorl    $0xff, %eax                 /* 1 if off <= pos */
+        andl    %eax, %edx                  /* edx = lit && off <= pos */
+        /* um = margin + 2*((float)((off-1)>>8 + 1) >> 23) - 253 */
+        vpsubd  .Lu_ones(%rip), %ymm1, %ymm1
+        vpsrld  $8, %ymm1, %ymm1
+        vpaddd  .Lu_ones(%rip), %ymm1, %ymm1
+        vcvtdq2ps %ymm1, %ymm1
+        vpsrld  $23, %ymm1, %ymm1
+        vpsubd  .Lu_126(%rip), %ymm1, %ymm1
+        vpaddd  %ymm1, %ymm1, %ymm1
+        vpsubd  .Lu_ones(%rip), %ymm1, %ymm1
+        vmovd   36(%rdi), %xmm0
+        vpbroadcastd %xmm0, %ymm0
+        vpaddd  %ymm0, %ymm1, %ymm1
+        vmovdqu %ymm1, 72(%rdi,%rcx,4)
+        /* pass check: row_best + um + 1 > cost */
+        vmovd   32(%rdi), %xmm0
+        vpbroadcastd %xmm0, %ymm0
+        vpaddd  %ymm0, %ymm1, %ymm1
+        vpaddd  .Lu_ones(%rip), %ymm1, %ymm1
+        vpcmpgtd %ymm3, %ymm1, %ymm2
+        vmovmskps %ymm2, %eax
+        andl    %eax, %edx
+        shlq    %cl, %rax
+        shlq    %cl, %rdx
+        orq     %rax, %rsi
+        orq     %rdx, %r8
+        addq    $8, %rcx
+        cmpq    %r9, %rcx
+        jle     .Lurp_p2_loop
+        movl    28(%rdi), %edx
+        movslq  %edx, %rdx
+        cmpq    %rdx, %rcx
+        jge     .Lurp_p2_red
+        movq    %r9, %rcx                   /* overlapping tail [nsi-8 .. nsi) */
+        jmp     .Lurp_p2_loop
+.Lurp_p2_red:
+        cmpl    $0, 40(%rdi)                /* exact? */
+        jne     .Lurp_exact_fix
+.Lurp_masks_ok:
+        movq    %rsi, 56(%rdi)              /* pass_mask */
+        movq    %r8, 64(%rdi)               /* lit_cand_mask */
+        vextracti128 $1, %ymm5, %xmm0
+        vpminsd %xmm0, %xmm5, %xmm5
+        vpshufd $0x4e, %xmm5, %xmm0
+        vpminsd %xmm0, %xmm5, %xmm5
+        vpshufd $0xb1, %xmm5, %xmm0
+        vpminsd %xmm0, %xmm5, %xmm5
+        vmovd   %xmm5, %eax
+        cmpl    $0x7fffffff, %eax
+        jne     .Lurp_findb2
+        movl    $-1, 48(%rdi)
+        vzeroupper
+        ret
+.Lurp_exact_fix:
+        /* Recompute exact um = 0x0fffffff, pass_mask = all nsi bits, lit_cand_mask = lit & off<=pos */
+        movl    28(%rdi), %ecx
+        movq    $-1, %rsi
+        cmpl    $64, %ecx
+        je      1f
+        movl    $1, %eax
+        shlq    %cl, %rax
+        decq    %rax
+        movq    %rax, %rsi
+1:
+        xorl    %ecx, %ecx
+        xorq    %r8, %r8
+        movl    28(%rdi), %edx
+2:
+        movl    $0x0fffffff, 72(%rdi,%rcx,4)
+        movl    (%r10,%rcx,4), %eax
+        testl   $0x80000000, %eax
+        jz      3f
+        andl    $0x7fffffff, %eax
+        cmpl    24(%rdi), %eax
+        ja      3f
+        btsq    %rcx, %r8
+3:
+        incq    %rcx
+        cmpl    %edx, %ecx
+        jl      2b
+        jmp     .Lurp_masks_ok
+.Lurp_findb2:
+        vpbroadcastd %xmm5, %ymm5
+        xorl    %ecx, %ecx
+.Lurp_fb2_loop:
+        cmpq    %r9, %rcx
+        jle     1f
+        movq    %r9, %rcx
+1:
+        vpcmpeqd (%r11,%rcx,4), %ymm5, %ymm0
+        vmovdqu (%r10,%rcx,4), %ymm1
+        vpand   .Lu_7fffffff(%rip), %ymm1, %ymm1
+        vpcmpeqd %ymm4, %ymm1, %ymm2
+        vpandn  %ymm0, %ymm2, %ymm0
+        vmovmskps %ymm0, %eax
+        testl   %eax, %eax
+        jnz     .Lurp_fb2_hit
+        addq    $8, %rcx
+        jmp     .Lurp_fb2_loop
+.Lurp_fb2_hit:
+        tzcntl  %eax, %eax
+        addl    %ecx, %eax
+        movl    %eax, 48(%rdi)
+        vzeroupper
+        ret
+
+.Lurp_small:                                /* 1 <= nsi <= 7: scalar, no YMM touched */
+        xorl    %eax, %eax                  /* b_out */
+        movl    (%r11), %r8d                /* minc */
+        movl    $1, %ecx
+1:
+        cmpq    %rdx, %rcx
+        jge     2f
+        movl    (%r11,%rcx,4), %r9d
+        cmpl    %r8d, %r9d
+        jge     3f
+        movl    %r9d, %r8d
+        movl    %ecx, %eax
+3:
+        incq    %rcx
+        jmp     1b
+2:
+        movl    %eax, 44(%rdi)              /* b_out */
+        movl    (%r10,%rax,4), %r8d
+        andl    $0x7fffffff, %r8d
+        movl    %r8d, 52(%rdi)              /* boff in _pad */
+        movl    $0x7fffffff, %r9d           /* min2 */
+        movl    $-1, 48(%rdi)               /* b2_out */
+        movq    $0, 56(%rdi)                /* pass_mask */
+        movq    $0, 64(%rdi)                /* lit_cand_mask */
+        xorl    %ecx, %ecx                  /* s */
+.Lurp_sm_loop:
+        cmpq    %rdx, %rcx
+        jge     .Lurp_sm_done
+        movl    (%r10,%rcx,4), %eax         /* key */
+        movl    %eax, %esi
+        andl    $0x7fffffff, %esi           /* off */
+        cmpl    52(%rdi), %esi
+        je      1f
+        movl    (%r11,%rcx,4), %r8d
+        cmpl    %r9d, %r8d
+        jge     1f
+        movl    %r8d, %r9d
+        movl    %ecx, 48(%rdi)
+1:
+        movl    %eax, %r8d
+        orl     $0x80000000, %r8d           /* lk */
+        movl    %r8d, %eax
+        shrl    $16, %eax
+        xorl    %eax, %r8d
+        imull   $0x9E3779B1, %r8d, %r8d
+        shrl    $24, %r8d
+        movl    %r8d, 328(%rdi,%rcx,4)      /* h_lit[s] */
+        cmpl    $0, 40(%rdi)
+        je      2f
+        movl    $0x0fffffff, 72(%rdi,%rcx,4)
+        btsq    %rcx, 56(%rdi)
+        jmp     3f
+2:
+        movl    %esi, %r8d
+        decl    %r8d
+        shrl    $8, %r8d
+        incl    %r8d                        /* msb */
+        movl    $1, %eax                    /* eb */
+        cmpl    $1, %r8d
+        jbe     4f
+        bsrl    %r8d, %eax
+        leal    1(%rax,%rax), %eax
+4:
+        addl    36(%rdi), %eax              /* um = margin + eb */
+        movl    %eax, 72(%rdi,%rcx,4)
+        addl    32(%rdi), %eax              /* row_best + um */
+        cmpl    (%r11,%rcx,4), %eax
+        jl      5f
+        btsq    %rcx, 56(%rdi)
+3:
+        movl    (%r10,%rcx,4), %eax         /* key */
+        testl   $0x80000000, %eax
+        jz      5f
+        cmpl    24(%rdi), %esi              /* off <= pos */
+        ja      5f
+        btsq    %rcx, 64(%rdi)
+5:
+        incq    %rcx
+        jmp     .Lurp_sm_loop
+.Lurp_sm_done:
+        ret
+ENDF(lz0_u_row_prep_avx2)
+
+/* ------------------------------------------------------------------------
+ * int lz0_sa_scan_side_avx2(lz0_sa_scan_args *a = rdi) -> returns nhits
+ * Guard-page clean, encodes (k==3 ? 0x80 : 0) | d_idx in out_k[h],
+ * Win64/ELF/Darwin ABI safe.
+ * ---------------------------------------------------------------------- */
+FUNC(lz0_sa_scan_side_avx2)
+        movq    (%rdi), %r10                /* r10 = sa_ptr */
+        movq    8(%rdi), %r11               /* r11 = in */
+        movl    16(%rdi), %esi              /* esi = pos */
+        movl    24(%rdi), %ecx              /* ecx = rem count */
+        movl    $0, 44(%rdi)                /* nhits = 0 */
+        testl   %ecx, %ecx
+        jle     .Lsa_ret0
+
+        vmovdqa .Lu_80000000(%rip), %ymm5
+        vmovd   %esi, %xmm0
+        vpbroadcastd %xmm0, %ymm4
+        vpxor   %ymm5, %ymm4, %ymm4         /* ymm4 = pos ^ 0x80000000 */
+
+        cmpl    $0, 28(%rdi)
+        jl      .Lsa_L_loop8
+
+.Lsa_R_loop8:
+        cmpl    $8, %ecx
+        jl      .Lsa_R_tail
+        movl    28(%r10), %eax              /* src_far = sa[7] */
+        leal    1(%rax), %edx
+        cmpl    20(%rdi), %edx              /* src_far + 1 < n ? */
+        jae     .Lsa_R_tail
+        movzwl  (%r11,%rax), %edx
+        cmpw    32(%rdi), %dx
+        jne     .Lsa_R_tail
+
+        vmovdqu (%r10), %ymm0
+        vpxor   %ymm5, %ymm0, %ymm1
+        vpcmpgtd %ymm1, %ymm4, %ymm2
+        vmovmskps %ymm2, %eax               /* eax = mask (src < pos) */
+
+        cmpb    $0, 35(%rdi)
+        jne     .Lsa_R_blk_l2
+
+        cmpb    $0, 37(%rdi)
+        je      .Lsa_R_tail
+        movl    28(%r10), %edx
+        leal    2(%rdx), %r8d
+        cmpl    20(%rdi), %r8d
+        jae     .Lsa_R_tail
+        movzbl  2(%r11,%rdx), %r8d
+        cmpb    34(%rdi), %r8b
+        jne     .Lsa_R_tail
+
+        testl   %eax, %eax
+        jz      .Lsa_R_next8
+        movl    %ecx, 24(%rdi)              /* save rem */
+        movq    48(%rdi), %r8
+        movq    56(%rdi), %r9
+        movl    44(%rdi), %edx
+        movq    %r10, %r11
+        subq    (%rdi), %r11
+        shrq    $2, %r11                    /* base d_idx */
+.Lsa_R_emit3:
+        tzcntl  %eax, %ecx
+        btrl    %ecx, %eax
+        movl    (%r10,%rcx,4), %esi
+        movl    %esi, (%r8,%rdx,4)
+        addl    %r11d, %ecx
+        orl     $0x80, %ecx
+        movb    %cl, (%r9,%rdx)
+        incl    %edx
+        testl   %eax, %eax
+        jnz     .Lsa_R_emit3
+        movl    %edx, 44(%rdi)
+        movl    24(%rdi), %ecx
+        movl    16(%rdi), %esi
+        movq    8(%rdi), %r11
+.Lsa_R_next8:
+        addq    $32, %r10
+        subl    $8, %ecx
+        jmp     .Lsa_R_loop8
+
+.Lsa_R_blk_l2:
+        cmpb    $0, 36(%rdi)
+        jne     .Lsa_ret
+        testl   %eax, %eax
+        jz      .Lsa_R_next8
+        vmovd   %esi, %xmm2
+        vpbroadcastd %xmm2, %ymm2           /* pos */
+        vpsubd  %ymm0, %ymm2, %ymm1         /* off = pos - src */
+        vmovd   40(%rdi), %xmm3
+        vpbroadcastd %xmm3, %ymm3           /* l2_cut */
+        vpxor   %ymm5, %ymm1, %ymm1
+        vpxor   %ymm5, %ymm3, %ymm3
+        vpcmpgtd %ymm1, %ymm3, %ymm2        /* -1 if (u32)off < (u32)l2_cut */
+        vmovmskps %ymm2, %edx
+        andl    %edx, %eax
+        jz      .Lsa_R_next8
+        movl    %ecx, 24(%rdi)
+        movq    48(%rdi), %r8
+        movq    56(%rdi), %r9
+        movl    44(%rdi), %edx
+        movq    %r10, %r11
+        subq    (%rdi), %r11
+        shrq    $2, %r11
+.Lsa_R_emit2:
+        tzcntl  %eax, %ecx
+        btrl    %ecx, %eax
+        movl    (%r10,%rcx,4), %esi
+        movl    %esi, (%r8,%rdx,4)
+        addl    %r11d, %ecx
+        movb    %cl, (%r9,%rdx)
+        incl    %edx
+        testl   %eax, %eax
+        jnz     .Lsa_R_emit2
+        movl    %edx, 44(%rdi)
+        movl    24(%rdi), %ecx
+        movl    16(%rdi), %esi
+        movq    8(%rdi), %r11
+        jmp     .Lsa_R_next8
+
+.Lsa_R_tail:
+        testl   %ecx, %ecx
+        jle     .Lsa_ret
+.Lsa_R_tloop:
+        movl    (%r10), %eax
+        leal    1(%rax), %edx
+        cmpl    20(%rdi), %edx
+        jae     .Lsa_ret
+        movzwl  (%r11,%rax), %edx
+        cmpw    32(%rdi), %dx
+        jne     .Lsa_ret
+        cmpb    $0, 35(%rdi)
+        jne     .Lsa_R_t_isl2
+        cmpb    $0, 37(%rdi)
+        je      .Lsa_R_t_gol2
+        leal    2(%rax), %edx
+        cmpl    20(%rdi), %edx
+        jae     .Lsa_R_t_gol2
+        movzbl  2(%r11,%rax), %edx
+        cmpb    34(%rdi), %dl
+        jne     .Lsa_R_t_gol2
+        cmpl    %esi, %eax
+        jae     .Lsa_R_tnext
+        movl    44(%rdi), %edx
+        movq    48(%rdi), %r8
+        movq    56(%rdi), %r9
+        movl    %eax, (%r8,%rdx,4)
+        movq    %r10, %rax
+        subq    (%rdi), %rax
+        shrq    $2, %rax
+        orl     $0x80, %eax
+        movb    %al, (%r9,%rdx)
+        incl    %edx
+        movl    %edx, 44(%rdi)
+        jmp     .Lsa_R_tnext
+.Lsa_R_t_gol2:
+        movb    $1, 35(%rdi)
+.Lsa_R_t_isl2:
+        cmpb    $0, 36(%rdi)
+        jne     .Lsa_ret
+        cmpl    %esi, %eax
+        jae     .Lsa_R_tnext
+        movl    %esi, %edx
+        subl    %eax, %edx
+        cmpl    40(%rdi), %edx
+        jae     .Lsa_R_tnext
+        movl    44(%rdi), %edx
+        movq    48(%rdi), %r8
+        movq    56(%rdi), %r9
+        movl    %eax, (%r8,%rdx,4)
+        movq    %r10, %rax
+        subq    (%rdi), %rax
+        shrq    $2, %rax
+        movb    %al, (%r9,%rdx)
+        incl    %edx
+        movl    %edx, 44(%rdi)
+.Lsa_R_tnext:
+        addq    $4, %r10
+        decl    %ecx
+        jnz     .Lsa_R_tloop
+        jmp     .Lsa_ret
+
+.Lsa_L_loop8:
+        cmpl    $8, %ecx
+        jl      .Lsa_L_tail
+        movl    -28(%r10), %eax
+        leal    1(%rax), %edx
+        cmpl    20(%rdi), %edx
+        jae     .Lsa_L_tail
+        movzwl  (%r11,%rax), %edx
+        cmpw    32(%rdi), %dx
+        jne     .Lsa_L_tail
+
+        vmovdqu -28(%r10), %ymm0
+        vpxor   %ymm5, %ymm0, %ymm1
+        vpcmpgtd %ymm1, %ymm4, %ymm2
+        vmovmskps %ymm2, %eax               /* bit 7 = r10[0], bit 0 = r10[-7] */
+
+        cmpb    $0, 35(%rdi)
+        jne     .Lsa_L_blk_l2
+
+        cmpb    $0, 37(%rdi)
+        je      .Lsa_L_tail
+        movl    -28(%r10), %edx
+        leal    2(%rdx), %r8d
+        cmpl    20(%rdi), %r8d
+        jae     .Lsa_L_tail
+        movzbl  2(%r11,%rdx), %r8d
+        cmpb    34(%rdi), %r8b
+        jne     .Lsa_L_tail
+
+        testl   %eax, %eax
+        jz      .Lsa_L_next8
+        movl    %ecx, 24(%rdi)
+        movq    48(%rdi), %r8
+        movq    56(%rdi), %r9
+        movl    44(%rdi), %edx
+        movq    (%rdi), %r11
+        subq    %r10, %r11
+        shrq    $2, %r11
+.Lsa_L_emit3:
+        bsrl    %eax, %ecx
+        btrl    %ecx, %eax
+        subl    $7, %ecx
+        movslq  %ecx, %rsi
+        movl    (%r10,%rsi,4), %esi
+        movl    %esi, (%r8,%rdx,4)
+        movl    %r11d, %esi
+        subl    %ecx, %esi
+        orl     $0x80, %esi
+        movb    %sil, (%r9,%rdx)
+        incl    %edx
+        testl   %eax, %eax
+        jnz     .Lsa_L_emit3
+        movl    %edx, 44(%rdi)
+        movl    24(%rdi), %ecx
+        movl    16(%rdi), %esi
+        movq    8(%rdi), %r11
+.Lsa_L_next8:
+        subq    $32, %r10
+        subl    $8, %ecx
+        jmp     .Lsa_L_loop8
+
+.Lsa_L_blk_l2:
+        cmpb    $0, 36(%rdi)
+        jne     .Lsa_ret
+        testl   %eax, %eax
+        jz      .Lsa_L_next8
+        vmovd   %esi, %xmm2
+        vpbroadcastd %xmm2, %ymm2
+        vpsubd  %ymm0, %ymm2, %ymm1
+        vmovd   40(%rdi), %xmm3
+        vpbroadcastd %xmm3, %ymm3
+        vpxor   %ymm5, %ymm1, %ymm1
+        vpxor   %ymm5, %ymm3, %ymm3
+        vpcmpgtd %ymm1, %ymm3, %ymm2
+        vmovmskps %ymm2, %edx
+        andl    %edx, %eax
+        jz      .Lsa_L_next8
+        movl    %ecx, 24(%rdi)
+        movq    48(%rdi), %r8
+        movq    56(%rdi), %r9
+        movl    44(%rdi), %edx
+        movq    (%rdi), %r11
+        subq    %r10, %r11
+        shrq    $2, %r11
+.Lsa_L_emit2:
+        bsrl    %eax, %ecx
+        btrl    %ecx, %eax
+        subl    $7, %ecx
+        movslq  %ecx, %rsi
+        movl    (%r10,%rsi,4), %esi
+        movl    %esi, (%r8,%rdx,4)
+        movl    %r11d, %esi
+        subl    %ecx, %esi
+        movb    %sil, (%r9,%rdx)
+        incl    %edx
+        testl   %eax, %eax
+        jnz     .Lsa_L_emit2
+        movl    %edx, 44(%rdi)
+        movl    24(%rdi), %ecx
+        movl    16(%rdi), %esi
+        movq    8(%rdi), %r11
+        jmp     .Lsa_L_next8
+
+.Lsa_L_tail:
+        testl   %ecx, %ecx
+        jle     .Lsa_ret
+.Lsa_L_tloop:
+        movl    (%r10), %eax
+        leal    1(%rax), %edx
+        cmpl    20(%rdi), %edx
+        jae     .Lsa_ret
+        movzwl  (%r11,%rax), %edx
+        cmpw    32(%rdi), %dx
+        jne     .Lsa_ret
+        cmpb    $0, 35(%rdi)
+        jne     .Lsa_L_t_isl2
+        cmpb    $0, 37(%rdi)
+        je      .Lsa_L_t_gol2
+        leal    2(%rax), %edx
+        cmpl    20(%rdi), %edx
+        jae     .Lsa_L_t_gol2
+        movzbl  2(%r11,%rax), %edx
+        cmpb    34(%rdi), %dl
+        jne     .Lsa_L_t_gol2
+        cmpl    %esi, %eax
+        jae     .Lsa_L_tnext
+        movl    44(%rdi), %edx
+        movq    48(%rdi), %r8
+        movq    56(%rdi), %r9
+        movl    %eax, (%r8,%rdx,4)
+        movq    (%rdi), %rax
+        subq    %r10, %rax
+        shrq    $2, %rax
+        orl     $0x80, %eax
+        movb    %al, (%r9,%rdx)
+        incl    %edx
+        movl    %edx, 44(%rdi)
+        jmp     .Lsa_L_tnext
+.Lsa_L_t_gol2:
+        movb    $1, 35(%rdi)
+.Lsa_L_t_isl2:
+        cmpb    $0, 36(%rdi)
+        jne     .Lsa_ret
+        cmpl    %esi, %eax
+        jae     .Lsa_L_tnext
+        movl    %esi, %edx
+        subl    %eax, %edx
+        cmpl    40(%rdi), %edx
+        jae     .Lsa_L_tnext
+        movl    44(%rdi), %edx
+        movq    48(%rdi), %r8
+        movq    56(%rdi), %r9
+        movl    %eax, (%r8,%rdx,4)
+        movq    (%rdi), %rax
+        subq    %r10, %rax
+        shrq    $2, %rax
+        movb    %al, (%r9,%rdx)
+        incl    %edx
+        movl    %edx, 44(%rdi)
+.Lsa_L_tnext:
+        subq    $4, %r10
+        decl    %ecx
+        jnz     .Lsa_L_tloop
+.Lsa_ret:
+        movl    44(%rdi), %eax
+        vzeroupper
+        ret
+.Lsa_ret0:
+        xorl    %eax, %eax
+        ret
+ENDF(lz0_sa_scan_side_avx2)
 
 #if defined(__ELF__)
         .section .note.GNU-stack, "", @progbits

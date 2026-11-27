@@ -100,6 +100,7 @@ typedef struct {
      * Both are maintained by keep_candidate() only. */
     uint32_t kc_off[64];
     int kc_worst;
+    uint64_t kc_bloom[4];
     /* Resolved per-instance encoder options and optional diagnostics (only
      * populated from globals when opts.isolated == 0). */
     lz0_config opts;

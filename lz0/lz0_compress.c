@@ -132,24 +132,25 @@ void lz0_config_level(lz0_config *cfg, int level) {
     } else {
         // Level 9: Ultra maximal compression (dedicated ultra parser)
         cfg->min_match = 2;
-        cfg->max_chain = 64;
+        cfg->max_chain = 0;
         cfg->max_candidates = 32;
         cfg->parser = LZ0_PARSE_ULTRA;
         cfg->score_k = 8;
         cfg->max_states = 32;
         cfg->jump_levels = LZ0_SKIP_LEVELS_HIGH;
-        cfg->bt_depth = 32;
-        cfg->sa_win = 128;
+        cfg->bt_depth = 16;
+        cfg->sa_win = 96;
         cfg->sa_multiscale = 0;
-        cfg->sa_adapt = 1;
+        cfg->sa_hybrid = 0;
+        cfg->sa_adapt = 2;
         cfg->sdp_fine_matches = 1;
-        cfg->deep_probe = 4;
-        cfg->hash4_probe = 1;
+        cfg->deep_probe = 0;
+        cfg->hash4_probe = 0;
         cfg->len2_max_off = 0;
         cfg->rle_tail = 64;
         cfg->ultra_states = 64;
-        cfg->ultra_margin = 24;
-        cfg->ultra_fine = 8;
+        cfg->ultra_margin = 12;
+        cfg->ultra_fine = 0;
         cfg->ultra_inject = 0;
     }
 }
@@ -308,14 +309,6 @@ static inline void l1_bits(lz0_dwr_t *w, uint32_t code, int nbits, int cat) {
         w->acct.bits_elias_len += (uint64_t)nbits;
     else if (cat == 2)
         w->acct.bits_offset += (uint64_t)nbits;
-    if (w->backtrack) {
-        if (((code >> (nbits - 1)) & 1u) && w->index > 0)
-            w->data[w->index - 1u] |= 1u;
-        w->backtrack = 0;
-        if (--nbits == 0)
-            return;
-        code &= (1u << nbits) - 1u;
-    }
     if (nbits <= w->bit_pos) {
         w->bit_pos -= nbits;
         w->cur_byte |= (uint8_t)(code << w->bit_pos);
@@ -382,7 +375,6 @@ static inline void l1_emit_new(lz0_dwr_t *w, uint32_t off, uint32_t L) {
     l1_elias(w, msb, 1, 2);
     l1_byte(w, (unsigned char)(255u - rem));
     w->acct.bits_offset += 8;
-    w->backtrack = 0;
     uint32_t v = L - 1u;
     if (v <= 7u) {
         l1_bits(w, v - 1u, 3, 1);
@@ -464,7 +456,7 @@ static inline int l1_better(int bk, int bl, int bc, int L, int c) {
 
 static inline void l1_check_pos(const unsigned char *in, uint32_t i, int max_left,
                                 uint32_t p, uint32_t w0, uint32_t last_off, uint32_t len2_lim,
-                                int min_len, int *bk, int *bl, int *bc, uint32_t *bo) {
+                                int min_len, int allow_last, int *bk, int *bl, int *bc, uint32_t *bo) {
     uint32_t off = i - p;
     if (off == last_off)
         return;
@@ -477,10 +469,10 @@ static inline void l1_check_pos(const unsigned char *in, uint32_t i, int max_lef
         return;
     if (L == 2 && (off > len2_lim || off > 256u))
         return;
-    if (L == 3 && off > 7936u)
+    if (L == 3 && off > (allow_last ? 1792u : 3840u))
         return;
     int c = l1_cost_new(off, (uint32_t)L);
-    if ((L << 3) > c && l1_better(*bk, *bl, *bc, L, c)) {
+    if ((L << 3) > (allow_last ? (c + 8) : c) && l1_better(*bk, *bl, *bc, L, c)) {
         *bk = 2;
         *bl = L;
         *bo = off;
@@ -510,16 +502,16 @@ static void l1_find_best(const unsigned char *in, uint32_t n, uint32_t i,
     if (i + 2u < n) {
         lz0_l1_slot sl = ht[l1_h3(in + i, shift)];
         if (sl.p0 < i)
-            l1_check_pos(in, i, max_left, sl.p0, w0, last_off, len2_lim, 2, &bk, &bl, &bc, &bo);
+            l1_check_pos(in, i, max_left, sl.p0, w0, last_off, len2_lim, 2, allow_last, &bk, &bl, &bc, &bo);
         if (sl.p1 < i)
-            l1_check_pos(in, i, max_left, sl.p1, w0, last_off, len2_lim, 2, &bk, &bl, &bc, &bo);
+            l1_check_pos(in, i, max_left, sl.p1, w0, last_off, len2_lim, 2, allow_last, &bk, &bl, &bc, &bo);
     }
     if (!allow_last) {
         for (int k = 0; k < nmru; k++) {
             uint32_t off = mru[k];
             if (off == 0u || off > i)
                 continue;
-            l1_check_pos(in, i, max_left, i - off, w0, last_off, len2_lim, 3, &bk, &bl, &bc, &bo);
+            l1_check_pos(in, i, max_left, i - off, w0, last_off, len2_lim, 3, 0, &bk, &bl, &bc, &bo);
         }
     }
     *kind_out = bk;
@@ -577,7 +569,6 @@ static int compress_fast_greedy(const unsigned char *in, uint32_t n,
         free(ht);
         return -1;
     }
-    w.backtrack = 1;
     stats->peak_ram = hbytes + w.cap;
 
     double t1 = now_ms();
@@ -613,7 +604,17 @@ static int compress_fast_greedy(const unsigned char *in, uint32_t n,
             free(w.data);
             return -1;
         }
-        l1_emit_lit(&w, in + lit_start, i - lit_start);
+        if (lit_start == 0u) {
+            /* Initial literal decision tag is implicit in the LZ0 stream format. */
+            uint32_t flen = i;
+            l1_elias(&w, flen, 0, 1);
+            memcpy(w.data + w.index, in, flen);
+            w.index += flen;
+            w.acct.bits_literal += (uint64_t)flen << 3;
+            w.n_lit++;
+        } else {
+            l1_emit_lit(&w, in + lit_start, i - lit_start);
+        }
         if (i >= n || c_kind < 0)
             continue;
         if (l1_ensure(&w, 64u) < 0) {

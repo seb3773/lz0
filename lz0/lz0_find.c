@@ -1434,7 +1434,17 @@ static int already_has_offset(const lz0_match *out, int n, uint32_t off) {
     return 0;
 }
 
-static inline int match_score(lz0_match m) {
+#if defined(__GNUC__) || defined(__clang__)
+#define LZ0_PREFETCH_R(p) __builtin_prefetch((const void *)(p), 0, 3)
+#define LZ0_ALWAYS_INLINE inline __attribute__((always_inline))
+#define LZ0_NOINLINE __attribute__((noinline))
+#else
+#define LZ0_PREFETCH_R(p) ((void)(p))
+#define LZ0_ALWAYS_INLINE inline
+#define LZ0_NOINLINE
+#endif
+
+static LZ0_ALWAYS_INLINE int match_score(lz0_match m) {
     int L = (int)m.length;
     uint32_t off = m.offset;
     if (L < 2 || off == 0)
@@ -1514,39 +1524,54 @@ static inline int lz0_kc_ctz32(uint32_t v) {
 
 /* Scores of the current candidate list, kept in sync by keep_candidate()
  * inside f->kc_score[], together with f->kc_off[] (offsets, contiguous for
- * vector search) and f->kc_worst (cached worst slot, -1 when stale). Every
- * write to the list during a lz0_find_matches() call goes through
- * keep_candidate(), so the caches never go stale while they are read; any
- * change of a slot's score or length invalidates kc_worst. The list always
- * restarts empty, so entries beyond *n are never read. Thread-safe per
- * finder instance. */
-#if defined(__GNUC__) || defined(__clang__)
-#define LZ0_PREFETCH_R(p) __builtin_prefetch((const void *)(p), 0, 3)
-#define LZ0_ALWAYS_INLINE inline __attribute__((always_inline))
-#define LZ0_NOINLINE __attribute__((noinline))
-#else
-#define LZ0_PREFETCH_R(p) ((void)(p))
-#define LZ0_ALWAYS_INLINE inline
-#define LZ0_NOINLINE
-#endif
+ * vector search), f->kc_bloom[] (256-bit presence filter), and f->kc_worst
+ * (cached worst slot, -1 when stale). Every write to the list during a
+ * lz0_find_matches() call goes through keep_candidate(), so the caches never
+ * go stale while they are read; any change of a slot's score or length
+ * invalidates kc_worst. The list always restarts empty, so entries beyond *n
+ * are never read. Thread-safe per finder instance. */
+static LZ0_NOINLINE int keep_candidate_cold(lz0_finder *f, lz0_match *out, int max_c, lz0_match m,
+                                            int m_score, int worst, uint32_t bh, uint64_t bbit,
+                                            uint64_t bval) {
+    /* On saturated strided non-raster blocks (e.g. fixed-width tables), drop
+     * redundant candidates already strictly Pareto-dominated by >= 2 entries. */
+    if (max_c >= 32 && f->local_tab) {
+        int dom = 0;
+        for (int j = 0; j < max_c; j++) {
+            if (out[j].offset <= m.offset && out[j].length >= m.length && ++dom >= 2)
+                return 0;
+        }
+    }
+    out[worst] = m;
+    f->kc_off[worst] = m.offset;
+    f->kc_score[worst] = m_score;
+    f->kc_bloom[bh >> 6] = bval | bbit;
+    f->kc_worst = -1;
+    return 1;
+}
 
 static LZ0_NOINLINE int keep_candidate_slow(lz0_finder *f, lz0_match *out, int *n, int max_c,
                                             lz0_match m, int m_score, int worst) {
     int cnt = *n;
-    int i;
-    if (cnt <= LZ0_KC_SCALAR_MAX) {
-        /* short lists (fast levels): an inline scan beats a kernel call.
-         * Branch-free over the whole fixed-size window (no data-dependent
-         * exit), masked to the live entries: same first match index as an
-         * early-exit loop. Slots >= cnt hold stale but initialised offsets
-         * (the finder is zeroed at init). */
-        uint32_t eq = 0;
-        for (int j = 0; j < LZ0_KC_SCALAR_MAX; j++)
-            eq |= (uint32_t)(f->kc_off[j] == m.offset) << j;
-        eq &= (uint32_t)((1ull << cnt) - 1u);
-        i = eq ? lz0_kc_ctz32(eq) : -1;
-    } else {
-        i = lz0_simd_find_u32(f->kc_off, cnt, m.offset);
+    uint32_t bh = (m.offset * 2654435761u) >> 24;
+    uint64_t bbit = 1ull << (bh & 63u);
+    uint64_t bval = f->kc_bloom[bh >> 6];
+    int i = -1;
+    if (bval & bbit) {
+        if (cnt <= LZ0_KC_SCALAR_MAX) {
+            /* short lists (fast levels): an inline scan beats a kernel call.
+             * Branch-free over the whole fixed-size window (no data-dependent
+             * exit), masked to the live entries: same first match index as an
+             * early-exit loop. Slots >= cnt hold stale but initialised offsets
+             * (the finder is zeroed at init). */
+            uint32_t eq = 0;
+            for (int j = 0; j < LZ0_KC_SCALAR_MAX; j++)
+                eq |= (uint32_t)(f->kc_off[j] == m.offset) << j;
+            eq &= (uint32_t)((1ull << cnt) - 1u);
+            i = eq ? lz0_kc_ctz32(eq) : -1;
+        } else {
+            i = lz0_simd_find_u32(f->kc_off, cnt, m.offset);
+        }
     }
     if (i >= 0) {
         if (m.length > out[i].length) {
@@ -1560,25 +1585,12 @@ static LZ0_NOINLINE int keep_candidate_slow(lz0_finder *f, lz0_match *out, int *
         out[cnt] = m;
         f->kc_off[cnt] = m.offset;
         f->kc_score[cnt] = (m_score >= 0) ? m_score : match_score(m);
+        f->kc_bloom[bh >> 6] = bval | bbit;
         f->kc_worst = -1;
         *n = cnt + 1;
         return 1;
     }
-    /* When cnt == max_c and i < 0, m_score > worst_score is guaranteed.
-     * On saturated strided non-raster blocks (e.g. fixed-width tables), drop
-     * redundant candidates already strictly Pareto-dominated by >= 2 entries. */
-    if (max_c >= 32 && f->local_tab) {
-        int dom = 0;
-        for (int j = 0; j < cnt; j++) {
-            if (out[j].offset <= m.offset && out[j].length >= m.length && ++dom >= 2)
-                return 0;
-        }
-    }
-    out[worst] = m;
-    f->kc_off[worst] = m.offset;
-    f->kc_score[worst] = m_score;
-    f->kc_worst = -1;
-    return 1;
+    return keep_candidate_cold(f, out, max_c, m, m_score, worst, bh, bbit, bval);
 }
 
 static LZ0_ALWAYS_INLINE int keep_candidate(lz0_finder *f, lz0_match *out, int *n, int max_c,
@@ -1587,6 +1599,27 @@ static LZ0_ALWAYS_INLINE int keep_candidate(lz0_finder *f, lz0_match *out, int *
         return 0;
     if (max_c > 64)
         max_c = 64;
+    int cnt = *n;
+    int m_score = -1;
+    int worst = -1;
+
+    if (cnt == max_c) {
+        worst = f->kc_worst;
+        if (worst < 0) {
+            worst = cnt <= LZ0_KC_SCALAR_MAX ? lz0_kc_worst_c(f->kc_score, out, cnt)
+                                             : lz0_simd_kc_worst(f->kc_score, out, cnt);
+            f->kc_worst = worst;
+        }
+        int worst_score = f->kc_score[worst];
+        m_score = match_score(m);
+        if (m_score <= worst_score)
+            return 0;
+    }
+    return keep_candidate_slow(f, out, n, max_c, m, m_score, worst);
+}
+
+static LZ0_ALWAYS_INLINE int keep_candidate_gt2(lz0_finder *f, lz0_match *out, int *n, int max_c,
+                                                lz0_match m) {
     int cnt = *n;
     int m_score = -1;
     int worst = -1;
@@ -1654,6 +1687,23 @@ static int sa_probe_side(lz0_finder *f, uint32_t pos, uint32_t src, int known,
         } else {
             keep_candidate(f, out, nout, f->max_candidates, m);
         }
+    }
+    return ml;
+}
+
+static LZ0_ALWAYS_INLINE int sa_probe_side_fast(lz0_finder *f, const unsigned char *in,
+                                                uint32_t pos, uint32_t src, int minm, int maxl,
+                                                int *best_len, lz0_match *out, int *nout,
+                                                int max_c) {
+    int ml = (3 >= maxl) ? maxl
+                         : 3 + lz0_simd_matchlen(in + pos + 3, in + src + 3, maxl - 3);
+    if (ml >= minm) {
+        lz0_match m;
+        m.offset = pos - src;
+        m.length = (uint32_t)ml;
+        if (ml > *best_len)
+            *best_len = ml;
+        keep_candidate_gt2(f, out, nout, max_c, m);
     }
     return ml;
 }
@@ -1811,6 +1861,8 @@ static LZ0_ALWAYS_INLINE void sa_probe_core(lz0_finder *f, uint32_t pos, int min
 
     int left_on = 1;
     int right_on = 1;
+    int left_l2 = 0;
+    int right_l2 = 0;
     const int can_stop =
         (!with_cen && !use_lcp && f->sa_sample <= 1 && minm >= 2 && maxl >= 2 && max_d > 32);
     const unsigned char *in_p = f->in;
@@ -1833,6 +1885,139 @@ static LZ0_ALWAYS_INLINE void sa_probe_core(lz0_finder *f, uint32_t pos, int min
 #endif
 
     while (d <= max_d) {
+        if (d == 9 && can_stop && ms == 0 && max_d - 8 <= 128 && lz0_simd_level >= 2) {
+            uint32_t srcL[128], srcR[128];
+            uint8_t kL[128], kR[128];
+            int max_c = f->max_candidates > 64 ? 64 : f->max_candidates;
+            int ws_init = INT_MIN;
+            if (*nout == max_c) {
+                int w = f->kc_worst;
+                if (w < 0) {
+                    w = max_c <= LZ0_KC_SCALAR_MAX
+                            ? lz0_kc_worst_c(f->kc_score, out, max_c)
+                            : lz0_simd_kc_worst(f->kc_score, out, max_c);
+                    f->kc_worst = w;
+                }
+                ws_init = f->kc_score[w];
+            }
+            uint8_t stop_l2 = (uint8_t)(*nout == max_c && ws_init >= 10 && *best_len >= 2);
+            uint32_t l2_cut =
+                stop_l2 ? 0u : (*nout == max_c && ws_init >= 4) ? 257u : 0xffffffffu;
+            uint8_t ge3_ok = (uint8_t)(maxl >= 3);
+            uint8_t b2 = ge3_ok ? in_p[pos + 2] : 0;
+            int nhL = 0, nhR = 0;
+            if (left_on && r >= 9) {
+                int cntL = max_d - 8;
+                if (cntL > r - 8)
+                    cntL = r - 8;
+                lz0_sa_scan_args aL = {f->sa + r - 9, in_p, pos, n, cntL, -1,
+                                       (uint16_t)prefix, b2, (uint8_t)left_l2, stop_l2,
+                                       ge3_ok, l2_cut, 0, srcL, kL};
+                nhL = lz0_simd_sa_scan_side(&aL);
+            }
+            if (right_on && r + 9 < ns) {
+                int cntR = max_d - 8;
+                if (cntR > ns - r - 9)
+                    cntR = ns - r - 9;
+                lz0_sa_scan_args aR = {f->sa + r + 9, in_p, pos, n, cntR, 1,
+                                       (uint16_t)prefix, b2, (uint8_t)right_l2, stop_l2,
+                                       ge3_ok, l2_cut, 0, srcR, kR};
+                nhR = lz0_simd_sa_scan_side(&aR);
+            }
+            int iL = 0, iR = 0;
+            while ((iL < nhL && left_on) || (iR < nhR && right_on)) {
+                int takeL;
+                if (!(iR < nhR && right_on))
+                    takeL = 1;
+                else if (!(iL < nhL && left_on))
+                    takeL = 0;
+                else
+                    takeL = ((kL[iL] & 0x7fu) <= (kR[iR] & 0x7fu));
+                uint32_t src;
+                uint8_t kb;
+                int *side_on;
+                if (takeL) {
+                    src = srcL[iL];
+                    kb = kL[iL];
+                    iL++;
+                    side_on = &left_on;
+                    if (iL + 1 < nhL && (kL[iL + 1] & 0x80u))
+                        LZ0_PREFETCH_R(in_p + srcL[iL + 1]);
+                } else {
+                    src = srcR[iR];
+                    kb = kR[iR];
+                    iR++;
+                    side_on = &right_on;
+                    if (iR + 1 < nhR && (kR[iR + 1] & 0x80u))
+                        LZ0_PREFETCH_R(in_p + srcR[iR + 1]);
+                }
+                if (!(kb & 0x80u)) {
+                    if (minm <= 2) {
+                        if (2 > *best_len)
+                            *best_len = 2;
+                        if (*nout == max_c) {
+                            int w = f->kc_worst;
+                            if (w < 0) {
+                                w = max_c <= LZ0_KC_SCALAR_MAX
+                                        ? lz0_kc_worst_c(f->kc_score, out, max_c)
+                                        : lz0_simd_kc_worst(f->kc_score, out, max_c);
+                                f->kc_worst = w;
+                            }
+                            if (f->kc_score[w] >= 10) {
+                                *side_on = 0;
+                                continue;
+                            }
+                        }
+                        lz0_match m;
+                        m.offset = pos - src;
+                        m.length = 2u;
+                        keep_candidate(f, out, nout, max_c, m);
+                    }
+                    if (*nout == max_c) {
+                        int w = f->kc_worst;
+                        if (w < 0) {
+                            w = max_c <= LZ0_KC_SCALAR_MAX
+                                    ? lz0_kc_worst_c(f->kc_score, out, max_c)
+                                    : lz0_simd_kc_worst(f->kc_score, out, max_c);
+                            f->kc_worst = w;
+                        }
+                        if (2 <= *best_len && 10 <= f->kc_score[w])
+                            *side_on = 0;
+                    }
+                    continue;
+                }
+                if (*nout == max_c) {
+                    int w = f->kc_worst;
+                    if (w < 0) {
+                        w = max_c <= LZ0_KC_SCALAR_MAX
+                                ? lz0_kc_worst_c(f->kc_score, out, max_c)
+                                : lz0_simd_kc_worst(f->kc_score, out, max_c);
+                        f->kc_worst = w;
+                    }
+                    int ws = f->kc_score[w];
+                    if (ws >= 18 && maxl >= 4 && in_p[src + 3] != in_p[pos + 3]) {
+                        if (minm <= 3 && 3 > *best_len)
+                            *best_len = 3;
+                        *side_on = 0;
+                        continue;
+                    }
+                }
+                int ml = sa_probe_side_fast(f, in_p, pos, src, minm, maxl, best_len, out,
+                                            nout, max_c);
+                if (*nout == max_c) {
+                    int w = f->kc_worst;
+                    if (w < 0) {
+                        w = max_c <= LZ0_KC_SCALAR_MAX
+                                ? lz0_kc_worst_c(f->kc_score, out, max_c)
+                                : lz0_simd_kc_worst(f->kc_score, out, max_c);
+                        f->kc_worst = w;
+                    }
+                    if (ml <= *best_len && sa_max_score(ml) <= f->kc_score[w])
+                        *side_on = 0;
+                }
+            }
+            break;
+        }
 #if LZ0_SA_PF_K > 0
         if (with_pf && d + LZ0_SA_PF_K <= pf_lim)
             sa_pf_payload(sa, in, hot, r, ns, d + LZ0_SA_PF_K);
@@ -1876,6 +2061,10 @@ static LZ0_ALWAYS_INLINE void sa_probe_core(lz0_finder *f, uint32_t pos, int min
                     right_on = 0;
                 }
             }
+            if (mlL == 2)
+                left_l2 = 1;
+            if (mlR == 2)
+                right_l2 = 1;
             if ((mlL >= 0 || mlR >= 0)) {
                 int max_c = f->max_candidates > 64 ? 64 : f->max_candidates;
                 if (*nout == max_c) {
@@ -1907,7 +2096,8 @@ static LZ0_ALWAYS_INLINE void sa_probe_core(lz0_finder *f, uint32_t pos, int min
                              cen, with_cen);
         }
         if (adapt && (d == 4 || d == 8)) {
-            if (*best_len >= 16) {
+            int adapt_th = (adapt == 2) ? 12 : (adapt >= 3) ? adapt : 16;
+            if (*best_len >= adapt_th) {
                 stop_at = d;
                 break;
             }
@@ -2645,6 +2835,7 @@ int lz0_find_matches(lz0_finder *f, uint32_t pos, uint32_t last_offset,
     int max_left = (int)(n - pos);
     if (max_left < 2)
         return 0;
+    memset(f->kc_bloom, 0, sizeof(f->kc_bloom));
 
     int maxl = max_left;
 

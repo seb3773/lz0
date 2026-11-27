@@ -126,6 +126,130 @@ uint64_t lz0_bin40_hits_c(const unsigned char *p, uint32_t w0, uint32_t pm) {
     return hits;
 }
 
+#include <limits.h>
+#include <stddef.h>
+
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(offsetof(lz0_u_prep, h_lit) == 328, "lz0_u_prep layout mismatch");
+_Static_assert(offsetof(lz0_sa_scan_args, out_k) == 56, "lz0_sa_scan_args layout mismatch");
+#endif
+
+static inline int prep_elias(int v) {
+    unsigned uv = (unsigned)v;
+    int bits;
+#if defined(__GNUC__) || defined(__clang__)
+    bits = 32 - __builtin_clz(uv);
+#else
+    bits = 0;
+    while (uv) {
+        uv >>= 1;
+        bits++;
+    }
+#endif
+    return (bits << 1) - 1;
+}
+
+void lz0_u_row_prep_c(lz0_u_prep *p) {
+    int nsi = p->nsi;
+    const uint32_t *rkey = p->rkey;
+    const int32_t *rcost = p->rcost;
+    int32_t minc = rcost[0];
+    int b = 0;
+    for (int s = 1; s < nsi; s++) {
+        if (rcost[s] < minc) {
+            minc = rcost[s];
+            b = s;
+        }
+    }
+    uint32_t boff = rkey[b] & 0x7fffffffu;
+    int32_t min2 = INT_MAX;
+    int b2 = -1;
+    uint64_t pass = 0, lit = 0;
+    int32_t row_best = p->row_best;
+    int32_t margin = p->margin;
+    int exact = p->exact;
+    uint32_t pos = p->pos;
+
+    for (int s = 0; s < nsi; s++) {
+        uint32_t key = rkey[s];
+        uint32_t off = key & 0x7fffffffu;
+        int32_t c = rcost[s];
+        if (off != boff && c < min2) {
+            min2 = c;
+            b2 = s;
+        }
+        int32_t um;
+        if (exact) {
+            um = INT_MAX / 8;
+            pass |= 1ull << s;
+        } else {
+            int msb = (int)((off - 1u) >> 8) + 1;
+            int eb = (msb <= 1) ? 1 : prep_elias(msb);
+            um = margin + eb;
+            if (c <= row_best + um)
+                pass |= 1ull << s;
+        }
+        p->um[s] = um;
+        if (((pass >> s) & 1ull) && (key & 0x80000000u) && off <= pos)
+            lit |= 1ull << s;
+        uint32_t lk = key | 0x80000000u;
+        p->h_lit[s] = ((lk ^ (lk >> 16)) * 0x9E3779B1u) >> 24;
+    }
+    p->b_out = b;
+    p->b2_out = b2;
+    p->pass_mask = pass;
+    p->lit_cand_mask = lit;
+}
+
+int lz0_sa_scan_side_c(lz0_sa_scan_args *a) {
+    const uint32_t *p = a->sa_ptr;
+    const unsigned char *in = a->in;
+    uint32_t pos = a->pos;
+    uint32_t n = a->n;
+    int cnt = a->count;
+    int dir = a->dir;
+    uint16_t pref = a->pref16;
+    uint8_t b2 = a->b2;
+    uint8_t in_l2 = a->in_l2;
+    uint8_t stop_l2 = a->stop_l2;
+    uint8_t ge3 = a->ge3_ok;
+    uint32_t l2_cut = a->l2_cut;
+    uint32_t *out_src = a->out_src;
+    uint8_t *out_k = a->out_k;
+    int nh = 0;
+
+    for (int i = 0; i < cnt; i++, p += dir) {
+        uint32_t src = *p;
+        if (src + 1u >= n)
+            break;
+        uint16_t v;
+        memcpy(&v, in + src, 2);
+        if (v != pref)
+            break;
+        if (!in_l2) {
+            if (ge3 && src + 2u < n && in[src + 2] == b2) {
+                if (src < pos) {
+                    out_src[nh] = src;
+                    out_k[nh] = (uint8_t)(0x80u | (uint8_t)i);
+                    nh++;
+                }
+                continue;
+            }
+            in_l2 = 1;
+        }
+        if (stop_l2)
+            break;
+        if (src < pos && (pos - src) < l2_cut) {
+            out_src[nh] = src;
+            out_k[nh] = (uint8_t)i;
+            nh++;
+        }
+    }
+    a->in_l2 = in_l2;
+    a->nhits = nh;
+    return nh;
+}
+
 static int lz0_simd_detect(void) {
 #if defined(LZ0_SIMD_X86_64)
     unsigned a, b, c, d;

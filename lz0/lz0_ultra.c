@@ -86,6 +86,7 @@ typedef struct {
     uint32_t n;
     int K;
     int use_ht;
+    int is_ht6;
     int oom;
     size_t alloc_bytes;
     u_pos_lim *lim;   /* [n + 1] (best, worst_cutoff) packed 8B/byte */
@@ -103,6 +104,8 @@ typedef struct {
     uint32_t orig_bt;
     uint32_t lit_opos;
     uint32_t *anchor_slot; /* non-NULL => materialize anchor lazily on accept */
+    uint64_t *anc_mask;
+    uint64_t anc_bit;
 } u_src_ref;
 
 static inline int u_elias(int v) {
@@ -297,10 +300,9 @@ static inline void u_row_free(u_dp *d, uint32_t pos) {
     d->rows[pos] = NULL;
 }
 
-static U_NOINLINE u_row_hdr *u_row_promote(u_dp *d, uint32_t pos, u_row_hdr *old_r) {
-    int old_t = old_r->tier;
+static U_NOINLINE u_row_hdr *u_row_promote_to(u_dp *d, uint32_t pos, u_row_hdr *old_r, int target_tier) {
     int old_ns = old_r->ns;
-    u_row_hdr *nr = u_row_alloc(d, old_t + 1);
+    u_row_hdr *nr = u_row_alloc(d, target_tier);
     if (!nr)
         return NULL;
     nr->bloom = old_r->bloom;
@@ -330,6 +332,10 @@ static U_NOINLINE u_row_hdr *u_row_promote(u_dp *d, uint32_t pos, u_row_hdr *old
     return nr;
 }
 
+static U_ALWAYS_INLINE u_row_hdr *u_row_promote(u_dp *d, uint32_t pos, u_row_hdr *old_r) {
+    return u_row_promote_to(d, pos, old_r, old_r->tier + 1);
+}
+
 static U_NOINLINE void u_ht_rebuild(u_row_hdr *r, const uint32_t *rkey) {
     u_tier2_extra *e = u_row_t2(r);
     memset(e->htab, 0xff, sizeof(e->htab));
@@ -349,12 +355,19 @@ static U_NOINLINE uint32_t u_alloc_anchor(u_dp *d, const u_src_ref *sref) {
         return U_BT_NIL;
     bt_inc(d, anc); /* pin across step i so evictions cannot drop refcnt to 0 mid-step */
     *sref->anchor_slot = anc;
+    if (sref->anc_mask)
+        *sref->anc_mask |= sref->anc_bit;
     return anc;
 }
 
 static U_ALWAYS_INLINE uint32_t u_resolve_bt(u_dp *d, const u_src_ref *sref) {
     if (!sref->anchor_slot)
         return sref->orig_bt;
+    if (sref->anc_mask) {
+        if (*sref->anc_mask & sref->anc_bit)
+            return *sref->anchor_slot;
+        return u_alloc_anchor(d, sref);
+    }
     uint32_t anc = *sref->anchor_slot;
     if (anc != U_BT_NIL)
         return anc;
@@ -492,22 +505,42 @@ static U_ALWAYS_INLINE int u_find_small(const u_row_hdr *r, const uint32_t *rkey
     return lz0_simd_find_u32(rkey, n, key);
 }
 
-static U_ALWAYS_INLINE void u_relax_um(u_dp *d, uint32_t pos, uint32_t key, int cost,
-                                       const u_src_ref *sref, int um, const int lit_tie) {
-    u_pos_lim *pl = &d->lim[pos];
-    if (um < INT_MAX / 8 && cost > pl->best + um)
+static U_NOINLINE void u_t26_evict(u_dp *d, uint32_t pos, u_row_hdr *r, int w, uint32_t ht_ins,
+                                     uint32_t key, int cost, const u_src_ref *sref) {
+    uint32_t *const rkey = (uint32_t *)(r + 1);
+    int32_t *const rcost = (int32_t *)(rkey + 64u);
+    uint32_t *const rbt = rkey + 128u;
+    u_tier2_extra *const e = (u_tier2_extra *)(rkey + 192u);
+    uint32_t new_bt = u_resolve_bt(d, sref);
+    if (d->oom)
         return;
-    if (!lit_tie && cost >= pl->worst)
-        return;
-    if (cost < pl->best)
-        pl->best = cost;
-    u_row_hdr *r = d->rows[pos];
-    if (__builtin_expect(!r, 0)) {
+    bt_inc(d, new_bt);
+    uint32_t dp = u_h256(rkey[w]) & 255u;
+    while (e->htab[dp] != (uint8_t)w)
+        dp = (dp + 1u) & 255u;
+    e->htab[ht_ins] = (uint8_t)w;
+    e->htab[dp] = 0xfe;
+    uint32_t old_bt = rbt[w];
+    rkey[w] = key;
+    rcost[w] = cost;
+    rbt[w] = new_bt;
+    bt_dec(d, old_bt);
+    if (++e->tomb >= 48)
+        u_ht_rebuild(r, rkey);
+    u_t2_mark_dirty(d, pos, r, w);
+}
+
+static U_NOINLINE void u_relax_non_t26(u_dp *d, uint32_t pos, u_row_hdr *r, uint32_t key, int cost,
+                                         const u_src_ref *sref, int lit_tie, int32_t h256_in) {
+    if (!r) {
         u_relax_first_row(d, pos, key, cost, sref);
         return;
     }
+    const uint32_t rcap = 1u << r->shift;
+    uint32_t *const rkey = (uint32_t *)(r + 1);
+    int32_t *const rcost = (int32_t *)(rkey + rcap);
+    uint32_t *const rbt = rkey + (rcap << 1);
     int n = r->ns;
-    int32_t *rcost = u_row_cost(r);
     int w = -1;
     if (n == d->K) {
         if (__builtin_expect(r->worst == 0xff, 0))
@@ -516,14 +549,13 @@ static U_ALWAYS_INLINE void u_relax_um(u_dp *d, uint32_t pos, uint32_t key, int 
         if (cost > rcost[w] || (!lit_tie && cost == rcost[w]))
             return;
     }
-    uint32_t *rkey = u_row_key(r);
-    uint32_t *rbt = u_row_bt(r);
     int s = -1;
     uint32_t ht_ins = 0;
     const int is_ht = (r->tier == 2 && d->use_ht);
-    if (__builtin_expect(is_ht, 1)) {
-        const uint8_t *ht = u_row_t2(r)->htab;
-        uint32_t p = u_h256(key) & 255u;
+    u_tier2_extra *const t2e = is_ht ? (u_tier2_extra *)(rkey + rcap * 3u) : NULL;
+    if (is_ht) {
+        const uint8_t *ht = t2e->htab;
+        uint32_t p = (h256_in >= 0 ? (uint32_t)h256_in : u_h256(key)) & 255u;
         uint32_t first_tomb = 0xffffffffu;
         for (;;) {
             uint8_t sv = ht[p];
@@ -564,7 +596,7 @@ static U_ALWAYS_INLINE void u_relax_um(u_dp *d, uint32_t pos, uint32_t key, int 
     if (w >= 0 && lit_tie && cost >= rcost[w])
         return;
     if (w < 0) {
-        if (__builtin_expect(n < (1 << r->shift), 1)) {
+        if (n < (int)rcap) {
             uint32_t new_bt = u_resolve_bt(d, sref);
             if (d->oom)
                 return;
@@ -574,7 +606,7 @@ static U_ALWAYS_INLINE void u_relax_um(u_dp *d, uint32_t pos, uint32_t key, int 
             rbt[n] = new_bt;
             r->ns = (uint8_t)(n + 1);
             if (is_ht)
-                u_row_t2(r)->htab[ht_ins] = (uint8_t)n;
+                t2e->htab[ht_ins] = (uint8_t)n;
             else if (r->tier == 1 || r->tier == 2) {
                 uint32_t h = u_h256(key);
                 u_row_bloom4(r)[h >> 6] |= 1ull << (h & 63u);
@@ -586,13 +618,12 @@ static U_ALWAYS_INLINE void u_relax_um(u_dp *d, uint32_t pos, uint32_t key, int 
         }
         return;
     }
-    /* full row, key absent, cost < worst already established: evict w */
     uint32_t new_bt = u_resolve_bt(d, sref);
     if (d->oom)
         return;
     bt_inc(d, new_bt);
     if (is_ht) {
-        u_tier2_extra *e = u_row_t2(r);
+        u_tier2_extra *e = t2e;
         uint32_t old_k = rkey[w];
         uint32_t dp = u_h256(old_k) & 255u;
         while (e->htab[dp] != (uint8_t)w)
@@ -621,6 +652,192 @@ static U_ALWAYS_INLINE void u_relax_um(u_dp *d, uint32_t pos, uint32_t key, int 
         }
         u_t2_mark_dirty(d, pos, r, w);
     }
+}
+
+/* Inline fast path strictly when r is ALREADY tier-2 shift-6 (K<=64). */
+static U_ALWAYS_INLINE void u_relax_row_t26_body(u_dp *d, uint32_t pos, u_row_hdr *r,
+                                                 uint32_t key, int cost, const u_src_ref *sref,
+                                                 const int lit_tie, int32_t h256_in) {
+    uint32_t *const rkey = (uint32_t *)(r + 1);
+    int32_t *const rcost = (int32_t *)(rkey + 64u);
+    uint32_t *const rbt = rkey + 128u;
+    u_tier2_extra *const t2e = (u_tier2_extra *)(rkey + 192u);
+    int n = r->ns;
+    int w = -1;
+    if (n == d->K) {
+        if (__builtin_expect(r->worst == 0xff, 0))
+            u_find_worst(d, pos, r);
+        w = r->worst;
+        if (cost > rcost[w] || (!lit_tie && cost == rcost[w]))
+            return;
+    }
+    uint8_t *const ht = t2e->htab;
+    uint32_t p = (h256_in >= 0 ? (uint32_t)h256_in : u_h256(key)) & 255u;
+    uint32_t first_tomb = 0xffffffffu;
+    int s = -1;
+    uint32_t ht_ins = 0;
+    for (;;) {
+        uint8_t sv = ht[p];
+        if (sv == 0xff) {
+            ht_ins = (first_tomb != 0xffffffffu) ? first_tomb : p;
+            break;
+        }
+        if (sv == 0xfe) {
+            if (first_tomb == 0xffffffffu)
+                first_tomb = p;
+        } else if (rkey[sv] == key) {
+            s = (int)sv;
+            break;
+        }
+        p = (p + 1u) & 255u;
+    }
+    if (s >= 0) {
+        int cur = rcost[s];
+        if (cost < cur ||
+            (lit_tie && cost == cur &&
+             lz0_lit_headroom(pos - sref->lit_opos) >
+                 lz0_lit_headroom(pos - bt_pos(d, rbt[s])))) {
+            uint32_t new_bt = u_resolve_bt(d, sref);
+            if (d->oom)
+                return;
+            bt_inc(d, new_bt);
+            uint32_t old_bt = rbt[s];
+            rcost[s] = cost;
+            rbt[s] = new_bt;
+            bt_dec(d, old_bt);
+            if (__builtin_expect(t2e->bw_inited && t2e->bw_slot[s >> 4] == (uint8_t)s, 0))
+                t2e->bw_dirty |= (uint16_t)(1u << (s >> 4));
+            if (__builtin_expect(r->worst == (uint8_t)s, 0)) {
+                r->worst = 0xff;
+                d->lim[pos].worst = INT_MAX / 2;
+            }
+        }
+        return;
+    }
+    if (w >= 0 && lit_tie && cost >= rcost[w])
+        return;
+    if (w < 0) {
+        if (__builtin_expect(n < 64, 1)) {
+            uint32_t new_bt = u_resolve_bt(d, sref);
+            if (d->oom)
+                return;
+            bt_inc(d, new_bt);
+            rkey[n] = key;
+            rcost[n] = cost;
+            rbt[n] = new_bt;
+            r->ns = (uint8_t)(n + 1);
+            ht[ht_ins] = (uint8_t)n;
+        } else {
+            u_relax_append(d, pos, r, n, key, cost, sref);
+        }
+        return;
+    }
+    u_t26_evict(d, pos, r, w, ht_ins, key, cost, sref);
+}
+
+static U_ALWAYS_INLINE void u_relax_lit_cont_t26(u_dp *d, uint32_t pos, u_row_hdr *r,
+                                                 uint32_t key, int cost, uint32_t orig_bt,
+                                                 uint32_t opos, int32_t h256_in) {
+    uint32_t *const rkey = (uint32_t *)(r + 1);
+    int32_t *const rcost = (int32_t *)(rkey + 64u);
+    uint32_t *const rbt = rkey + 128u;
+    u_tier2_extra *const t2e = (u_tier2_extra *)(rkey + 192u);
+    int n = r->ns;
+    int w = -1;
+    if (n == d->K) {
+        if (__builtin_expect(r->worst == 0xff, 0))
+            u_find_worst(d, pos, r);
+        w = r->worst;
+        if (cost > rcost[w])
+            return;
+    }
+    uint8_t *const ht = t2e->htab;
+    uint32_t p = (h256_in >= 0 ? (uint32_t)h256_in : u_h256(key)) & 255u;
+    uint32_t first_tomb = 0xffffffffu;
+    int s = -1;
+    uint32_t ht_ins = 0;
+    for (;;) {
+        uint8_t sv = ht[p];
+        if (sv == 0xff) {
+            ht_ins = (first_tomb != 0xffffffffu) ? first_tomb : p;
+            break;
+        }
+        if (sv == 0xfe) {
+            if (first_tomb == 0xffffffffu)
+                first_tomb = p;
+        } else if (rkey[sv] == key) {
+            s = (int)sv;
+            break;
+        }
+        p = (p + 1u) & 255u;
+    }
+    if (s >= 0) {
+        int cur = rcost[s];
+        if (cost < cur ||
+            (cost == cur &&
+             lz0_lit_headroom(pos - opos) > lz0_lit_headroom(pos - bt_pos(d, rbt[s])))) {
+            bt_inc(d, orig_bt);
+            uint32_t old_bt = rbt[s];
+            rcost[s] = cost;
+            rbt[s] = orig_bt;
+            bt_dec(d, old_bt);
+            if (__builtin_expect(t2e->bw_inited && t2e->bw_slot[s >> 4] == (uint8_t)s, 0))
+                t2e->bw_dirty |= (uint16_t)(1u << (s >> 4));
+            if (__builtin_expect(r->worst == (uint8_t)s, 0)) {
+                r->worst = 0xff;
+                d->lim[pos].worst = INT_MAX / 2;
+            }
+        }
+        return;
+    }
+    if (w >= 0 && cost >= rcost[w])
+        return;
+    if (w < 0) {
+        if (__builtin_expect(n < 64, 1)) {
+            bt_inc(d, orig_bt);
+            rkey[n] = key;
+            rcost[n] = cost;
+            rbt[n] = orig_bt;
+            r->ns = (uint8_t)(n + 1);
+            ht[ht_ins] = (uint8_t)n;
+        } else {
+            u_src_ref tmp = {pos - 1u, key, orig_bt, opos, NULL, NULL, 0};
+            u_relax_append(d, pos, r, n, key, cost, &tmp);
+        }
+        return;
+    }
+    u_src_ref tmp = {pos - 1u, key, orig_bt, opos, NULL, NULL, 0};
+    u_t26_evict(d, pos, r, w, ht_ins, key, cost, &tmp);
+}
+
+static U_ALWAYS_INLINE void u_relax_um_h(u_dp *d, uint32_t pos, uint32_t key, int cost,
+                                         const u_src_ref *sref, int um, const int lit_tie,
+                                         int32_t h256_in) {
+    u_pos_lim *pl = &d->lim[pos];
+    if (um < INT_MAX / 8 && cost > pl->best + um)
+        return;
+    if (!lit_tie && cost >= pl->worst)
+        return;
+    if (cost < pl->best)
+        pl->best = cost;
+    u_row_hdr *r = d->rows[pos];
+    if (__builtin_expect(r && r->tier == 2 && d->is_ht6, 1)) {
+        u_relax_row_t26_body(d, pos, r, key, cost, sref, lit_tie, h256_in);
+        return;
+    }
+    u_relax_non_t26(d, pos, r, key, cost, sref, lit_tie, h256_in);
+}
+
+static U_ALWAYS_INLINE void u_relax_um(u_dp *d, uint32_t pos, uint32_t key, int cost,
+                                       const u_src_ref *sref, int um, const int lit_tie) {
+    u_relax_um_h(d, pos, key, cost, sref, um, lit_tie, -1);
+}
+
+static U_ALWAYS_INLINE void u_relax_fast_h(u_dp *d, uint32_t pos, uint32_t key, int cost,
+                                           const u_src_ref *sref, int um, int32_t h256_in) {
+    u_pos_lim pl = d->lim[pos];
+    if ((um >= INT_MAX / 8 || cost <= pl.best + um) && cost < pl.worst)
+        u_relax_um_h(d, pos, key, cost, sref, um, 0, h256_in);
 }
 
 static U_ALWAYS_INLINE void u_relax_fast(u_dp *d, uint32_t pos, uint32_t key, int cost,
@@ -676,19 +893,29 @@ static void u_emit_new(const lz0_finder *f, u_dp *d, uint32_t i, int L, uint32_t
     int off_eb = u_off_eb(off);
     int base = cost + 10 + off_eb;
     int um = exact ? (INT_MAX / 8) : (f->opts.ultra_margin + off_eb);
-    if (f->opts.len_code == 3 && f->opts.offset_lsb_bits == 8 && (fine_lim == 8 || exact)) {
+    if (f->opts.len_code == 3 && f->opts.offset_lsb_bits == 8 &&
+        (fine_lim == 8 || fine_lim == 0 || exact)) {
+        if (fine_lim == 0 && L < 9) {
+            uint32_t tgt = i + (uint32_t)L;
+            int c3 = base + 3;
+            u_pos_lim pl = d->lim[tgt];
+            if ((um >= INT_MAX / 8 || c3 <= pl.best + um) && c3 < pl.worst)
+                u_relax_um_h(d, tgt, off, c3, sref, um, 0, (int32_t)(u_h256(off) & 255u));
+            return;
+        }
+        int32_t h256 = (int32_t)(u_h256(off) & 255u);
         if (fine_lim >= 8) {
             int fine = L < 8 ? L : 8;
             int l = allow_len2 ? 2 : 3;
             int c3 = base + 3;
             for (; l <= fine; l++)
-                u_relax_fast(d, i + (uint32_t)l, off, c3, sref, um);
+                u_relax_fast_h(d, i + (uint32_t)l, off, c3, sref, um, h256);
         } else {
-            u_relax_fast(d, i + (uint32_t)(L < 8 ? L : 8), off, base + 3, sref, um);
+            u_relax_fast_h(d, i + (uint32_t)(L < 8 ? L : 8), off, base + 3, sref, um, h256);
         }
         if (L < 9)
             return;
-        u_relax_fast(d, i + 9u, off, base + 4, sref, um);
+        u_relax_fast_h(d, i + 9u, off, base + 4, sref, um, h256);
         if (L < 10)
             return;
         static const int hi[] = {11,   15,   23,   39,    71,    135,   263,  519,
@@ -698,7 +925,7 @@ static void u_emit_new(const lz0_finder *f, u_dp *d, uint32_t i, int L, uint32_t
         for (int p = 0; p < 15; p++) {
             int h = hi[p];
             int end = L < h ? L : h;
-            u_relax_fast(d, i + (uint32_t)end, off, base + cl, sref, um);
+            u_relax_fast_h(d, i + (uint32_t)end, off, base + cl, sref, um, h256);
             if (L <= h)
                 return;
             cl += 2;
@@ -706,7 +933,7 @@ static void u_emit_new(const lz0_finder *f, u_dp *d, uint32_t i, int L, uint32_t
         }
         while (need <= L) {
             int end = lz0_next_plateau_new_c(&f->opts, need, L);
-            u_relax_fast(d, i + (uint32_t)end, off, base + u_len_new(end), sref, um);
+            u_relax_fast_h(d, i + (uint32_t)end, off, base + u_len_new(end), sref, um, h256);
             need = end + 1;
         }
         return;
@@ -771,6 +998,30 @@ static void u_free(u_dp *d) {
     free(d->bt);
 }
 
+static U_ALWAYS_INLINE int u_popcnt64(uint64_t x) {
+#if defined(__POPCNT__) && (defined(__GNUC__) || defined(__clang__))
+    return __builtin_popcountll(x);
+#else
+    x -= (x >> 1) & 0x5555555555555555ull;
+    x = (x & 0x3333333333333333ull) + ((x >> 2) & 0x3333333333333333ull);
+    x = (x + (x >> 4)) & 0x0f0f0f0f0f0f0f0full;
+    return (int)((x * 0x0101010101010101ull) >> 56);
+#endif
+}
+
+static U_ALWAYS_INLINE int u_ctz64(uint64_t x) {
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_ctzll(x);
+#else
+    int c = 0;
+    while (!(x & 1ull)) {
+        x >>= 1;
+        c++;
+    }
+    return c;
+#endif
+}
+
 static int u_dp_run(lz0_finder *f, lz0_toklist *tl, int K, int exact) {
     uint32_t n = f->n;
     if (n == 0)
@@ -782,6 +1033,7 @@ static int u_dp_run(lz0_finder *f, lz0_toklist *tl, int K, int exact) {
     d.n = n;
     d.K = K;
     d.use_ht = (K > 32 && K <= 128);
+    d.is_ht6 = (K > 32 && K <= 64);
     d.bt_free = U_BT_NIL;
 
     int t_shifts[3] = {3, 5, K <= 64 ? 6 : K <= 128 ? 7 : 8};
@@ -854,71 +1106,184 @@ static int u_dp_run(lz0_finder *f, lz0_toklist *tl, int K, int exact) {
         if (i > 0)
             nc = lz0_find_matches(f, i, 0, cands, &dummy);
 
-        /* Pre-size row i+1 directly when row i already exceeded tier 1. */
-        if (nsi > 32 && !d.rows[i + 1]) {
-            d.rows[i + 1] = u_row_alloc(&d, full_tier);
-            if (d.oom) {
-                u_free(&d);
-                return -1;
-            }
-        }
-
         uint32_t *rkey_i = u_row_key(ri);
         int32_t *rcost_i = u_row_cost(ri);
         uint32_t *rbt_i = u_row_bt(ri);
         int32_t row_best = d.lim[i].best;
         int b = -1, b2 = -1;
-        for (int s = 0; s < nsi; s++)
-            anchor[s] = U_BT_NIL;
-
-        for (int s = 0; s < nsi; s++) {
-            uint32_t key = rkey_i[s];
-            uint32_t off = key & ~U_LIT_FLAG;
-            int cost = rcost_i[s];
-            int um = exact ? (INT_MAX / 8) : u_margin(off, margin);
-            if (!exact && cost > row_best + um)
-                continue;
-            if (b < 0 || cost < rcost_i[b])
-                b = s;
-            uint32_t orig_bt = rbt_i[s];
-            if (!(key & U_LIT_FLAG)) {
-                int lcost = cost + lit1;
-                if (exact || lcost <= d.lim[i + 1].best + um) {
-                    u_src_ref sref = {i, key, orig_bt, i, &anchor[s]};
-                    u_relax_um(&d, i + 1, off | U_LIT_FLAG, lcost, &sref, um, 1);
-                }
-            } else {
-                uint32_t opos = bt_pos(&d, orig_bt);
-                int prev_lit = is_len3 ? u_cost_lit((int)(i - opos))
-                                       : lz0_cost_literal_c(&f->opts, (int)(i - opos));
-                int next_lit = is_len3 ? u_cost_lit((int)(i + 1 - opos))
-                                       : lz0_cost_literal_c(&f->opts, (int)(i + 1 - opos));
-                int lcost = (cost - prev_lit) + next_lit;
-                if (exact || lcost <= d.lim[i + 1].best + um) {
-                    u_src_ref lit_ref = {i, key, orig_bt, opos, NULL};
-                    u_relax_um(&d, i + 1, key, lcost, &lit_ref, um, 1);
-                }
-                if (off >= 1 && off <= i && in[i] == in[i - off]) {
-                    int L;
-                    if (!has_census) {
-                        if (i >= f->rle_start && i < f->rle_end && off <= i - f->rle_start)
-                            L = (int)(f->rle_end - i);
-                        else
-                            L = 1 + lz0_simd_matchlen(in + i + 1, in + i - off + 1,
-                                                      max_left - 1);
-                    } else {
-                        L = lz0_find_last_len(f, i, off);
+        const int use_anc_mask = (nsi <= 64);
+        uint64_t anc_mask = 0;
+        if (!exact && use_anc_mask) {
+            lz0_u_prep prep;
+            prep.rkey = rkey_i;
+            prep.rcost = rcost_i;
+            prep.in = in;
+            prep.pos = i;
+            prep.nsi = nsi;
+            prep.row_best = row_best;
+            prep.margin = margin;
+            prep.exact = 0;
+            lz0_simd_u_row_prep(&prep);
+            b = prep.b_out;
+            b2 = prep.b2_out;
+            uint64_t pm = prep.pass_mask;
+            if (d.is_ht6) {
+                u_row_hdr *rn0 = d.rows[i + 1];
+                int np = u_popcnt64(pm);
+                if (!rn0 && np > 32) {
+                    d.rows[i + 1] = u_row_alloc(&d, full_tier);
+                    if (d.oom) {
+                        u_free(&d);
+                        return -1;
                     }
-                    if (L > max_left)
-                        L = max_left;
-                    if (L >= 1) {
-                        u_src_ref m_ref = {i, key, orig_bt, i, &anchor[s]};
-                        u_emit_last(f, &d, i, L, off, cost, &m_ref, um, fine_lim);
+                } else if (rn0 && rn0->tier < 2 && np > 32) {
+                    if (!u_row_promote_to(&d, i + 1, rn0, 2)) {
+                        u_free(&d);
+                        return -1;
                     }
                 }
             }
-            if (d.oom)
-                break;
+            u_pos_lim *const pl_nxt = &d.lim[i + 1];
+            u_row_hdr *r_nxt = d.rows[i + 1];
+            int nxt_t26 = (r_nxt && r_nxt->tier == 2 && d.is_ht6);
+            while (pm) {
+                int s = u_ctz64(pm);
+                uint64_t sbit = 1ull << s;
+                pm &= pm - 1ull;
+                uint32_t key = rkey_i[s];
+                uint32_t off = key & ~U_LIT_FLAG;
+                int cost = rcost_i[s];
+                int um = prep.um[s];
+                uint32_t orig_bt = rbt_i[s];
+                if (!(key & U_LIT_FLAG)) {
+                    int lcost = cost + lit1;
+                    if (lcost <= pl_nxt->best + um) {
+                        if (__builtin_expect(lcost < pl_nxt->best, 0))
+                            pl_nxt->best = lcost;
+                        u_src_ref sref = {i, key, orig_bt, i, &anchor[s], &anc_mask, sbit};
+                        if (__builtin_expect(nxt_t26, 1)) {
+                            if (lcost <= pl_nxt->worst)
+                                u_relax_row_t26_body(&d, i + 1, r_nxt, off | U_LIT_FLAG, lcost,
+                                                     &sref, 1, (int32_t)prep.h_lit[s]);
+                        } else {
+                            u_relax_non_t26(&d, i + 1, r_nxt, off | U_LIT_FLAG, lcost, &sref,
+                                            1, (int32_t)prep.h_lit[s]);
+                            r_nxt = d.rows[i + 1];
+                            nxt_t26 = (r_nxt && r_nxt->tier == 2 && d.is_ht6);
+                        }
+                    }
+                } else {
+                    uint32_t opos = bt_pos(&d, orig_bt);
+                    int prev_lit = is_len3 ? u_cost_lit((int)(i - opos))
+                                           : lz0_cost_literal_c(&f->opts, (int)(i - opos));
+                    int next_lit = is_len3 ? u_cost_lit((int)(i + 1 - opos))
+                                           : lz0_cost_literal_c(&f->opts, (int)(i + 1 - opos));
+                    int lcost = (cost - prev_lit) + next_lit;
+                    if (lcost <= pl_nxt->best + um) {
+                        if (__builtin_expect(lcost < pl_nxt->best, 0))
+                            pl_nxt->best = lcost;
+                        if (__builtin_expect(nxt_t26, 1)) {
+                            if (lcost <= pl_nxt->worst)
+                                u_relax_lit_cont_t26(&d, i + 1, r_nxt, key, lcost, orig_bt,
+                                                     opos, (int32_t)prep.h_lit[s]);
+                        } else {
+                            u_src_ref lit_ref = {i, key, orig_bt, opos, NULL, NULL, 0};
+                            u_relax_non_t26(&d, i + 1, r_nxt, key, lcost, &lit_ref, 1,
+                                            (int32_t)prep.h_lit[s]);
+                            r_nxt = d.rows[i + 1];
+                            nxt_t26 = (r_nxt && r_nxt->tier == 2 && d.is_ht6);
+                        }
+                    }
+                    if ((prep.lit_cand_mask & sbit) && off >= 1 && in[i] == in[i - off]) {
+                        int L;
+                        if (!has_census) {
+                            if (i >= f->rle_start && i < f->rle_end && off <= i - f->rle_start)
+                                L = (int)(f->rle_end - i);
+                            else
+                                L = 1 + lz0_simd_matchlen(in + i + 1, in + i - off + 1,
+                                                          max_left - 1);
+                        } else {
+                            L = lz0_find_last_len(f, i, off);
+                        }
+                        if (L > max_left)
+                            L = max_left;
+                        if (L >= 1) {
+                            u_src_ref m_ref = {i, key, orig_bt, i, &anchor[s], &anc_mask, sbit};
+                            u_emit_last(f, &d, i, L, off, cost, &m_ref, um, fine_lim);
+                            if (!nxt_t26) {
+                                r_nxt = d.rows[i + 1];
+                                nxt_t26 = (r_nxt && r_nxt->tier == 2 && d.is_ht6);
+                            }
+                        }
+                    }
+                }
+                if (d.oom)
+                    break;
+            }
+        } else {
+            /* Pre-size row i+1 directly when row i already exceeded tier 1. */
+            if (nsi > 32 && !d.rows[i + 1]) {
+                d.rows[i + 1] = u_row_alloc(&d, full_tier);
+                if (d.oom) {
+                    u_free(&d);
+                    return -1;
+                }
+            }
+            if (!use_anc_mask) {
+                for (int s = 0; s < nsi; s++)
+                    anchor[s] = U_BT_NIL;
+            }
+            for (int s = 0; s < nsi; s++) {
+                uint32_t key = rkey_i[s];
+                uint32_t off = key & ~U_LIT_FLAG;
+                int cost = rcost_i[s];
+                int um = exact ? (INT_MAX / 8) : u_margin(off, margin);
+                if (!exact && cost > row_best + um)
+                    continue;
+                if (b < 0 || cost < rcost_i[b])
+                    b = s;
+                uint32_t orig_bt = rbt_i[s];
+                uint64_t *am_ptr = use_anc_mask ? &anc_mask : NULL;
+                uint64_t sbit = use_anc_mask ? (1ull << s) : 0ull;
+                if (!(key & U_LIT_FLAG)) {
+                    int lcost = cost + lit1;
+                    if (exact || lcost <= d.lim[i + 1].best + um) {
+                        u_src_ref sref = {i, key, orig_bt, i, &anchor[s], am_ptr, sbit};
+                        u_relax_um(&d, i + 1, off | U_LIT_FLAG, lcost, &sref, um, 1);
+                    }
+                } else {
+                    uint32_t opos = bt_pos(&d, orig_bt);
+                    int prev_lit = is_len3 ? u_cost_lit((int)(i - opos))
+                                           : lz0_cost_literal_c(&f->opts, (int)(i - opos));
+                    int next_lit = is_len3 ? u_cost_lit((int)(i + 1 - opos))
+                                           : lz0_cost_literal_c(&f->opts, (int)(i + 1 - opos));
+                    int lcost = (cost - prev_lit) + next_lit;
+                    if (exact || lcost <= d.lim[i + 1].best + um) {
+                        u_src_ref lit_ref = {i, key, orig_bt, opos, NULL, NULL, 0};
+                        u_relax_um(&d, i + 1, key, lcost, &lit_ref, um, 1);
+                    }
+                    if (off >= 1 && off <= i && in[i] == in[i - off]) {
+                        int L;
+                        if (!has_census) {
+                            if (i >= f->rle_start && i < f->rle_end && off <= i - f->rle_start)
+                                L = (int)(f->rle_end - i);
+                            else
+                                L = 1 + lz0_simd_matchlen(in + i + 1, in + i - off + 1,
+                                                          max_left - 1);
+                        } else {
+                            L = lz0_find_last_len(f, i, off);
+                        }
+                        if (L > max_left)
+                            L = max_left;
+                        if (L >= 1) {
+                            u_src_ref m_ref = {i, key, orig_bt, i, &anchor[s], am_ptr, sbit};
+                            u_emit_last(f, &d, i, L, off, cost, &m_ref, um, fine_lim);
+                        }
+                    }
+                }
+                if (d.oom)
+                    break;
+            }
         }
         if (d.oom) {
             u_free(&d);
@@ -989,11 +1354,30 @@ static int u_dp_run(lz0_finder *f, lz0_toklist *tl, int K, int exact) {
         }
         if (i > 0 && b >= 0 && nc > 0) {
             uint32_t boff = rkey_i[b] & ~U_LIT_FLAG;
-            for (int s = 0; s < nsi; s++) {
-                if ((rkey_i[s] & ~U_LIT_FLAG) != boff &&
-                    (b2 < 0 || rcost_i[s] < rcost_i[b2]))
-                    b2 = s;
+            if (exact || !use_anc_mask) {
+                for (int s = 0; s < nsi; s++) {
+                    if ((rkey_i[s] & ~U_LIT_FLAG) != boff &&
+                        (b2 < 0 || rcost_i[s] < rcost_i[b2]))
+                        b2 = s;
+                }
             }
+            uint64_t *am_ptr = use_anc_mask ? &anc_mask : NULL;
+            u_src_ref nref_b = {i, rkey_i[b], rbt_i[b], i, &anchor[b], am_ptr,
+                                use_anc_mask ? (1ull << b) : 0ull};
+            u_src_ref nref_b2 = {0, 0, U_BT_NIL, 0, NULL, NULL, 0};
+            if (b2 >= 0) {
+                nref_b2.src_pos = i;
+                nref_b2.src_key = rkey_i[b2];
+                nref_b2.orig_bt = rbt_i[b2];
+                nref_b2.lit_opos = i;
+                nref_b2.anchor_slot = &anchor[b2];
+                nref_b2.anc_mask = am_ptr;
+                nref_b2.anc_bit = use_anc_mask ? (1ull << b2) : 0ull;
+            }
+            int32_t cost_b = rcost_i[b];
+            int32_t cost_b2 = b2 >= 0 ? rcost_i[b2] : 0;
+            const int can_fast_l9 =
+                (!exact && fine_lim == 0 && is_len3 && f->opts.offset_lsb_bits == 8);
             for (int k = 0; k < nc; k++) {
                 int L = (int)cands[k].length;
                 uint32_t off = cands[k].offset;
@@ -1002,14 +1386,29 @@ static int u_dp_run(lz0_finder *f, lz0_toklist *tl, int K, int exact) {
                 int l2ok = always_len2 || lz0_is_len2_allowed(f, off);
                 if (L == 2 && !l2ok)
                     continue;
-                int src = b;
+                const u_src_ref *nref = &nref_b;
+                int src_cost = cost_b;
                 if (off == boff) {
                     if (b2 < 0)
                         continue;
-                    src = b2;
+                    nref = &nref_b2;
+                    src_cost = cost_b2;
                 }
-                u_src_ref nref = {i, rkey_i[src], rbt_i[src], i, &anchor[src]};
-                u_emit_new(f, &d, i, L, off, rcost_i[src], &nref, l2ok, exact, fine_lim);
+                if (can_fast_l9 && L < 9) {
+                    int off_eb = u_off_eb(off);
+                    int c3 = src_cost + 13 + off_eb;
+                    int um = margin + off_eb;
+                    uint32_t tgt = i + (uint32_t)L;
+                    u_pos_lim pl = d.lim[tgt];
+                    if (c3 <= pl.best + um && c3 < pl.worst) {
+                        u_relax_um_h(&d, tgt, off, c3, nref, um, 0,
+                                     (int32_t)(u_h256(off) & 255u));
+                        if (d.oom)
+                            break;
+                    }
+                    continue;
+                }
+                u_emit_new(f, &d, i, L, off, src_cost, nref, l2ok, exact, fine_lim);
                 if (d.oom)
                     break;
             }
@@ -1018,10 +1417,21 @@ static int u_dp_run(lz0_finder *f, lz0_toklist *tl, int K, int exact) {
             u_free(&d);
             return -1;
         }
-        for (int s = 0; s < nsi; s++) {
-            if (anchor[s] != U_BT_NIL)
+        if (use_anc_mask) {
+            uint64_t am = anc_mask;
+            while (am) {
+                int s = u_ctz64(am);
+                am &= am - 1ull;
                 bt_dec(&d, anchor[s]);
-            bt_dec(&d, rbt_i[s]);
+            }
+            for (int s = 0; s < nsi; s++)
+                bt_dec(&d, rbt_i[s]);
+        } else {
+            for (int s = 0; s < nsi; s++) {
+                if (anchor[s] != U_BT_NIL)
+                    bt_dec(&d, anchor[s]);
+                bt_dec(&d, rbt_i[s]);
+            }
         }
         u_row_free(&d, i);
     }

@@ -159,4 +159,70 @@ static inline uint64_t lz0_simd_bin40_hits(const unsigned char *p, uint32_t w0, 
     return LZ0_SIMD_CALL(lz0_bin40_hits, p, w0, pm);
 }
 
+/* Batch row preparation for ultra DP (1 <= nsi <= 64): finds b_out, b2_out,
+ * pass_mask, lit_cand_mask, um[0..nsi), and h_lit[0..nsi). */
+typedef struct {
+    const uint32_t *rkey;
+    const int32_t *rcost;
+    const unsigned char *in;
+    uint32_t pos;
+    int32_t nsi;
+    int32_t row_best;
+    int32_t margin;
+    int32_t exact;
+    int32_t b_out;
+    int32_t b2_out;
+    int32_t _pad;
+    uint64_t pass_mask;
+    uint64_t lit_cand_mask;
+    int32_t um[64];
+    uint32_t h_lit[64];
+} lz0_u_prep;
+
+void lz0_u_row_prep_c(lz0_u_prep *p);
+#if defined(LZ0_SIMD_X86_64)
+void lz0_u_row_prep_avx2(lz0_u_prep *p);
+#endif
+static inline void lz0_simd_u_row_prep(lz0_u_prep *p) {
+#if defined(LZ0_SIMD_X86_64)
+    if (lz0_simd_level >= 2) {
+        lz0_u_row_prep_avx2(p);
+        return;
+    }
+#endif
+    lz0_u_row_prep_c(p);
+}
+
+/* Batch suffix-array side scan (count <= 128). Writes hits with src < pos in
+ * order of distance from origin; out_k[h] encodes (len>=3 ? 0x80 : 0) | d_idx. */
+typedef struct {
+    const uint32_t *sa_ptr;
+    const unsigned char *in;
+    uint32_t pos;
+    uint32_t n;
+    int32_t count;
+    int32_t dir;
+    uint16_t pref16;
+    uint8_t b2;
+    uint8_t in_l2;
+    uint8_t stop_l2;
+    uint8_t ge3_ok;
+    uint32_t l2_cut;
+    int32_t nhits;
+    uint32_t *out_src;
+    uint8_t *out_k;
+} lz0_sa_scan_args;
+
+int lz0_sa_scan_side_c(lz0_sa_scan_args *a);
+#if defined(LZ0_SIMD_X86_64)
+int lz0_sa_scan_side_avx2(lz0_sa_scan_args *a);
+#endif
+static inline int lz0_simd_sa_scan_side(lz0_sa_scan_args *a) {
+#if defined(LZ0_SIMD_X86_64)
+    if (lz0_simd_level >= 2)
+        return lz0_sa_scan_side_avx2(a);
+#endif
+    return lz0_sa_scan_side_c(a);
+}
+
 #endif

@@ -96,7 +96,25 @@ static int fails = 0;
         }                                                                   \
     } while (0)
 
+static const unsigned char *sa_cmp_in;
+static uint32_t sa_cmp_n;
+static int sa_cmp_suf(const void *a, const void *b) {
+    uint32_t ia = *(const uint32_t *)a;
+    uint32_t ib = *(const uint32_t *)b;
+    uint32_t la = sa_cmp_n - ia;
+    uint32_t lb = sa_cmp_n - ib;
+    uint32_t ml = la < lb ? la : lb;
+    int c = memcmp(sa_cmp_in + ia, sa_cmp_in + ib, ml);
+    if (c != 0)
+        return c;
+    return (la < lb) ? -1 : (la > lb ? 1 : 0);
+}
+
 static void run_tier(int iters) {
+    unsigned char sa_in_cache[160];
+    uint32_t sa_cache[160];
+    uint32_t rank_cache[160];
+    uint32_t sa_in_n = 0;
     for (int it = 0; it < iters; it++) {
         int n = (int)(rnd() % 301);
         uint32_t range = 1 + rnd() % 64;
@@ -201,6 +219,101 @@ static void run_tier(int iters) {
               "bin40 got=0x%llx ref=0x%llx want=0x%llx pm=0x%x",
               (unsigned long long)got_b40, (unsigned long long)ref_b40,
               (unsigned long long)want_b40, pm);
+
+        {
+            /* u_row_prep: both rkey and rcost placed on independent guard pages */
+            int nsi = 1 + (int)(rnd() % 64);
+            if (it < 64)
+                nsi = it + 1;
+            uint32_t *uk = guarded_slot(0, (size_t)nsi * 4);
+            int32_t *uc = guarded_slot(1, (size_t)nsi * 4);
+            static const uint32_t uoffs[] = {1, 2, 16, 255, 256, 257, 512, 513, 65536};
+            int32_t base_c = (int32_t)(rnd() % 5000);
+            int32_t minc = 0x7fffffff;
+            for (int i = 0; i < nsi; i++) {
+                uint32_t off = (rnd() % 3 == 0) ? uoffs[rnd() % 9] : (1u + (rnd() % 0x100000u));
+                if (rnd() % 3 == 0 && i > 0)
+                    off = uk[rnd() % i] & 0x7fffffffu;
+                uk[i] = off | ((rnd() & 1u) ? 0x80000000u : 0u);
+                int32_t c = (rnd() % 4 == 0) ? base_c : (base_c + (int32_t)(rnd() % 40));
+                uc[i] = c;
+                if (c < minc)
+                    minc = c;
+            }
+            lz0_u_prep ref, got;
+            memset(&ref, 0, sizeof(ref));
+            ref.rkey = uk;
+            ref.rcost = uc;
+            ref.in = NULL;
+            ref.pos = (rnd() % 4 == 0) ? (rnd() % 20) : (100u + rnd() % 0x10000u);
+            ref.nsi = nsi;
+            ref.row_best = minc - (int32_t)(rnd() % 3);
+            ref.margin = (int32_t)(rnd() % 24);
+            ref.exact = (rnd() % 5 == 0) ? 1 : 0;
+            got = ref;
+            lz0_u_row_prep_c(&ref);
+            lz0_simd_u_row_prep(&got);
+            CHECK(got.b_out == ref.b_out && got.b2_out == ref.b2_out &&
+                      got.pass_mask == ref.pass_mask &&
+                      got.lit_cand_mask == ref.lit_cand_mask &&
+                      !memcmp(got.um, ref.um, (size_t)nsi * 4) &&
+                      !memcmp(got.h_lit, ref.h_lit, (size_t)nsi * 4),
+                  "u_row_prep nsi=%d exact=%d b=(%d,%d) b2=(%d,%d)", nsi, ref.exact, got.b_out,
+                  ref.b_out, got.b2_out, ref.b2_out);
+        }
+
+        {
+            /* sa_scan_side: sorted SA slice & input buffer placed on guard pages */
+            if (it % 16 == 0) {
+                sa_in_n = 16u + (rnd() % 145u);
+                int salph = 1 + (int)(rnd() % 4);
+                for (uint32_t i = 0; i < sa_in_n; i++)
+                    sa_in_cache[i] = (unsigned char)(rnd() % (unsigned)salph);
+                for (uint32_t i = 0; i < sa_in_n; i++)
+                    sa_cache[i] = i;
+                sa_cmp_in = sa_in_cache;
+                sa_cmp_n = sa_in_n;
+                qsort(sa_cache, sa_in_n, sizeof(uint32_t), sa_cmp_suf);
+                for (uint32_t i = 0; i < sa_in_n; i++)
+                    rank_cache[sa_cache[i]] = i;
+            }
+            uint32_t pos = rnd() % (sa_in_n > 2 ? sa_in_n - 1 : 1);
+            if (pos + 2 <= sa_in_n) {
+                uint32_t rr = rank_cache[pos];
+                int dir = (rnd() & 1u) ? 1 : -1;
+                int avail = dir > 0 ? (int)(sa_in_n - 1u - rr) : (int)rr;
+                int cnt = avail > 0 ? (1 + (int)(rnd() % (unsigned)(avail < 128 ? avail : 128))) : 0;
+                uint32_t *sa_g = guarded_slot(0, (size_t)cnt * 4);
+                unsigned char *in_g = guarded_slot(1, sa_in_n);
+                memcpy(in_g, sa_in_cache, sa_in_n);
+                if (dir > 0 && cnt > 0) {
+                    memcpy(sa_g, sa_cache + rr + 1, (size_t)cnt * 4);
+                } else if (dir < 0 && cnt > 0) {
+                    memcpy(sa_g, sa_cache + rr - (uint32_t)cnt, (size_t)cnt * 4);
+                }
+                const uint32_t *sa_ptr = (dir > 0) ? sa_g : (cnt > 0 ? sa_g + cnt - 1 : sa_g);
+                uint16_t pref16;
+                memcpy(&pref16, in_g + pos, 2);
+                uint8_t ge3_ok = (uint8_t)(pos + 2u < sa_in_n && (rnd() % 8 != 0));
+                uint8_t b2 = ge3_ok ? in_g[pos + 2] : 0;
+                static const uint32_t cuts[] = {0u, 8u, 32u, 257u, 0xffffffffu};
+                uint32_t src_c[128], src_s[128];
+                uint8_t k_c[128], k_s[128];
+                lz0_sa_scan_args a_c = {sa_ptr, in_g, pos, sa_in_n, cnt, dir, pref16, b2,
+                                        (uint8_t)(rnd() & 1u), (uint8_t)(rnd() % 4 == 0),
+                                        ge3_ok, cuts[rnd() % 5], 0, src_c, k_c};
+                lz0_sa_scan_args a_s = a_c;
+                a_s.out_src = src_s;
+                a_s.out_k = k_s;
+                int nc = lz0_sa_scan_side_c(&a_c);
+                int ns = lz0_simd_sa_scan_side(&a_s);
+                CHECK(nc == ns && a_c.in_l2 == a_s.in_l2 &&
+                          (nc == 0 || (!memcmp(src_c, src_s, (size_t)nc * 4) &&
+                                       !memcmp(k_c, k_s, (size_t)nc))),
+                      "sa_scan_side dir=%d cnt=%d n=(%d,%d) l2=(%u,%u)", dir, cnt, nc, ns,
+                      a_c.in_l2, a_s.in_l2);
+            }
+        }
     }
 }
 
@@ -281,7 +394,7 @@ int main(int argc, char **argv) {
         lz0_simd_init();
         run_tier(iters);
         run_matchlen(iters / 10 + 1);
-        printf("tier %-5s: %d random cases x 7 kernels OK\n", lz0_simd_name(), iters);
+        printf("tier %-5s: %d random cases x 9 kernels OK\n", lz0_simd_name(), iters);
     }
     if (fails) {
         printf("test_simd: %d failure(s)\n", fails);
