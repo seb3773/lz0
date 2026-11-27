@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #ifndef LZ0_VERSION
-#define LZ0_VERSION "0.6.0-dev"
+#define LZ0_VERSION "0.7.0"
 #endif
 
 #ifdef __cplusplus

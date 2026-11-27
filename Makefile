@@ -1,5 +1,5 @@
 CC ?= gcc
-VERSION ?= 0.6.0
+VERSION ?= 0.7.0
 UNAME_S := $(shell uname -s 2>/dev/null || echo Linux)
 UNAME_M := $(shell uname -m 2>/dev/null || echo x86_64)
 DARWIN_CFLAGS := $(if $(filter Darwin,$(UNAME_S)),-D_DARWIN_C_SOURCE,)
@@ -199,9 +199,9 @@ bin/lz0dec.exe: lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.S lz0/lz0dec
 
 windows: bin/lz0.exe bin/lz0dec.exe
 
-dist_linux: bin/lz0 bin/lz0dec
+dist_linux: bin/lz0 bin/lz0dec bin/lz0dec_ultra_tiny_x86_16.bin
 	mkdir -p build/dist/lz0-v$(VERSION)-linux-x86_64 dist
-	cp bin/lz0 bin/lz0dec README.md LICENSE build/dist/lz0-v$(VERSION)-linux-x86_64/
+	cp bin/lz0 bin/lz0dec bin/lz0dec_ultra_tiny_x86_16.bin README.md LICENSE build/dist/lz0-v$(VERSION)-linux-x86_64/
 	cp -r docs build/dist/lz0-v$(VERSION)-linux-x86_64/
 	tar -czvf dist/lz0-v$(VERSION)-linux-x86_64.tar.gz -C build/dist lz0-v$(VERSION)-linux-x86_64
 	rm -rf build/dist/lz0-v$(VERSION)-linux-x86_64
