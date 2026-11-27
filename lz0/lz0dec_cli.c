@@ -40,22 +40,30 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "LZ0 Standalone Decompressor v%s\n\n", LZ0_VERSION);
     fprintf(stderr, "Usage:\n");
     fprintf(stderr, "  %s <input.lz0|-> <output|->            Decompress using fastest engine (default)\n", prog);
-    fprintf(stderr, "  %s -e, --engine <fast|compact|tiny|min> <in|-> <out|->  Decompress using selected engine\n", prog);
+    fprintf(stderr, "  %s -e, --engine <fast|compact|tiny|ultra_tiny|min> <in|-> <out|->  Decompress using selected engine\n", prog);
     fprintf(stderr, "  %s -b, --bench <input.lz0>             Benchmark decompression throughput\n", prog);
     fprintf(stderr, "  %s -h, --help                          Show this help message\n", prog);
     fprintf(stderr, "  %s -v, --version                       Show version\n\n", prog);
     fprintf(stderr, "Available engines on this platform:\n");
-    fprintf(stderr, "  min      : Minimal C decoder (lz0dec_min), no heap\n");
+    fprintf(stderr, "  min        : Minimal C decoder (lz0dec_min), no heap\n");
 #if ((defined(__ELF__) || defined(_WIN32) || defined(__APPLE__)) && (defined(__x86_64__) || defined(_M_X64))) || \
     ((defined(__ELF__) || defined(__APPLE__)) && (defined(__aarch64__) || defined(_M_ARM64)) && !defined(_WIN32)) || \
     (defined(__ELF__) && (defined(__riscv) && __riscv_xlen == 64) && !defined(_WIN32))
-    fprintf(stderr, "  tiny     : Tiny (~280 B) table-free ASM decoder\n");
-    fprintf(stderr, "  compact  : Compact table-free ASM decoder\n");
-    fprintf(stderr, "  fast     : High-throughput ASM decoder\n");
+    fprintf(stderr, "  ultra_tiny : Extreme-size (143-224 B) unchecked trusted-stream ASM decoder\n");
+    fprintf(stderr, "  tiny       : Tiny (288-376 B) table-free ASM decoder (full checks)\n");
+    fprintf(stderr, "  compact    : Compact table-free ASM decoder\n");
+    fprintf(stderr, "  fast       : High-throughput ASM decoder\n");
 #endif
 }
 
 typedef int (*dec_fn)(const unsigned char *, int, unsigned char *, int);
+
+static int ultra_tiny_adapter(const unsigned char *in, int in_size,
+                              unsigned char *out, int out_max) {
+    (void)in_size;
+    (void)out_max;
+    return lz0dec_ultra_tiny(in, out);
+}
 
 static int run_benchmark(const char *path, const unsigned char *pay, size_t psz, uint32_t uncomp_sz) {
     printf("=== LZ0 Decompression Benchmark ===\n");
@@ -89,9 +97,10 @@ static int run_benchmark(const char *path, const unsigned char *pay, size_t psz,
 #if ((defined(__ELF__) || defined(_WIN32) || defined(__APPLE__)) && (defined(__x86_64__) || defined(_M_X64))) || \
     ((defined(__ELF__) || defined(__APPLE__)) && (defined(__aarch64__) || defined(_M_ARM64)) && !defined(_WIN32)) || \
     (defined(__ELF__) && (defined(__riscv) && __riscv_xlen == 64) && !defined(_WIN32))
-        { "tiny",    "ASM Tiny (lz0dec_tiny)",            lz0dec_tiny },
-        { "compact", "ASM Compact (lz0dec_compact)",      lz0dec_compact },
-        { "fast",    "ASM FAST (lz0dec_fast)",            lz0dec_fast },
+        { "ultra_tiny", "ASM Ultra-Tiny (lz0dec_ultra_tiny)", ultra_tiny_adapter },
+        { "tiny",       "ASM Tiny (lz0dec_tiny)",             lz0dec_tiny },
+        { "compact",    "ASM Compact (lz0dec_compact)",       lz0dec_compact },
+        { "fast",       "ASM FAST (lz0dec_fast)",             lz0dec_fast },
 #endif
     };
     int num_engines = (int)(sizeof(engines) / sizeof(engines[0]));
@@ -204,10 +213,12 @@ int main(int argc, char **argv) {
         dec = lz0dec_compact;
     } else if (strcmp(engine_name, "tiny") == 0) {
         dec = lz0dec_tiny;
+    } else if (strcmp(engine_name, "ultra_tiny") == 0) {
+        dec = ultra_tiny_adapter;
     } else if (strcmp(engine_name, "min") == 0) {
         dec = lz0dec_min;
     } else {
-        fprintf(stderr, "lz0dec: error: unknown engine '%s' (choose: fast, compact, tiny, min)\n", engine_name);
+        fprintf(stderr, "lz0dec: error: unknown engine '%s' (choose: fast, compact, tiny, ultra_tiny, min)\n", engine_name);
         return 1;
     }
 

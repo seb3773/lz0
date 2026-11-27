@@ -4,7 +4,7 @@ This document compares **LZ0** (bitstream v0.1 with v2 encoder presets and compa
 
 All benchmarks in this document were measured on an **Intel(R) Core(TM) i3-9100 CPU @ 3.60GHz (Coffee Lake Refresh, 4 cores / 4 threads, 6 MiB L3 cache)** running Linux x86_64 (GCC `-O3`). Reproducible via `make bench_all`, `make bench_blobs`, `make enc_bench`, `make mem_peak`, and `make bench_dec`.
 
-All LZ0 decompressions reported below were verified **100% bit-exact** using all decoders (`lz0dec_fast`, `lz0dec_compact`, `lz0dec_tiny`, `lz0dec_min`, `lz0dec_ref`).
+All LZ0 decompressions reported below were verified **100% bit-exact** using all decoders (`lz0dec_fast`, `lz0dec_compact`, `lz0dec_tiny`, `lz0dec_ultra_tiny` on valid streams, `lz0dec_min`, `lz0dec_ref`).
 
 ---
 
@@ -106,8 +106,9 @@ While standard LZ4 prioritizes extreme single-pass encoding throughput, **LZ4HC*
 3. **No Inflation on High Entropy**:
    On the raw textures and `star.png` in this set, LZ4 grows the file by about 0.3% to 0.4%. LZ0's per-window incompressible bailout emits `star.png` as a raw literal run (`355,671 B`, **100.00%**, `+5 B` framing overhead) at **~476–509 MB/s** encoding speed across all levels `-1..-9` (`350.4 KiB` peak heap, `24,755 MB/s` decode). On `avatar.jpg`, `-9` shrinks the input to **25,275 B (99.59%)**.
 4. **Minimal Decoder Footprint**:
-   Despite decoding variable-bit Elias gamma codes and unbounded window offsets with full bounds validation (`PROT_NONE` guard-page verified), the standalone assembly decoders maintain a minimal `.text` footprint (`0` heap, `0` stack on ARM64/RV64 compact):
-   - **Tiny ASM**: **288 B** (`x86-64`, `304 B` Win64), **376 B** (`ARM64`), **300 B** (`RISC-V 64`)
+   Despite decoding variable-bit Elias gamma codes and unbounded window offsets with full bounds validation (`PROT_NONE` guard-page verified), the standalone assembly decoders maintain a minimal `.text` footprint (`0` heap, `0` stack on ARM64/RV64):
+   - **Ultra-Tiny ASM (2-arg unchecked trusted stream)**: **117 B** (`x86 16-bit` real-mode `.bin`), **143 B** (`x86-64` ELF, `160 B` Win64 PE), **224 B** (`ARM64`), **188 B** (`RISC-V 64`)
+   - **Tiny ASM (full 4-arg safety contract)**: **288 B** (`x86-64`, `304 B` Win64), **376 B** (`ARM64`), **300 B** (`RISC-V 64`)
    - **Compact ASM**: **1,151 B** (`x86-64`), **1,296 B** (`ARM64`), **1,056 B** (`RISC-V 64`)
    - **FAST ASM**: **2,898 B** (`x86-64`), **2,852 B** (`ARM64`), **3,280 B** (`RISC-V 64`)
    - **Minimal C (`lz0dec_min.c` at `-Os`)**: **1,086 B** (`x86-64`), **1,004 B** (`ARM64`), **782 B** (`RISC-V 64`)
@@ -128,52 +129,53 @@ make bench_dec_riscv64  # RISC-V 64 throughput micro-benchmarks (QEMU)
 
 ### Decoder Code Footprint (`.text` Bytes)
 
-| Architecture | Tiny ASM | Minimal C (`lz0dec_min`, `-Os`) | Compact ASM (`-O3`) | FAST ASM (`-O3`) |
-|---|---:|---:|---:|---:|
-| **x86-64** | **288 B** (`304 B` Win64) | 1,086 B | 1,151 B | 2,898 B |
-| **AArch64 / ARM64** | **376 B** | 1,004 B | 1,296 B | 2,852 B |
-| **RISC-V 64** | **300 B** | 782 B | 1,056 B | 3,280 B |
+| Architecture | Ultra-Tiny ASM *(trusted stream)* | Tiny ASM *(full checks)* | Minimal C (`lz0dec_min`, `-Os`) | Compact ASM (`-O3`) | FAST ASM (`-O3`) |
+|---|---:|---:|---:|---:|---:|
+| **x86 16-bit (8086 real-mode)** | **117 B** (flat `.bin`) | — | — | — | — |
+| **x86-64** | **143 B** (`160 B` Win64) | **288 B** (`304 B` Win64) | 1,086 B | 1,151 B | 2,898 B |
+| **AArch64 / ARM64** | **224 B** | **376 B** | 1,004 B | 1,296 B | 2,852 B |
+| **RISC-V 64** | **188 B** | **300 B** | 782 B | 1,056 B | 3,280 B |
 
 ### Native x86-64 Decompression Throughput (`make bench_dec`)
 
-| File | Tiny ASM (`lz0dec_tiny_x86_64`) | Minimal C (`lz0dec_min`) | Standard C (`lz0_decompress_to`) | ASM Compact (`lz0dec_x86_64`) | ASM FAST (`lz0dec_fast_x86_64`) | UPKR (C unpacker) | LZ4 (`decompress_safe`) |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| `fields.c` | 285 MB/s | 331 MB/s | 371 MB/s | 532 MB/s | **1 028 MB/s** | 61 MB/s | 2 572 MB/s |
-| `cp.html` | 232 MB/s | 223 MB/s | 231 MB/s | 328 MB/s | **768 MB/s** | — | 3 902 MB/s |
-| `sum` | 226 MB/s | 277 MB/s | 281 MB/s | 398 MB/s | **783 MB/s** | 63 MB/s | 2 832 MB/s |
-| `lz0_win64.exe` | 163 MB/s | 161 MB/s | 168 MB/s | 237 MB/s | **402 MB/s** | 35 MB/s | 3 457 MB/s |
-| `star.png` | **33 721 MB/s** | 23 362 MB/s | 23 520 MB/s | 14 862 MB/s | 24 755 MB/s | 16 MB/s | 28 455 MB/s |
-| `avatar.jpg` | 3 218 MB/s | 4 718 MB/s | 4 997 MB/s | 4 952 MB/s | **8 845 MB/s** | 16 MB/s | 31 433 MB/s |
-| `break.mp3` | 2 363 MB/s | 3 081 MB/s | 3 082 MB/s | 6 683 MB/s | **9 956 MB/s** | 55 MB/s | 16 858 MB/s |
-| `alice29.txt` | 211 MB/s | 198 MB/s | 207 MB/s | 303 MB/s | **601 MB/s** | 44 MB/s | 2 636 MB/s |
-| `plrabn12.txt` | 198 MB/s | 189 MB/s | 196 MB/s | 300 MB/s | **594 MB/s** | 40 MB/s | 2 661 MB/s |
-| `kennedy.xls` | 427 MB/s | 648 MB/s | 642 MB/s | 894 MB/s | **1 316 MB/s** | 175 MB/s | 3 216 MB/s |
-| `dickens_1m.txt` | 220 MB/s | 201 MB/s | 228 MB/s | 323 MB/s | **588 MB/s** | 48 MB/s | 2 475 MB/s |
-| `bash_x86_64.bin` | 177 MB/s | 179 MB/s | 188 MB/s | 254 MB/s | **453 MB/s** | 38 MB/s | 2 556 MB/s |
+| File | Ultra-Tiny ASM (`lz0dec_ultra_tiny_x86_64`) | Tiny ASM (`lz0dec_tiny_x86_64`) | Minimal C (`lz0dec_min`) | Standard C (`lz0_decompress_to`) | ASM Compact (`lz0dec_x86_64`) | ASM FAST (`lz0dec_fast_x86_64`) | UPKR (C unpacker) | LZ4 (`decompress_safe`) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `fields.c` | 241 MB/s | 285 MB/s | 331 MB/s | 371 MB/s | 532 MB/s | **1 028 MB/s** | 61 MB/s | 2 572 MB/s |
+| `cp.html` | 193 MB/s | 232 MB/s | 223 MB/s | 231 MB/s | 328 MB/s | **768 MB/s** | — | 3 902 MB/s |
+| `sum` | 198 MB/s | 226 MB/s | 277 MB/s | 281 MB/s | 398 MB/s | **783 MB/s** | 63 MB/s | 2 832 MB/s |
+| `lz0_win64.exe` | 135 MB/s | 163 MB/s | 161 MB/s | 168 MB/s | 237 MB/s | **402 MB/s** | 35 MB/s | 3 457 MB/s |
+| `star.png` | 32 499 MB/s | **33 721 MB/s** | 23 362 MB/s | 23 520 MB/s | 14 862 MB/s | 24 755 MB/s | 16 MB/s | 28 455 MB/s |
+| `avatar.jpg` | 2 378 MB/s | 3 218 MB/s | 4 718 MB/s | 4 997 MB/s | 4 952 MB/s | **8 845 MB/s** | 16 MB/s | 31 433 MB/s |
+| `break.mp3` | 2 054 MB/s | 2 363 MB/s | 3 081 MB/s | 3 082 MB/s | 6 683 MB/s | **9 956 MB/s** | 55 MB/s | 16 858 MB/s |
+| `alice29.txt` | 168 MB/s | 211 MB/s | 198 MB/s | 207 MB/s | 303 MB/s | **601 MB/s** | 44 MB/s | 2 636 MB/s |
+| `plrabn12.txt` | 148 MB/s | 198 MB/s | 189 MB/s | 196 MB/s | 300 MB/s | **594 MB/s** | 40 MB/s | 2 661 MB/s |
+| `kennedy.xls` | 311 MB/s | 427 MB/s | 648 MB/s | 642 MB/s | 894 MB/s | **1 316 MB/s** | 175 MB/s | 3 216 MB/s |
+| `dickens_1m.txt` | 165 MB/s | 220 MB/s | 201 MB/s | 228 MB/s | 323 MB/s | **588 MB/s** | 48 MB/s | 2 475 MB/s |
+| `bash_x86_64.bin` | 143 MB/s | 177 MB/s | 179 MB/s | 188 MB/s | 254 MB/s | **453 MB/s** | 38 MB/s | 2 556 MB/s |
 
 ### AArch64 / ARM64 Decompression Throughput (QEMU, `make bench_dec_arm64`)
 
-| File | Standard C (`lz0_decompress_to`) | Minimal C (`lz0dec_min`) | Tiny ASM (`lz0dec_tiny_arm64`) | ASM Compact (`lz0dec_arm64`) | ASM FAST (`lz0dec_fast_arm64`) | Speedup FAST vs C |
-|---|---:|---:|---:|---:|---:|---:|
-| `fields.c` | 88.7 MB/s | 102.2 MB/s | 62.8 MB/s | 78.0 MB/s | **273.9 MB/s** | **+208.7%** |
-| `cp.html` | 76.1 MB/s | 82.2 MB/s | 56.0 MB/s | 57.5 MB/s | **221.3 MB/s** | **+190.7%** |
-| `alice29.txt` | 63.0 MB/s | 73.4 MB/s | 49.5 MB/s | 41.2 MB/s | **215.8 MB/s** | **+242.7%** |
-| `plrabn12.txt` | 59.2 MB/s | 62.2 MB/s | 43.7 MB/s | 33.2 MB/s | **213.6 MB/s** | **+261.1%** |
-| `kennedy.xls` | 105.9 MB/s | 135.7 MB/s | 93.3 MB/s | 131.8 MB/s | **388.7 MB/s** | **+267.1%** |
-| `dickens_1m.txt` | 58.9 MB/s | 73.2 MB/s | 49.4 MB/s | 33.2 MB/s | **231.8 MB/s** | **+293.4%** |
-| `bash_x86_64.bin` | 50.2 MB/s | 66.7 MB/s | 44.8 MB/s | 43.0 MB/s | **171.8 MB/s** | **+242.2%** |
+| File | Standard C (`lz0_decompress_to`) | Minimal C (`lz0dec_min`) | Ultra-Tiny ASM (`lz0dec_ultra_tiny_arm64`) | Tiny ASM (`lz0dec_tiny_arm64`) | ASM Compact (`lz0dec_arm64`) | ASM FAST (`lz0dec_fast_arm64`) | Speedup FAST vs C |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `fields.c` | 88.7 MB/s | 102.2 MB/s | 37.6 MB/s | 62.8 MB/s | 78.0 MB/s | **273.9 MB/s** | **+208.7%** |
+| `cp.html` | 76.1 MB/s | 82.2 MB/s | 31.8 MB/s | 56.0 MB/s | 57.5 MB/s | **221.3 MB/s** | **+190.7%** |
+| `alice29.txt` | 63.0 MB/s | 73.4 MB/s | 26.4 MB/s | 49.5 MB/s | 41.2 MB/s | **215.8 MB/s** | **+242.7%** |
+| `plrabn12.txt` | 59.2 MB/s | 62.2 MB/s | 22.9 MB/s | 43.7 MB/s | 33.2 MB/s | **213.6 MB/s** | **+261.1%** |
+| `kennedy.xls` | 105.9 MB/s | 135.7 MB/s | 43.9 MB/s | 93.3 MB/s | 131.8 MB/s | **388.7 MB/s** | **+267.1%** |
+| `dickens_1m.txt` | 58.9 MB/s | 73.2 MB/s | 24.2 MB/s | 49.4 MB/s | 33.2 MB/s | **231.8 MB/s** | **+293.4%** |
+| `bash_x86_64.bin` | 50.2 MB/s | 66.7 MB/s | 24.5 MB/s | 44.8 MB/s | 43.0 MB/s | **171.8 MB/s** | **+242.2%** |
 
 ### RISC-V 64 / RV64GC Decompression Throughput (QEMU, `make bench_dec_riscv64`)
 
-| File | Standard C (`lz0_decompress_to`) | Minimal C (`lz0dec_min`) | Tiny ASM (`lz0dec_tiny_riscv64`) | ASM Compact (`lz0dec_riscv64`) | ASM FAST (`lz0dec_fast_riscv64`) | Speedup FAST vs C |
-|---|---:|---:|---:|---:|---:|---:|
-| `fields.c` | 76.2 MB/s | 122.9 MB/s | 51.4 MB/s | 125.1 MB/s | **353.2 MB/s** | **+363.6%** |
-| `cp.html` | 68.7 MB/s | 106.2 MB/s | 45.7 MB/s | 99.3 MB/s | **262.5 MB/s** | **+282.3%** |
-| `alice29.txt` | 65.2 MB/s | 93.6 MB/s | 42.3 MB/s | 111.3 MB/s | **255.2 MB/s** | **+291.1%** |
-| `plrabn12.txt` | 63.3 MB/s | 86.5 MB/s | 37.1 MB/s | 95.2 MB/s | **236.7 MB/s** | **+274.2%** |
-| `kennedy.xls` | 77.0 MB/s | 208.6 MB/s | 65.2 MB/s | 116.8 MB/s | **505.8 MB/s** | **+556.8%** |
-| `dickens_1m.txt` | 70.6 MB/s | 84.7 MB/s | 43.3 MB/s | 104.3 MB/s | **227.3 MB/s** | **+221.8%** |
-| `bash_x86_64.bin` | 47.6 MB/s | 85.3 MB/s | 35.8 MB/s | 68.0 MB/s | **208.0 MB/s** | **+336.9%** |
+| File | Standard C (`lz0_decompress_to`) | Minimal C (`lz0dec_min`) | Ultra-Tiny ASM (`lz0dec_ultra_tiny_riscv64`) | Tiny ASM (`lz0dec_tiny_riscv64`) | ASM Compact (`lz0dec_riscv64`) | ASM FAST (`lz0dec_fast_riscv64`) | Speedup FAST vs C |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `fields.c` | 76.2 MB/s | 122.9 MB/s | 33.0 MB/s | 51.4 MB/s | 125.1 MB/s | **353.2 MB/s** | **+363.6%** |
+| `cp.html` | 68.7 MB/s | 106.2 MB/s | 28.1 MB/s | 45.7 MB/s | 99.3 MB/s | **262.5 MB/s** | **+282.3%** |
+| `alice29.txt` | 65.2 MB/s | 93.6 MB/s | 22.0 MB/s | 42.3 MB/s | 111.3 MB/s | **255.2 MB/s** | **+291.1%** |
+| `plrabn12.txt` | 63.3 MB/s | 86.5 MB/s | 18.6 MB/s | 37.1 MB/s | 95.2 MB/s | **236.7 MB/s** | **+274.2%** |
+| `kennedy.xls` | 77.0 MB/s | 208.6 MB/s | 41.7 MB/s | 65.2 MB/s | 116.8 MB/s | **505.8 MB/s** | **+556.8%** |
+| `dickens_1m.txt` | 70.6 MB/s | 84.7 MB/s | 20.2 MB/s | 43.3 MB/s | 104.3 MB/s | **227.3 MB/s** | **+221.8%** |
+| `bash_x86_64.bin` | 47.6 MB/s | 85.3 MB/s | 21.8 MB/s | 35.8 MB/s | 68.0 MB/s | **208.0 MB/s** | **+336.9%** |
 
 ---
 

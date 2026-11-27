@@ -47,10 +47,10 @@ make bench_all
 ./bin/lz0 d output.lz0 restored.bin
 
 ./bin/lz0dec output.lz0 restored.bin
-./bin/lz0dec -e min output.lz0 restored.bin   # also: fast, compact, tiny
+./bin/lz0dec -e min output.lz0 restored.bin   # also: fast, compact, tiny, ultra_tiny
 ```
 
-`lz0dec` defaults to the fast assembly decoder on x86-64 (Linux, macOS, Windows), AArch64 (Linux, macOS), and RV64 (Linux). On unsupported targets, `fast`, `compact`, and `tiny` fall back to `lz0dec_min`.
+`lz0dec` defaults to the fast assembly decoder on x86-64 (Linux, macOS, Windows), AArch64 (Linux, macOS), and RV64 (Linux). `ultra_tiny` (`lz0dec_ultra_tiny(in, out)`) is an unchecked trusted-stream 2-argument decoder for controlled payloads/boot paths; use `tiny`, `compact`, `fast`, or `min` for untrusted inputs. On unsupported targets, `fast`, `compact`, and `tiny` fall back to `lz0dec_min`.
 
 The nine compression levels map to five distinct search presets tuned for speed, memory footprint, and compression density:
 
@@ -125,11 +125,13 @@ The scalar C kernels and the x86-64 (SSE2 / AVX2), AArch64 (NEON), and RISC-V (R
 | `lz0/lz0_decompress.c` | Library decoder, `lz0_decompress_to` | — |
 | `lz0/lz0dec_ref.c` | Reference, read beside the format document | — |
 | `lz0/lz0dec_min.c` | One C function, no heap, written to compile small | 1,086 B (x64) / 1,004 B (ARM64) / 782 B (RV64) at `-Os` |
+| `lz0/lz0dec_ultra_tiny_x86_16.S` | 16-bit 8086 real-mode bootsector/COM decoder (`DS:SI` -> `ES:DI`), unchecked trusted stream | 117 B (raw `.bin`) |
+| `lz0/lz0dec_ultra_tiny_x86_64.S`, `lz0dec_ultra_tiny_arm64.S`, `lz0dec_ultra_tiny_riscv64.S` | Ultra-tiny 2-arg assembly (`(in, out)`), zero heap, unchecked trusted stream | 143 B (x64) / 224 B (ARM64) / 188 B (RV64) |
 | `lz0/lz0dec_tiny_x86_64.S`, `lz0dec_tiny_arm64.S`, `lz0dec_tiny_riscv64.S` | Tiny assembly, zero heap, full safety contract | 288 B (x64) / 376 B (ARM64) / 300 B (RV64) |
 | `lz0/lz0dec_x86_64.S`, `lz0dec_arm64.S`, `lz0dec_riscv64.S` | Compact assembly, zero heap | 1,151 B (x64) / 1,296 B (ARM64) / 1,056 B (RV64) |
 | `lz0/lz0dec_fast_x86_64.S`, `lz0dec_fast_arm64.S`, `lz0dec_fast_riscv64.S` | Larger assembly, aimed at throughput | 2,898 B (x64) / 2,852 B (ARM64) / 3,280 B (RV64) |
 
-The tiny and compact AArch64 and RV64 decoders are leaf functions with zero stack frame (`lz0dec_tiny_x86_64` uses only `push rbp; mov rbp, rsp`). The x86-64 compact decoder saves only `rbx`/`rbp` plus at most one return address (`<= 32` bytes stack frame total). The fast decoders keep a small constant table, copy wider in the middle of the buffer, and take a checked path for the tail. `tests/test_guard.c` maps a `PROT_NONE` page immediately after the input and the output.
+The ultra-tiny, tiny, and compact AArch64 and RV64 decoders are leaf functions with zero stack frame (`lz0dec_tiny_x86_64` uses only `push rbp; mov rbp, rsp`; `lz0dec_ultra_tiny_x86_64` saves only `rbx` and `out_start`). The x86-64 compact decoder saves only `rbx`/`rbp` plus at most one return address (`<= 32` bytes stack frame total). The fast decoders keep a small constant table, copy wider in the middle of the buffer, and take a checked path for the tail. `tests/test_guard.c` maps a `PROT_NONE` page immediately after the input and the output (`lz0dec_ultra_tiny` is checked on valid roundtrips). `make ultra16` assembles `lz0/lz0dec_ultra_tiny_x86_16.S` to a 117 B raw 8086 binary and executes its machine bytes in segmented real-mode test cases (`DS != ES` and `DS == ES`).
 
 ## Results
 

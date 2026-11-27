@@ -21,16 +21,16 @@ LZ0_SRC = lz0/lz0_cost.c lz0/lz0_find.c lz0/lz0_parse.c \
           $(LZ0_SIMD_SRC)
 
 ifneq ($(filter arm64 aarch64,$(UNAME_M)),)
-HOST_ASM_DEC = lz0/lz0dec_arm64.S lz0/lz0dec_fast_arm64.S lz0/lz0dec_tiny_arm64.S
+HOST_ASM_DEC = lz0/lz0dec_arm64.S lz0/lz0dec_fast_arm64.S lz0/lz0dec_tiny_arm64.S lz0/lz0dec_ultra_tiny_arm64.S
 else ifeq ($(UNAME_M),riscv64)
-HOST_ASM_DEC = lz0/lz0dec_riscv64.S lz0/lz0dec_fast_riscv64.S lz0/lz0dec_tiny_riscv64.S
+HOST_ASM_DEC = lz0/lz0dec_riscv64.S lz0/lz0dec_fast_riscv64.S lz0/lz0dec_tiny_riscv64.S lz0/lz0dec_ultra_tiny_riscv64.S
 else
-HOST_ASM_DEC = lz0/lz0dec_x86_64.S lz0/lz0dec_fast_x86_64.S lz0/lz0dec_tiny_x86_64.S
+HOST_ASM_DEC = lz0/lz0dec_x86_64.S lz0/lz0dec_fast_x86_64.S lz0/lz0dec_tiny_x86_64.S lz0/lz0dec_ultra_tiny_x86_64.S
 endif
 
 LZ0DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c $(HOST_ASM_DEC)
 
-.PHONY: all bench clean test smoke bounds limits diag sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz guard simd sa_probe enc_bench enc_tiers find_bench mem_peak lz0 lz0dec cli sanitize valgrind bench_all bench_ratio bench_dec bench_dec_arm64 bench_dec_riscv64 bench_blobs test_arm64 arm64 test_riscv64 riscv64 windows test_windows dist dist_linux dist_arm64 dist_riscv64 dist_windows dist_macos
+.PHONY: all bench clean test smoke bounds limits diag sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz guard simd sa_probe enc_bench enc_tiers find_bench mem_peak lz0 lz0dec cli sanitize valgrind bench_all bench_ratio bench_dec bench_dec_arm64 bench_dec_riscv64 bench_blobs test_arm64 arm64 test_riscv64 riscv64 windows test_windows ultra16 dist dist_linux dist_arm64 dist_riscv64 dist_windows dist_macos
 
 all: bin/lz0 bin/lz0dec bench/lz0_bench bench/lz0_smoke bench/lz0_bounds bench/lz0_diag_rep bench/lz0_sdp32 bench/lz0_scale bench/lz0_prof bench/lz0_cmpfind bench/lz0_jumpsweep bench/lz0_pruneab bench/lz0_bits bench/lz0_final
 
@@ -175,27 +175,27 @@ bin/lz0_arm64: lz0/lz0_cli.c $(LZ0_SRC) $(ARM64_DEC_SRC)
 	mkdir -p bin
 	$(ARM64_CC) $(ARM64_CFLAGS) -s -o $@ lz0/lz0_cli.c $(LZ0_SRC) $(ARM64_DEC_SRC)
 
-bin/lz0dec_arm64: lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_arm64.S lz0/lz0dec_fast_arm64.S lz0/lz0dec_tiny_arm64.S
+bin/lz0dec_arm64: lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_arm64.S lz0/lz0dec_fast_arm64.S lz0/lz0dec_tiny_arm64.S lz0/lz0dec_ultra_tiny_arm64.S
 	mkdir -p bin
-	$(ARM64_CC) $(ARM64_CFLAGS) -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_arm64.S lz0/lz0dec_fast_arm64.S lz0/lz0dec_tiny_arm64.S
+	$(ARM64_CC) $(ARM64_CFLAGS) -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_arm64.S lz0/lz0dec_fast_arm64.S lz0/lz0dec_tiny_arm64.S lz0/lz0dec_ultra_tiny_arm64.S
 
 bin/lz0_riscv64: lz0/lz0_cli.c $(LZ0_SRC) $(RISCV64_DEC_SRC)
 	mkdir -p bin
 	$(RISCV64_CC) $(RISCV64_CFLAGS) -s -o $@ lz0/lz0_cli.c $(LZ0_SRC) $(RISCV64_DEC_SRC)
 
-bin/lz0dec_riscv64: lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_riscv64.S lz0/lz0dec_fast_riscv64.S lz0/lz0dec_tiny_riscv64.S
+bin/lz0dec_riscv64: lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_riscv64.S lz0/lz0dec_fast_riscv64.S lz0/lz0dec_tiny_riscv64.S lz0/lz0dec_ultra_tiny_riscv64.S
 	mkdir -p bin
-	$(RISCV64_CC) $(RISCV64_CFLAGS) -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_riscv64.S lz0/lz0dec_fast_riscv64.S lz0/lz0dec_tiny_riscv64.S
+	$(RISCV64_CC) $(RISCV64_CFLAGS) -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_riscv64.S lz0/lz0dec_fast_riscv64.S lz0/lz0dec_tiny_riscv64.S lz0/lz0dec_ultra_tiny_riscv64.S
 
 MINGW_CC ?= x86_64-w64-mingw32-gcc
 
-bin/lz0.exe: lz0/lz0_cli.c $(LZ0_SRC) lz0/lz0dec_min.c lz0/lz0dec_x86_64.S lz0/lz0dec_fast_x86_64.S lz0/lz0dec_tiny_x86_64.S
+bin/lz0.exe: lz0/lz0_cli.c $(LZ0_SRC) lz0/lz0dec_min.c lz0/lz0dec_x86_64.S lz0/lz0dec_fast_x86_64.S lz0/lz0dec_tiny_x86_64.S lz0/lz0dec_ultra_tiny_x86_64.S
 	mkdir -p bin
-	$(MINGW_CC) $(CFLAGS) -static -s -o $@ lz0/lz0_cli.c $(LZ0_SRC) lz0/lz0dec_min.c lz0/lz0dec_x86_64.S lz0/lz0dec_fast_x86_64.S lz0/lz0dec_tiny_x86_64.S
+	$(MINGW_CC) $(CFLAGS) -static -s -o $@ lz0/lz0_cli.c $(LZ0_SRC) lz0/lz0dec_min.c lz0/lz0dec_x86_64.S lz0/lz0dec_fast_x86_64.S lz0/lz0dec_tiny_x86_64.S lz0/lz0dec_ultra_tiny_x86_64.S
 
-bin/lz0dec.exe: lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.S lz0/lz0dec_fast_x86_64.S lz0/lz0dec_tiny_x86_64.S
+bin/lz0dec.exe: lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.S lz0/lz0dec_fast_x86_64.S lz0/lz0dec_tiny_x86_64.S lz0/lz0dec_ultra_tiny_x86_64.S
 	mkdir -p bin
-	$(MINGW_CC) $(CFLAGS) -static -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.S lz0/lz0dec_fast_x86_64.S lz0/lz0dec_tiny_x86_64.S
+	$(MINGW_CC) $(CFLAGS) -static -s -o $@ lz0/lz0dec_cli.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.S lz0/lz0dec_fast_x86_64.S lz0/lz0dec_tiny_x86_64.S lz0/lz0dec_ultra_tiny_x86_64.S
 
 windows: bin/lz0.exe bin/lz0dec.exe
 
@@ -240,10 +240,15 @@ dist_macos: bin/lz0 bin/lz0dec
 
 dist: dist_linux dist_arm64 dist_riscv64 dist_windows
 
-cli: bin/lz0
+cli: bin/lz0 bin/lz0dec
 	./bin/lz0 c tests/vectors/literals.bin /tmp/lz0_cli.lz0
 	./bin/lz0 d /tmp/lz0_cli.lz0 /tmp/lz0_cli.out
 	cmp tests/vectors/literals.bin /tmp/lz0_cli.out
+	./bin/lz0dec -e tiny /tmp/lz0_cli.lz0 /tmp/lz0_cli.out
+	cmp tests/vectors/literals.bin /tmp/lz0_cli.out
+	./bin/lz0dec -e ultra_tiny /tmp/lz0_cli.lz0 /tmp/lz0_cli.out
+	cmp tests/vectors/literals.bin /tmp/lz0_cli.out
+	rm -f /tmp/lz0_cli.lz0 /tmp/lz0_cli.out
 
 tests/test_vectors: tests/test_vectors.c $(LZ0_SRC) $(LZ0DEC_SRC)
 	$(CC) $(CFLAGS) -o $@ tests/test_vectors.c $(LZ0_SRC) $(LZ0DEC_SRC)
@@ -376,15 +381,29 @@ valgrind: bin/lz0
 	rm -f /tmp/lz0_vg.lz0 /tmp/lz0_vg.out
 	@echo "Valgrind: zero leaks detected."
 
-test: smoke bounds limits bench/lz0_bench vectors boundary malformed guard simd sa_probe threadsafe window
+bin/lz0dec_ultra_tiny_x86_16.bin: lz0/lz0dec_ultra_tiny_x86_16.S
+	mkdir -p bin
+	as --32 $< -o $@.o
+	objcopy -O binary -j .text $@.o $@
+	rm -f $@.o
+
+tests/test_ultra16: tests/test_ultra16.c $(LZ0_SRC)
+	$(CC) $(CFLAGS) -o $@ tests/test_ultra16.c $(LZ0_SRC)
+
+ultra16: bin/lz0dec_ultra_tiny_x86_16.bin tests/test_ultra16
+	./tests/test_ultra16
+
+ULTRA16_TARGET := $(if $(and $(filter Linux,$(UNAME_S)),$(filter x86_64 amd64,$(UNAME_M))),ultra16,)
+
+test: smoke bounds limits bench/lz0_bench vectors boundary malformed guard simd sa_probe threadsafe window $(ULTRA16_TARGET)
 	./bench/lz0_bench --quick
 
 ARM64_CC ?= aarch64-linux-gnu-gcc
 ARM64_EMU ?= $(shell command -v qemu-aarch64-static 2>/dev/null || echo qemu-aarch64)
 ARM64_CFLAGS = -O3 -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Izx0_compressor -Izx0_decompressor -Ilz0 -DLZ0_VERSION=\"$(VERSION)\" -static
-ARM64_DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_arm64.S lz0/lz0dec_fast_arm64.S lz0/lz0dec_tiny_arm64.S
+ARM64_DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_arm64.S lz0/lz0dec_fast_arm64.S lz0/lz0dec_tiny_arm64.S lz0/lz0dec_ultra_tiny_arm64.S
 
-test_arm64: lz0/lz0dec_arm64.S lz0/lz0dec_fast_arm64.S lz0/lz0dec_tiny_arm64.S
+test_arm64: lz0/lz0dec_arm64.S lz0/lz0dec_fast_arm64.S lz0/lz0dec_tiny_arm64.S lz0/lz0dec_ultra_tiny_arm64.S
 	@echo "=== Cross-compiling and running ARM64 / AArch64 tests under QEMU ==="
 	$(ARM64_CC) $(ARM64_CFLAGS) -o tests/test_vectors_arm64 tests/test_vectors.c $(LZ0_SRC) $(ARM64_DEC_SRC)
 	$(ARM64_EMU) ./tests/test_vectors_arm64
@@ -411,9 +430,9 @@ RISCV64_EMU ?= $(shell command -v qemu-riscv64-static 2>/dev/null || echo qemu-r
 # Same emulator with the V extension enabled (exercises the RVV encoder tier).
 RISCV64_EMU_V ?= $(RISCV64_EMU) -cpu rv64,v=true,vlen=128
 RISCV64_CFLAGS = -O3 -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Izx0_compressor -Izx0_decompressor -Ilz0 -DLZ0_VERSION=\"$(VERSION)\" -static
-RISCV64_DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_riscv64.S lz0/lz0dec_fast_riscv64.S lz0/lz0dec_tiny_riscv64.S
+RISCV64_DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_riscv64.S lz0/lz0dec_fast_riscv64.S lz0/lz0dec_tiny_riscv64.S lz0/lz0dec_ultra_tiny_riscv64.S
 
-test_riscv64: lz0/lz0dec_riscv64.S lz0/lz0dec_fast_riscv64.S lz0/lz0dec_tiny_riscv64.S
+test_riscv64: lz0/lz0dec_riscv64.S lz0/lz0dec_fast_riscv64.S lz0/lz0dec_tiny_riscv64.S lz0/lz0dec_ultra_tiny_riscv64.S
 	@echo "=== Cross-compiling and running RISC-V 64 tests under QEMU ==="
 	$(RISCV64_CC) $(RISCV64_CFLAGS) -o tests/test_vectors_riscv64 tests/test_vectors.c $(LZ0_SRC) $(RISCV64_DEC_SRC)
 	$(RISCV64_EMU) ./tests/test_vectors_riscv64
@@ -439,7 +458,7 @@ test_riscv64: lz0/lz0dec_riscv64.S lz0/lz0dec_fast_riscv64.S lz0/lz0dec_tiny_ris
 riscv64: test_riscv64
 
 RUN_WIN ?= WINEDEBUG=-all wine
-WIN_DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.S lz0/lz0dec_fast_x86_64.S lz0/lz0dec_tiny_x86_64.S
+WIN_DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c lz0/lz0dec_x86_64.S lz0/lz0dec_fast_x86_64.S lz0/lz0dec_tiny_x86_64.S lz0/lz0dec_ultra_tiny_x86_64.S
 
 test_windows: windows
 	@echo "=== Cross-compiling and running Win64 tests ==="
@@ -462,10 +481,14 @@ test_windows: windows
 	$(RUN_WIN) ./bin/lz0.exe c tests/vectors/literals.bin build_win_cli.lz0
 	$(RUN_WIN) ./bin/lz0dec.exe -e fast build_win_cli.lz0 build_win_cli.out
 	cmp tests/vectors/literals.bin build_win_cli.out
+	$(RUN_WIN) ./bin/lz0dec.exe -e tiny build_win_cli.lz0 build_win_cli.out
+	cmp tests/vectors/literals.bin build_win_cli.out
+	$(RUN_WIN) ./bin/lz0dec.exe -e ultra_tiny build_win_cli.lz0 build_win_cli.out
+	cmp tests/vectors/literals.bin build_win_cli.out
 	rm -f build_win_cli.lz0 build_win_cli.out
 	@echo "All Win64 tests passed cleanly!"
 
 clean:
 	rm -f bench/lz0_* bench/dump_rep bench/debug_a3 bench/count_bench bench/scatter_bench
-	rm -f bin/lz0* tests/test_vectors tests/test_boundary tests/test_malformed tests/test_fuzz tests/test_guard tests/test_simd tests/test_sa_probe tests/test_threadsafe tests/test_window tests/test_limits tests/*_arm64 tests/*_riscv64 tests/*.exe
+	rm -f bin/lz0* tests/test_vectors tests/test_boundary tests/test_malformed tests/test_fuzz tests/test_guard tests/test_simd tests/test_sa_probe tests/test_threadsafe tests/test_window tests/test_limits tests/test_ultra16 tests/*_arm64 tests/*_riscv64 tests/*.exe
 	rm -rf dist build

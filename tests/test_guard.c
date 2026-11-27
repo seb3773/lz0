@@ -81,6 +81,18 @@ static void check(const char *what, const unsigned char *src, int in_n, int out_
         }
         gfree(out);
     }
+#if ((defined(__x86_64__) || defined(_M_X64)) || (defined(__aarch64__) || defined(_M_ARM64)) || \
+     (defined(__riscv) && __riscv_xlen == 64)) && !defined(_WIN32)
+    if (rr > 0 && (strcmp(what, "exact") == 0 || strcmp(what, "spare") == 0 || strcmp(what, "synthetic") == 0)) {
+        gbuf out = galloc((size_t)out_max);
+        int r = lz0dec_ultra_tiny(in.p, out.p);
+        if (r != rr || memcmp(out.p, ref.p, (size_t)rr)) {
+            printf("FAIL %-12s %-5s in=%d out_max=%d ret=%d ref=%d\n", what, "utiny", in_n, out_max, r, rr);
+            fails++;
+        }
+        gfree(out);
+    }
+#endif
     gfree(ref);
     gfree(in);
 }

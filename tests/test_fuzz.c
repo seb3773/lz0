@@ -50,50 +50,59 @@ static int fuzz_roundtrip(int niter, int maxn) {
 #if defined(__x86_64__) || defined(_M_X64)
         unsigned char *d = (unsigned char *)malloc((size_t)n);
         int dd = lz0dec_x86_64(raw, (int)rsz, d, n);
+        unsigned char *du_buf = (unsigned char *)malloc((size_t)n);
+        int du = lz0dec_ultra_tiny_x86_64(raw, du_buf);
         unsigned char *dt_buf = (unsigned char *)malloc((size_t)n);
         int dt = lz0dec_tiny_x86_64(raw, (int)rsz, dt_buf, n);
         unsigned char *df_buf = (unsigned char *)malloc((size_t)n);
         int df = lz0dec_fast_x86_64(raw, (int)rsz, df_buf, n);
-        if (da != n || db != n || dc != n || dt != n || dd != n || df != n || memcmp(a, in, (size_t)n) ||
-            memcmp(b, in, (size_t)n) || memcmp(c, in, (size_t)n) || memcmp(dt_buf, in, (size_t)n) ||
-            memcmp(d, in, (size_t)n) || memcmp(df_buf, in, (size_t)n)) {
-            printf("rt %d n=%d decode FAIL lib=%d ref=%d min=%d tiny=%d asm=%d fast=%d\n", i, n, da, db, dc, dt, dd, df);
+        if (da != n || db != n || dc != n || du != n || dt != n || dd != n || df != n || memcmp(a, in, (size_t)n) ||
+            memcmp(b, in, (size_t)n) || memcmp(c, in, (size_t)n) || memcmp(du_buf, in, (size_t)n) ||
+            memcmp(dt_buf, in, (size_t)n) || memcmp(d, in, (size_t)n) || memcmp(df_buf, in, (size_t)n)) {
+            printf("rt %d n=%d decode FAIL lib=%d ref=%d min=%d utiny=%d tiny=%d asm=%d fast=%d\n", i, n, da, db, dc, du, dt, dd, df);
             fail = 1;
         }
         free(df_buf);
         free(dt_buf);
+        free(du_buf);
         free(d);
 #elif defined(__aarch64__) || defined(_M_ARM64)
         unsigned char *d = (unsigned char *)malloc((size_t)n);
         int dd = lz0dec_arm64(raw, (int)rsz, d, n);
+        unsigned char *du_buf = (unsigned char *)malloc((size_t)n);
+        int du = lz0dec_ultra_tiny_arm64(raw, du_buf);
         unsigned char *dt_buf = (unsigned char *)malloc((size_t)n);
         int dt = lz0dec_tiny_arm64(raw, (int)rsz, dt_buf, n);
         unsigned char *df_buf = (unsigned char *)malloc((size_t)n);
         int df = lz0dec_fast_arm64(raw, (int)rsz, df_buf, n);
-        if (da != n || db != n || dc != n || dt != n || dd != n || df != n || memcmp(a, in, (size_t)n) ||
-            memcmp(b, in, (size_t)n) || memcmp(c, in, (size_t)n) || memcmp(dt_buf, in, (size_t)n) ||
-            memcmp(d, in, (size_t)n) || memcmp(df_buf, in, (size_t)n)) {
-            printf("rt %d n=%d decode FAIL lib=%d ref=%d min=%d tiny=%d arm64=%d fast=%d\n", i, n, da, db, dc, dt, dd, df);
+        if (da != n || db != n || dc != n || du != n || dt != n || dd != n || df != n || memcmp(a, in, (size_t)n) ||
+            memcmp(b, in, (size_t)n) || memcmp(c, in, (size_t)n) || memcmp(du_buf, in, (size_t)n) ||
+            memcmp(dt_buf, in, (size_t)n) || memcmp(d, in, (size_t)n) || memcmp(df_buf, in, (size_t)n)) {
+            printf("rt %d n=%d decode FAIL lib=%d ref=%d min=%d utiny=%d tiny=%d arm64=%d fast=%d\n", i, n, da, db, dc, du, dt, dd, df);
             fail = 1;
         }
         free(df_buf);
         free(dt_buf);
+        free(du_buf);
         free(d);
 #elif (defined(__riscv) && __riscv_xlen == 64)
         unsigned char *d = (unsigned char *)malloc((size_t)n);
         int dd = lz0dec_riscv64(raw, (int)rsz, d, n);
+        unsigned char *du_buf = (unsigned char *)malloc((size_t)n);
+        int du = lz0dec_ultra_tiny_riscv64(raw, du_buf);
         unsigned char *dt_buf = (unsigned char *)malloc((size_t)n);
         int dt = lz0dec_tiny_riscv64(raw, (int)rsz, dt_buf, n);
         unsigned char *df_buf = (unsigned char *)malloc((size_t)n);
         int df = lz0dec_fast_riscv64(raw, (int)rsz, df_buf, n);
-        if (da != n || db != n || dc != n || dt != n || dd != n || df != n || memcmp(a, in, (size_t)n) ||
-            memcmp(b, in, (size_t)n) || memcmp(c, in, (size_t)n) || memcmp(dt_buf, in, (size_t)n) ||
-            memcmp(d, in, (size_t)n) || memcmp(df_buf, in, (size_t)n)) {
-            printf("rt %d n=%d decode FAIL lib=%d ref=%d min=%d tiny=%d riscv64=%d fast=%d\n", i, n, da, db, dc, dt, dd, df);
+        if (da != n || db != n || dc != n || du != n || dt != n || dd != n || df != n || memcmp(a, in, (size_t)n) ||
+            memcmp(b, in, (size_t)n) || memcmp(c, in, (size_t)n) || memcmp(du_buf, in, (size_t)n) ||
+            memcmp(dt_buf, in, (size_t)n) || memcmp(d, in, (size_t)n) || memcmp(df_buf, in, (size_t)n)) {
+            printf("rt %d n=%d decode FAIL lib=%d ref=%d min=%d utiny=%d tiny=%d riscv64=%d fast=%d\n", i, n, da, db, dc, du, dt, dd, df);
             fail = 1;
         }
         free(df_buf);
         free(dt_buf);
+        free(du_buf);
         free(d);
 #else
         if (da != n || db != n || dc != n || memcmp(a, in, (size_t)n) ||
