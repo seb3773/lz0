@@ -33,11 +33,11 @@ static const struct { const char *name; decfn fn; } DEC[] = {
     {"lib", lz0_decompress_to},
     {"min", lz0dec_min},
 #if (defined(__x86_64__) || defined(_M_X64)) && !defined(_WIN32)
-    {"asm", lz0dec_x86_64}, {"fast", lz0dec_fast_x86_64},
+    {"tiny", lz0dec_tiny_x86_64}, {"asm", lz0dec_x86_64}, {"fast", lz0dec_fast_x86_64},
 #elif (defined(__aarch64__) || defined(_M_ARM64)) && !defined(_WIN32)
-    {"asm", lz0dec_arm64}, {"fast", lz0dec_fast_arm64},
+    {"tiny", lz0dec_tiny_arm64}, {"asm", lz0dec_arm64}, {"fast", lz0dec_fast_arm64},
 #elif (defined(__riscv) && __riscv_xlen == 64) && !defined(_WIN32)
-    {"asm", lz0dec_riscv64}, {"fast", lz0dec_fast_riscv64},
+    {"tiny", lz0dec_tiny_riscv64}, {"asm", lz0dec_riscv64}, {"fast", lz0dec_fast_riscv64},
 #endif
 };
 #define NDEC ((int)(sizeof DEC / sizeof DEC[0]))

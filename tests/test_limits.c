@@ -61,8 +61,12 @@ int main(void) {
         if (lz0_decompress_to(comp, -1, out, 64) >= 0 ||
             lz0_decompress_to(comp, (int)csz, out, -1) >= 0 ||
             lz0dec_min(comp, -5, out, 64) >= 0 ||
-            lz0dec_ref(comp, (int)csz, out, -5) >= 0) {
-            printf("FAIL: negative int32 arg accepted\n");
+            lz0dec_ref(comp, (int)csz, out, -5) >= 0 ||
+            lz0dec_tiny(comp, -5, out, 64) >= 0 ||
+            lz0dec_tiny(comp, (int)csz, out, -5) >= 0 ||
+            lz0dec_tiny(NULL, (int)csz, out, 64) >= 0 ||
+            lz0dec_tiny(comp, (int)csz, NULL, 64) >= 0) {
+            printf("FAIL: negative/null int32 arg accepted\n");
             fail = 1;
         }
         if (lz0_decompress_ex(comp, 0, out, 64) >= 0 ||

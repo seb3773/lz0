@@ -56,6 +56,9 @@ static int check_raw(const char *name, const unsigned char *in, size_t n,
         if (!d)
             bad = 1;
         else {
+            int dt = lz0dec_tiny_x86_64(raw, (int)rsz, d, (int)n);
+            if (dt != (int)n || memcmp(d, in, n))
+                bad = 1;
             int dd = lz0dec_x86_64(raw, (int)rsz, d, (int)n);
             if (dd != (int)n || memcmp(d, in, n))
                 bad = 1;
@@ -69,6 +72,9 @@ static int check_raw(const char *name, const unsigned char *in, size_t n,
         if (!d)
             bad = 1;
         else {
+            int dt = lz0dec_tiny_arm64(raw, (int)rsz, d, (int)n);
+            if (dt != (int)n || memcmp(d, in, n))
+                bad = 1;
             int dd = lz0dec_arm64(raw, (int)rsz, d, (int)n);
             if (dd != (int)n || memcmp(d, in, n))
                 bad = 1;
@@ -82,6 +88,9 @@ static int check_raw(const char *name, const unsigned char *in, size_t n,
         if (!d)
             bad = 1;
         else {
+            int dt = lz0dec_tiny_riscv64(raw, (int)rsz, d, (int)n);
+            if (dt != (int)n || memcmp(d, in, n))
+                bad = 1;
             int dd = lz0dec_riscv64(raw, (int)rsz, d, (int)n);
             if (dd != (int)n || memcmp(d, in, n))
                 bad = 1;

@@ -27,6 +27,9 @@ static int decode_all(const char *name, const unsigned char *in, uint32_t n,
         if (!d)
             bad = 1;
         else {
+            int dt = lz0dec_tiny_x86_64(comp, (int)csz, d, (int)n);
+            if (dt != (int)n || memcmp(d, in, n))
+                bad = 1;
             int dd = lz0dec_x86_64(comp, (int)csz, d, (int)n);
             if (dd != (int)n || memcmp(d, in, n))
                 bad = 1;
@@ -40,6 +43,9 @@ static int decode_all(const char *name, const unsigned char *in, uint32_t n,
         if (!d)
             bad = 1;
         else {
+            int dt = lz0dec_tiny_arm64(comp, (int)csz, d, (int)n);
+            if (dt != (int)n || memcmp(d, in, n))
+                bad = 1;
             int dd = lz0dec_arm64(comp, (int)csz, d, (int)n);
             if (dd != (int)n || memcmp(d, in, n))
                 bad = 1;
@@ -53,6 +59,9 @@ static int decode_all(const char *name, const unsigned char *in, uint32_t n,
         if (!d)
             bad = 1;
         else {
+            int dt = lz0dec_tiny_riscv64(comp, (int)csz, d, (int)n);
+            if (dt != (int)n || memcmp(d, in, n))
+                bad = 1;
             int dd = lz0dec_riscv64(comp, (int)csz, d, (int)n);
             if (dd != (int)n || memcmp(d, in, n))
                 bad = 1;
