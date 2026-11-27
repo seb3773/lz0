@@ -10,6 +10,9 @@
  * code. AdvSIMD is architecturally mandatory on AArch64, so no run-time
  * check is required.
  *
+ * Kernels: find_u32, argmax_i32, find_off, kc_worst (incl. n == 32 fast path),
+ * count_eq, mru_batch, matchlen, bin40_hits, u_row_prep, sa_scan_side.
+ *
  * First-set-lane extraction: comparison results (all-ones / zero lanes) are
  * narrowed to one byte or halfword per lane, moved to a GPR, then
  * RBIT + CLZ gives the bit position of the lowest matching lane.
@@ -257,6 +260,8 @@ ENDF lz0_find_off_neon
  * ---------------------------------------------------------------------- */
 FUNC lz0_kc_worst_neon
         sxtw    x2, w2
+        cmp     x2, #32
+        b.eq    .Lkw_n32
         cmp     x2, #4
         b.lt    .Lkw_small
         sub     x4, x2, #4                  /* x4 = n - 4 */
@@ -356,6 +361,68 @@ FUNC lz0_kc_worst_neon
         b       .Lkw_sloop
 .Lkw_sret:
         mov     w0, w6
+        ret
+.Lkw_n32:
+        ldp     q1, q2, [x0]
+        ldp     q3, q4, [x0, #32]
+        ldp     q5, q6, [x0, #64]
+        ldp     q7, q16, [x0, #96]
+        smin    v0.4s, v1.4s, v2.4s
+        smin    v17.4s, v3.4s, v4.4s
+        smin    v18.4s, v5.4s, v6.4s
+        smin    v19.4s, v7.4s, v16.4s
+        smin    v0.4s, v0.4s, v17.4s
+        smin    v18.4s, v18.4s, v19.4s
+        smin    v0.4s, v0.4s, v18.4s
+        sminv   s0, v0.4s
+        dup     v0.4s, v0.s[0]              /* smin */
+        cmeq    v1.4s, v1.4s, v0.4s
+        cmeq    v2.4s, v2.4s, v0.4s
+        cmeq    v3.4s, v3.4s, v0.4s
+        cmeq    v4.4s, v4.4s, v0.4s
+        cmeq    v5.4s, v5.4s, v0.4s
+        cmeq    v6.4s, v6.4s, v0.4s
+        cmeq    v7.4s, v7.4s, v0.4s
+        cmeq    v16.4s, v16.4s, v0.4s
+        uzp1    v1.8h, v1.8h, v2.8h
+        uzp1    v3.8h, v3.8h, v4.8h
+        uzp1    v1.16b, v1.16b, v3.16b
+        uzp1    v5.8h, v5.8h, v6.8h
+        uzp1    v7.8h, v7.8h, v16.8h
+        uzp1    v5.16b, v5.16b, v7.16b
+#if defined(__APPLE__)
+        adrp    x8, .Lkw_bitw@PAGE
+        add     x8, x8, .Lkw_bitw@PAGEOFF
+#else
+        adrp    x8, .Lkw_bitw
+        add     x8, x8, :lo12:.Lkw_bitw
+#endif
+        ldr     q17, [x8]                   /* {1,2,4,8,16,32,64,128} x 2 */
+        and     v1.16b, v1.16b, v17.16b
+        and     v5.16b, v5.16b, v17.16b
+        addp    v1.16b, v1.16b, v5.16b
+        addp    v1.16b, v1.16b, v1.16b
+        addp    v1.16b, v1.16b, v1.16b
+        fmov    w10, s1
+        rbit    w11, w10
+        clz     w0, w11                     /* idx0 (zero-extends into x0) */
+        sub     w11, w10, #1
+        and     w10, w10, w11
+        cbz     w10, .Lkw_done32
+        ldr     x9, [x1, x0, lsl #3]
+        lsr     x9, x9, #32                 /* best_len = m[idx0].length */
+.Lkw32_tie:
+        rbit    w11, w10
+        clz     w12, w11
+        sub     w11, w10, #1
+        and     w10, w10, w11
+        ldr     x13, [x1, x12, lsl #3]
+        lsr     x13, x13, #32
+        cmp     w13, w9
+        csel    w9, w13, w9, lo
+        csel    w0, w12, w0, lo
+        cbnz    w10, .Lkw32_tie
+.Lkw_done32:
         ret
 ENDF lz0_kc_worst_neon
 
@@ -680,12 +747,603 @@ FUNC lz0_bin40_hits_neon
         ret
 ENDF lz0_bin40_hits_neon
 
+/* ------------------------------------------------------------------------
+ * void lz0_u_row_prep_neon(lz0_u_prep *p = x0)
+ * Guard-page clean for 1 <= nsi <= 64, ELF & Apple Silicon ABI safe.
+ * Touches only x0..x17 and v0..v7, v16..v31.
+ * ---------------------------------------------------------------------- */
+FUNC lz0_u_row_prep_neon
+        ldr     x1, [x0, #0]                /* rkey */
+        ldr     x2, [x0, #8]                /* rcost */
+        ldrsw   x3, [x0, #28]               /* nsi (1..64) */
+        cmp     x3, #4
+        b.lt    .Lurp_small
+
+        /* 1. Find global min cost across 0..nsi-1 (overlapping in-bounds tail) */
+        sub     x4, x3, #4                  /* nsi - 4 >= 0 */
+        ldr     q0, [x2]
+        mov     x5, #4
+.Lurp_p1_loop:
+        cmp     x5, x4
+        b.gt    .Lurp_p1_tail
+        add     x6, x2, x5, lsl #2
+        ldr     q1, [x6]
+        smin    v0.4s, v0.4s, v1.4s
+        add     x5, x5, #4
+        b       .Lurp_p1_loop
+.Lurp_p1_tail:
+        add     x6, x2, x4, lsl #2
+        ldr     q1, [x6]
+        smin    v0.4s, v0.4s, v1.4s
+        sminv   s0, v0.4s
+        dup     v0.4s, v0.s[0]
+
+        /* 2. Find lowest index b_out with rcost[b_out] == minc */
+        mov     x5, #0
+.Lurp_findb:
+        cmp     x5, x4
+        csel    x5, x4, x5, gt
+        add     x6, x2, x5, lsl #2
+        ldr     q1, [x6]
+        cmeq    v1.4s, v1.4s, v0.4s
+        xtn     v1.4h, v1.4s
+        fmov    x7, d1
+        cbnz    x7, .Lurp_foundb
+        add     x5, x5, #4
+        b       .Lurp_findb
+.Lurp_foundb:
+        rbit    x7, x7
+        clz     x7, x7
+        add     w6, w5, w7, lsr #4
+        str     w6, [x0, #44]               /* b_out */
+        ldr     w7, [x1, x6, lsl #2]
+        and     w7, w7, #0x7fffffff
+        dup     v0.4s, w7                   /* v0 = boff */
+
+        /* 3. Load vector constants and setup main 4-wide loop */
+#if defined(__APPLE__)
+        adrp    x8, .Lu_neon_consts@PAGE
+        add     x8, x8, .Lu_neon_consts@PAGEOFF
+#else
+        adrp    x8, .Lu_neon_consts
+        add     x8, x8, :lo12:.Lu_neon_consts
+#endif
+        ldp     q3, q4, [x8]                /* q3 = 0x7fffffff, q4 = 0x9e3779b1 */
+        ldp     q21, q18, [x8, #32]         /* q21 = 0x0fffffff, q18 = bitw8 */
+        movi    v16.4s, #1
+        movi    v17.4s, #63
+        movi    v19.4s, #0x80, lsl #24      /* 0x80000000 */
+        ldr     w8, [x0, #24]
+        dup     v5.4s, w8                   /* pos */
+        ldr     w8, [x0, #32]
+        dup     v6.4s, w8                   /* row_best */
+        ldr     w8, [x0, #36]
+        dup     v7.4s, w8                   /* margin */
+        ldr     w8, [x0, #40]
+        cmp     w8, #0
+        csetm   w8, ne
+        dup     v20.4s, w8                  /* v20 = all-ones if exact else 0 */
+
+        mov     v1.16b, v3.16b              /* v_min2 = 0x7fffffff */
+        movi    v2.16b, #0                  /* v_any_neq = 0 */
+        mov     x9, #0                      /* pass_mask */
+        mov     x10, #0                     /* lit_cand_mask */
+        add     x11, x0, #72                /* &um[0] */
+        add     x12, x0, #328               /* &h_lit[0] */
+        mov     x5, #0                      /* s */
+.Lurp_main:
+        cmp     x5, x4
+        b.gt    .Lurp_mtail
+.Lurp_mbody:
+        add     x6, x1, x5, lsl #2
+        ldr     q22, [x6]                   /* key */
+        add     x6, x2, x5, lsl #2
+        ldr     q23, [x6]                   /* cost */
+        and     v24.16b, v22.16b, v3.16b    /* off = key & 0x7fffffff */
+
+        /* um = margin + (63 - 2*clz(((off - 1) >> 8) + 1)) */
+        sub     v25.4s, v24.4s, v16.4s
+        ushr    v25.4s, v25.4s, #8
+        add     v25.4s, v25.4s, v16.4s
+        clz     v25.4s, v25.4s
+        shl     v25.4s, v25.4s, #1
+        sub     v25.4s, v17.4s, v25.4s
+        add     v25.4s, v25.4s, v7.4s
+        mov     v26.16b, v20.16b
+        bsl     v26.16b, v21.16b, v25.16b
+        add     x6, x11, x5, lsl #2
+        str     q26, [x6]
+
+        /* h_lit = ((lk ^ (lk >> 16)) * 0x9e3779b1) >> 24 */
+        orr     v27.16b, v22.16b, v19.16b
+        ushr    v28.4s, v27.4s, #16
+        eor     v27.16b, v27.16b, v28.16b
+        mul     v27.4s, v27.4s, v4.4s
+        ushr    v27.4s, v27.4s, #24
+        add     x6, x12, x5, lsl #2
+        str     q27, [x6]
+
+        /* pass & lit_cand 4-bit masks */
+        add     v25.4s, v6.4s, v25.4s       /* row_best + um_non_exact */
+        cmge    v25.4s, v25.4s, v23.4s      /* c <= row_best + um */
+        orr     v25.16b, v25.16b, v20.16b
+        cmlt    v28.4s, v22.4s, #0          /* key & 0x80000000 */
+        cmhs    v29.4s, v5.4s, v24.4s       /* off <= pos (unsigned) */
+        and     v28.16b, v28.16b, v25.16b
+        and     v28.16b, v28.16b, v29.16b
+        uzp1    v25.8h, v25.8h, v28.8h
+        xtn     v25.8b, v25.8h
+        and     v25.8b, v25.8b, v18.8b
+        addp    v25.8b, v25.8b, v25.8b
+        addp    v25.8b, v25.8b, v25.8b
+        fmov    w6, s25
+        ubfx    x7, x6, #0, #4
+        lsl     x7, x7, x5
+        orr     x9, x9, x7
+        ubfx    x7, x6, #8, #4
+        lsl     x7, x7, x5
+        orr     x10, x10, x7
+
+        /* track min2 for off != boff */
+        cmeq    v29.4s, v24.4s, v0.4s
+        mvn     v30.16b, v29.16b
+        orr     v2.16b, v2.16b, v30.16b
+        bsl     v29.16b, v3.16b, v23.16b
+        smin    v1.4s, v1.4s, v29.4s
+
+        cmp     x5, x4
+        b.eq    .Lurp_done
+        add     x5, x5, #4
+        b       .Lurp_main
+        .ltorg
+.Lurp_mtail:
+        cmp     x5, x3
+        b.ge    .Lurp_done
+        mov     x5, x4
+        b       .Lurp_mbody
+
+.Lurp_done:
+        str     x9, [x0, #56]               /* pass_mask */
+        str     x10, [x0, #64]              /* lit_cand_mask */
+        umaxv   s2, v2.4s
+        fmov    w6, s2
+        cbz     w6, .Lurp_b2_none
+        sminv   s1, v1.4s
+        dup     v1.4s, v1.s[0]              /* min2 */
+        mov     x5, #0
+.Lurp_fb2:
+        cmp     x5, x4
+        csel    x5, x4, x5, gt
+        add     x6, x1, x5, lsl #2
+        ldr     q22, [x6]
+        add     x6, x2, x5, lsl #2
+        ldr     q23, [x6]
+        and     v22.16b, v22.16b, v3.16b
+        cmeq    v22.4s, v22.4s, v0.4s       /* off == boff */
+        cmeq    v23.4s, v23.4s, v1.4s       /* cost == min2 */
+        bic     v23.16b, v23.16b, v22.16b   /* cost == min2 && off != boff */
+        xtn     v23.4h, v23.4s
+        fmov    x7, d23
+        cbnz    x7, .Lurp_found_b2
+        add     x5, x5, #4
+        b       .Lurp_fb2
+.Lurp_found_b2:
+        rbit    x7, x7
+        clz     x7, x7
+        add     w6, w5, w7, lsr #4
+        str     w6, [x0, #48]
+        ret
+.Lurp_b2_none:
+        mov     w6, #-1
+        str     w6, [x0, #48]
+        ret
+
+.Lurp_small:                                /* 1 <= nsi <= 3: scalar */
+        ldr     w4, [x2]                    /* minc */
+        mov     w5, #0                      /* b */
+        mov     x6, #1
+.Lurp_sb:
+        cmp     x6, x3
+        b.ge    .Lurp_sb_done
+        ldr     w7, [x2, x6, lsl #2]
+        cmp     w7, w4
+        csel    w4, w7, w4, lt
+        csel    w5, w6, w5, lt
+        add     x6, x6, #1
+        b       .Lurp_sb
+.Lurp_sb_done:
+        str     w5, [x0, #44]               /* b_out */
+        ldr     w7, [x1, x5, lsl #2]
+        and     w7, w7, #0x7fffffff         /* boff */
+        ldr     w8, [x0, #32]               /* row_best */
+        ldr     w9, [x0, #36]               /* margin */
+        ldr     w10, [x0, #40]              /* exact */
+        ldr     w11, [x0, #24]              /* pos */
+        mov     w12, #0x7fffffff            /* min2 */
+        mov     w13, #-1                    /* b2 */
+        mov     x14, #0                     /* pass */
+        mov     x15, #0                     /* lit */
+        mov     x6, #0                      /* s */
+.Lurp_sloop:
+        ldr     w4, [x1, x6, lsl #2]        /* key */
+        ldr     w5, [x2, x6, lsl #2]        /* c */
+        and     w16, w4, #0x7fffffff        /* off */
+        cmp     w16, w7
+        b.eq    1f
+        cmp     w13, #0
+        b.lt    2f
+        cmp     w5, w12
+        b.ge    1f
+2:
+        mov     w12, w5
+        mov     w13, w6
+1:
+        cbz     w10, 3f
+        mov     w17, #0x0fffffff
+        mov     x5, #1
+        b       4f
+3:
+        sub     w17, w16, #1
+        lsr     w17, w17, #8
+        add     w17, w17, #1
+        clz     w17, w17
+        mov     w4, #63
+        sub     w17, w4, w17, lsl #1
+        add     w17, w17, w9                /* um */
+        add     w4, w8, w17
+        cmp     w5, w4
+        cset    x5, le
+        ldr     w4, [x1, x6, lsl #2]        /* reload key */
+4:
+        add     x1, x0, #72
+        str     w17, [x1, x6, lsl #2]
+        ldr     x1, [x0, #0]                /* reload rkey */
+        lsl     x5, x5, x6
+        orr     x14, x14, x5
+        tbz     w4, #31, 5f
+        cmp     w16, w11
+        b.hi    5f
+        orr     x15, x15, x5
+5:
+        orr     w4, w4, #0x80000000
+        eor     w4, w4, w4, lsr #16
+        mov     w17, #0x79b1
+        movk    w17, #0x9e37, lsl #16
+        mul     w4, w4, w17
+        lsr     w4, w4, #24
+        add     x17, x0, #328
+        str     w4, [x17, x6, lsl #2]
+        add     x6, x6, #1
+        cmp     x6, x3
+        b.lt    .Lurp_sloop
+        str     w13, [x0, #48]
+        str     x14, [x0, #56]
+        str     x15, [x0, #64]
+        ret
+ENDF lz0_u_row_prep_neon
+
+/* ------------------------------------------------------------------------
+ * int lz0_sa_scan_side_neon(lz0_sa_scan_args *a = x0) -> returns nhits
+ * Guard-page clean for count <= 128, ELF & Apple Silicon ABI safe.
+ * Uses only caller-saved registers x0..x17 and v0..v7, v16..v23.
+ * ---------------------------------------------------------------------- */
+FUNC lz0_sa_scan_side_neon
+        ldr     x1, [x0, #0]                /* sa_ptr */
+        ldr     x2, [x0, #8]                /* in */
+        ldr     w3, [x0, #16]               /* pos */
+        ldr     w4, [x0, #20]               /* n */
+        ldr     w5, [x0, #24]               /* count */
+        mov     w13, #0                     /* nhits */
+        cmp     w5, #0
+        b.le    .Lsa_ret_zero
+
+        mov     x6, x1                      /* base_sa_ptr */
+        ldr     w7, [x0, #40]               /* l2_cut */
+        dup     v4.4s, w3                   /* v_pos */
+        dup     v5.4s, w7                   /* v_l2_cut */
+        ldr     x11, [x0, #48]              /* out_src */
+        ldr     x12, [x0, #56]              /* out_k */
+        ldrh    w14, [x0, #32]              /* pref16 */
+        ldrb    w15, [x0, #35]              /* in_l2 */
+        ldrb    w16, [x0, #37]              /* ge3_ok */
+        ldrb    w17, [x0, #34]              /* b2 */
+        ldr     w7, [x0, #28]               /* dir */
+#if defined(__APPLE__)
+        adrp    x8, .Lsa_neon_wR@PAGE
+        add     x8, x8, .Lsa_neon_wR@PAGEOFF
+#else
+        adrp    x8, .Lsa_neon_wR
+        add     x8, x8, :lo12:.Lsa_neon_wR
+#endif
+        cmp     w7, #0
+        b.lt    .Lsa_L_init
+
+        ldr     q6, [x8]                    /* {1, 2, 4, 8} */
+.Lsa_R_4:
+        cmp     w5, #4
+        b.lt    .Lsa_R_tail
+        ldr     w7, [x1, #12]               /* src_far = sa[3] */
+        uxtw    x8, w7
+        add     x8, x8, #1
+        cmp     x8, x4
+        b.hs    .Lsa_R_tail
+        ldrh    w8, [x2, x7]
+        cmp     w8, w14
+        b.ne    .Lsa_R_tail
+
+        ldr     q0, [x1]
+        cmhi    v1.4s, v4.4s, v0.4s         /* src < pos */
+        cbnz    w15, .Lsa_R_l2
+
+        cbz     w16, .Lsa_R_tail
+        uxtw    x8, w7
+        add     x8, x8, #2
+        cmp     x8, x4
+        b.hs    .Lsa_R_tail
+        add     x8, x2, x7
+        ldrb    w8, [x8, #2]
+        cmp     w8, w17
+        b.ne    .Lsa_R_tail
+
+        and     v1.16b, v1.16b, v6.16b
+        addv    s1, v1.4s
+        fmov    w9, s1
+        cbz     w9, .Lsa_R_next4
+        sub     x8, x1, x6
+        lsr     x8, x8, #2                  /* base_d */
+.Lsa_R_e3:
+        rbit    w10, w9
+        clz     w10, w10
+        sub     w7, w9, #1
+        and     w9, w9, w7
+        ldr     w7, [x1, x10, lsl #2]
+        str     w7, [x11, x13, lsl #2]
+        add     w7, w8, w10
+        orr     w7, w7, #0x80
+        strb    w7, [x12, x13]
+        add     w13, w13, #1
+        cbnz    w9, .Lsa_R_e3
+.Lsa_R_next4:
+        add     x1, x1, #16
+        sub     w5, w5, #4
+        b       .Lsa_R_4
+
+.Lsa_R_l2:
+        ldrb    w8, [x0, #36]               /* stop_l2 */
+        cbnz    w8, .Lsa_ret
+        sub     v2.4s, v4.4s, v0.4s
+        cmhi    v2.4s, v5.4s, v2.4s         /* pos - src < l2_cut */
+        and     v1.16b, v1.16b, v2.16b
+        and     v1.16b, v1.16b, v6.16b
+        addv    s1, v1.4s
+        fmov    w9, s1
+        cbz     w9, .Lsa_R_next4
+        sub     x8, x1, x6
+        lsr     x8, x8, #2
+.Lsa_R_e2:
+        rbit    w10, w9
+        clz     w10, w10
+        sub     w7, w9, #1
+        and     w9, w9, w7
+        ldr     w7, [x1, x10, lsl #2]
+        str     w7, [x11, x13, lsl #2]
+        add     w7, w8, w10
+        strb    w7, [x12, x13]
+        add     w13, w13, #1
+        cbnz    w9, .Lsa_R_e2
+        b       .Lsa_R_next4
+
+.Lsa_R_tail:
+        cmp     w5, #0
+        b.le    .Lsa_ret
+.Lsa_R_tloop:
+        ldr     w7, [x1]
+        uxtw    x8, w7
+        add     x8, x8, #1
+        cmp     x8, x4
+        b.hs    .Lsa_ret
+        ldrh    w8, [x2, x7]
+        cmp     w8, w14
+        b.ne    .Lsa_ret
+        cbnz    w15, .Lsa_R_t_isl2
+        cbz     w16, .Lsa_R_t_gol2
+        uxtw    x8, w7
+        add     x8, x8, #2
+        cmp     x8, x4
+        b.hs    .Lsa_R_t_gol2
+        add     x8, x2, x7
+        ldrb    w8, [x8, #2]
+        cmp     w8, w17
+        b.ne    .Lsa_R_t_gol2
+        cmp     w7, w3
+        b.hs    .Lsa_R_tnext
+        str     w7, [x11, x13, lsl #2]
+        sub     x8, x1, x6
+        lsr     x8, x8, #2
+        orr     w8, w8, #0x80
+        strb    w8, [x12, x13]
+        add     w13, w13, #1
+        b       .Lsa_R_tnext
+.Lsa_R_t_gol2:
+        mov     w15, #1
+.Lsa_R_t_isl2:
+        ldrb    w8, [x0, #36]
+        cbnz    w8, .Lsa_ret
+        cmp     w7, w3
+        b.hs    .Lsa_R_tnext
+        sub     w8, w3, w7
+        ldr     w9, [x0, #40]               /* l2_cut */
+        cmp     w8, w9
+        b.hs    .Lsa_R_tnext
+        str     w7, [x11, x13, lsl #2]
+        sub     x8, x1, x6
+        lsr     x8, x8, #2
+        strb    w8, [x12, x13]
+        add     w13, w13, #1
+.Lsa_R_tnext:
+        add     x1, x1, #4
+        sub     w5, w5, #1
+        cbnz    w5, .Lsa_R_tloop
+        b       .Lsa_ret
+
+.Lsa_L_init:
+        ldr     q6, [x8, #16]               /* {8, 4, 2, 1} */
+.Lsa_L_4:
+        cmp     w5, #4
+        b.lt    .Lsa_L_tail
+        ldr     w7, [x1, #-12]              /* src_far = sa[-3] */
+        uxtw    x8, w7
+        add     x8, x8, #1
+        cmp     x8, x4
+        b.hs    .Lsa_L_tail
+        ldrh    w8, [x2, x7]
+        cmp     w8, w14
+        b.ne    .Lsa_L_tail
+
+        ldur    q0, [x1, #-12]
+        cmhi    v1.4s, v4.4s, v0.4s         /* src < pos */
+        cbnz    w15, .Lsa_L_l2
+
+        cbz     w16, .Lsa_L_tail
+        uxtw    x8, w7
+        add     x8, x8, #2
+        cmp     x8, x4
+        b.hs    .Lsa_L_tail
+        add     x8, x2, x7
+        ldrb    w8, [x8, #2]
+        cmp     w8, w17
+        b.ne    .Lsa_L_tail
+
+        and     v1.16b, v1.16b, v6.16b
+        addv    s1, v1.4s
+        fmov    w9, s1
+        cbz     w9, .Lsa_L_next4
+        sub     x8, x6, x1
+        lsr     x8, x8, #2                  /* base_d */
+.Lsa_L_e3:
+        rbit    w10, w9
+        clz     w10, w10
+        sub     w7, w9, #1
+        and     w9, w9, w7
+        sub     x7, x1, x10, lsl #2
+        ldr     w7, [x7]
+        str     w7, [x11, x13, lsl #2]
+        add     w7, w8, w10
+        orr     w7, w7, #0x80
+        strb    w7, [x12, x13]
+        add     w13, w13, #1
+        cbnz    w9, .Lsa_L_e3
+.Lsa_L_next4:
+        sub     x1, x1, #16
+        sub     w5, w5, #4
+        b       .Lsa_L_4
+
+.Lsa_L_l2:
+        ldrb    w8, [x0, #36]
+        cbnz    w8, .Lsa_ret
+        sub     v2.4s, v4.4s, v0.4s
+        cmhi    v2.4s, v5.4s, v2.4s
+        and     v1.16b, v1.16b, v2.16b
+        and     v1.16b, v1.16b, v6.16b
+        addv    s1, v1.4s
+        fmov    w9, s1
+        cbz     w9, .Lsa_L_next4
+        sub     x8, x6, x1
+        lsr     x8, x8, #2
+.Lsa_L_e2:
+        rbit    w10, w9
+        clz     w10, w10
+        sub     w7, w9, #1
+        and     w9, w9, w7
+        sub     x7, x1, x10, lsl #2
+        ldr     w7, [x7]
+        str     w7, [x11, x13, lsl #2]
+        add     w7, w8, w10
+        strb    w7, [x12, x13]
+        add     w13, w13, #1
+        cbnz    w9, .Lsa_L_e2
+        b       .Lsa_L_next4
+
+.Lsa_L_tail:
+        cmp     w5, #0
+        b.le    .Lsa_ret
+.Lsa_L_tloop:
+        ldr     w7, [x1]
+        uxtw    x8, w7
+        add     x8, x8, #1
+        cmp     x8, x4
+        b.hs    .Lsa_ret
+        ldrh    w8, [x2, x7]
+        cmp     w8, w14
+        b.ne    .Lsa_ret
+        cbnz    w15, .Lsa_L_t_isl2
+        cbz     w16, .Lsa_L_t_gol2
+        uxtw    x8, w7
+        add     x8, x8, #2
+        cmp     x8, x4
+        b.hs    .Lsa_L_t_gol2
+        add     x8, x2, x7
+        ldrb    w8, [x8, #2]
+        cmp     w8, w17
+        b.ne    .Lsa_L_t_gol2
+        cmp     w7, w3
+        b.hs    .Lsa_L_tnext
+        str     w7, [x11, x13, lsl #2]
+        sub     x8, x6, x1
+        lsr     x8, x8, #2
+        orr     w8, w8, #0x80
+        strb    w8, [x12, x13]
+        add     w13, w13, #1
+        b       .Lsa_L_tnext
+.Lsa_L_t_gol2:
+        mov     w15, #1
+.Lsa_L_t_isl2:
+        ldrb    w8, [x0, #36]
+        cbnz    w8, .Lsa_ret
+        cmp     w7, w3
+        b.hs    .Lsa_L_tnext
+        sub     w8, w3, w7
+        ldr     w9, [x0, #40]
+        cmp     w8, w9
+        b.hs    .Lsa_L_tnext
+        str     w7, [x11, x13, lsl #2]
+        sub     x8, x6, x1
+        lsr     x8, x8, #2
+        strb    w8, [x12, x13]
+        add     w13, w13, #1
+.Lsa_L_tnext:
+        sub     x1, x1, #4
+        sub     w5, w5, #1
+        cbnz    w5, .Lsa_L_tloop
+.Lsa_ret:
+        strb    w15, [x0, #35]              /* a->in_l2 */
+        str     w13, [x0, #44]              /* a->nhits */
+        mov     w0, w13
+        ret
+.Lsa_ret_zero:
+        str     w13, [x0, #44]
+        mov     w0, #0
+        ret
+ENDF lz0_sa_scan_side_neon
+
 #if defined(__APPLE__)
         .section __TEXT,__const
 #else
         .section .rodata
 #endif
         .p2align 4
+.Lu_neon_consts:
+        .word   0x7fffffff, 0x7fffffff, 0x7fffffff, 0x7fffffff
+        .word   0x9e3779b1, 0x9e3779b1, 0x9e3779b1, 0x9e3779b1
+        .word   0x0fffffff, 0x0fffffff, 0x0fffffff, 0x0fffffff
+        .byte   1, 2, 4, 8, 1, 2, 4, 8, 1, 2, 4, 8, 1, 2, 4, 8
+.Lsa_neon_wR:
+        .word   1, 2, 4, 8
+.Lsa_neon_wL:
+        .word   8, 4, 2, 1
+.Lkw_bitw:
+        .byte   1, 2, 4, 8, 16, 32, 64, 128
+        .byte   1, 2, 4, 8, 16, 32, 64, 128
 .Lb40_weights:
         .byte   128, 64, 32, 16, 8, 4, 2, 1
         .byte   128, 64, 32, 16, 8, 4, 2, 1
@@ -695,4 +1353,4 @@ ENDF lz0_bin40_hits_neon
         .section .note.GNU-stack, "", %progbits
 #endif
 
-#endif /* __ELF__ && __aarch64__ && !_WIN32 */
+#endif /* (__ELF__ || __APPLE__) && __aarch64__ && !_WIN32 */

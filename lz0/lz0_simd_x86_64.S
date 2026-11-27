@@ -10,11 +10,12 @@
  *   - SSE2 : x86-64 baseline, always available.
  *   - AVX2 : Haswell+ / Zen+ / Gracemont+.
  *
- * ABI: System V AMD64 (Linux, BSD, macOS-like). Not built for Win64.
- * All functions are leaf functions: no stack frame, no callee-saved register
- * is touched, no memory is read outside [p, p + n) (tails use overlapping
- * in-bounds loads or scalar code, never over-reads). AVX2 entry points
- * execute VZEROUPPER before returning.
+ * ABI: System V AMD64 (Linux, BSD, macOS) and Win64 (MinGW-w64 / PE64
+ * wrapper saving rdi, rsi and xmm6..xmm8 where used). All functions use only
+ * volatile registers across their body (leaf functions except Win64 wrapper),
+ * never read outside [p, p + n) (tails use overlapping in-bounds loads or
+ * scalar code, never over-reads), and AVX2 entry points execute VZEROUPPER
+ * before returning.
  *
  * Exported functions (all "int" are 32-bit, n is the element count):
  *   int      lz0_find_u32_{sse2,avx2}  (const uint32_t *p, int n, uint32_t key)
@@ -34,12 +35,17 @@
  *   void     lz0_mru_batch_sse2(uint32_t mru[8], int *n_mru,
  *                               const lz0_match *m, int n)
  *            move-to-front of every non-zero m[i].offset with length >= 4,
- *            or length >= 3 and offset <= 512, into the 8-entry MRU list
- *            (SSE2 only: the whole list fits in two XMM registers).
+ *            or length >= 3 and offset <= 512, into the 8-entry MRU list.
  *   int      lz0_matchlen_{sse2,avx2}  (const uint8_t *a, const uint8_t *b,
  *                                      int max)
  *            -> number of identical leading bytes, in [0, max] (0 if
  *               max <= 0); reads only a[0..max) and b[0..max).
+ *   uint64_t lz0_bin40_hits_{sse2,avx2}(const uint8_t *p, uint32_t w0, uint32_t pm)
+ *            -> bitmask b in [0, 40) of 2-byte prefix matches at bin offsets.
+ *   void     lz0_u_row_prep_avx2       (lz0_u_prep *p)
+ *            -> batch ultra-DP row prep (b_out, b2_out, masks, um[], h_lit[]).
+ *   int      lz0_sa_scan_side_avx2     (lz0_sa_scan_args *a)
+ *            -> batch suffix-array prefix/distance side scan (count <= 128).
  */
 
 #if (defined(__ELF__) || defined(_WIN32) || defined(__APPLE__)) && defined(__x86_64__)
@@ -1909,4 +1915,4 @@ ENDF(lz0_sa_scan_side_avx2)
         .section .note.GNU-stack, "", @progbits
 #endif
 
-#endif /* __ELF__ && __x86_64__ && !_WIN32 */
+#endif /* (__ELF__ || _WIN32 || __APPLE__) && __x86_64__ */

@@ -15,7 +15,7 @@
  *
  * Kernels: find_u32, argmax_i32, find_off, kc_worst, count_eq, mru_batch,
  * matchlen (longest common prefix of two byte strings, used by every match
- * length computation of the finder).
+ * length computation of the finder), bin40_hits, u_row_prep, sa_scan_side.
  */
 #ifndef LZ0_SIMD_H
 #define LZ0_SIMD_H
@@ -73,18 +73,22 @@ void lz0_mru_batch_sse2(uint32_t *mru, int *n_mru, const lz0_match *m, int n);
 #define LZ0_SIMD_CALL(fn, ...)                                                      \
     (lz0_simd_level >= 2 ? fn##_avx2(__VA_ARGS__)                                   \
      : lz0_simd_level == 1 ? fn##_sse2(__VA_ARGS__) : fn##_c(__VA_ARGS__))
+#define LZ0_SIMD_HAS_SA_SCAN() (lz0_simd_level >= 2)
 #elif defined(LZ0_SIMD_ARM64)
 LZ0_SIMD_DECL(neon)
 void lz0_mru_batch_neon(uint32_t *mru, int *n_mru, const lz0_match *m, int n);
 #define LZ0_SIMD_CALL(fn, ...)                                                      \
     (lz0_simd_level >= 1 ? fn##_neon(__VA_ARGS__) : fn##_c(__VA_ARGS__))
+#define LZ0_SIMD_HAS_SA_SCAN() (lz0_simd_level >= 1)
 #elif defined(LZ0_SIMD_RISCV64)
 LZ0_SIMD_DECL(rvv)
 void lz0_mru_batch_rvv(uint32_t *mru, int *n_mru, const lz0_match *m, int n);
 #define LZ0_SIMD_CALL(fn, ...)                                                      \
     (lz0_simd_level >= 1 ? fn##_rvv(__VA_ARGS__) : fn##_c(__VA_ARGS__))
+#define LZ0_SIMD_HAS_SA_SCAN() (lz0_simd_level >= 1)
 #else
 #define LZ0_SIMD_CALL(fn, ...) fn##_c(__VA_ARGS__)
+#define LZ0_SIMD_HAS_SA_SCAN() 0
 #endif
 
 /* 64-bit little-endian word compare (first differing byte = lowest set bit
@@ -182,11 +186,25 @@ typedef struct {
 void lz0_u_row_prep_c(lz0_u_prep *p);
 #if defined(LZ0_SIMD_X86_64)
 void lz0_u_row_prep_avx2(lz0_u_prep *p);
+#elif defined(LZ0_SIMD_ARM64)
+void lz0_u_row_prep_neon(lz0_u_prep *p);
+#elif defined(LZ0_SIMD_RISCV64)
+void lz0_u_row_prep_rvv(lz0_u_prep *p);
 #endif
 static inline void lz0_simd_u_row_prep(lz0_u_prep *p) {
 #if defined(LZ0_SIMD_X86_64)
     if (lz0_simd_level >= 2) {
         lz0_u_row_prep_avx2(p);
+        return;
+    }
+#elif defined(LZ0_SIMD_ARM64)
+    if (lz0_simd_level >= 1) {
+        lz0_u_row_prep_neon(p);
+        return;
+    }
+#elif defined(LZ0_SIMD_RISCV64)
+    if (lz0_simd_level >= 1) {
+        lz0_u_row_prep_rvv(p);
         return;
     }
 #endif
@@ -216,11 +234,21 @@ typedef struct {
 int lz0_sa_scan_side_c(lz0_sa_scan_args *a);
 #if defined(LZ0_SIMD_X86_64)
 int lz0_sa_scan_side_avx2(lz0_sa_scan_args *a);
+#elif defined(LZ0_SIMD_ARM64)
+int lz0_sa_scan_side_neon(lz0_sa_scan_args *a);
+#elif defined(LZ0_SIMD_RISCV64)
+int lz0_sa_scan_side_rvv(lz0_sa_scan_args *a);
 #endif
 static inline int lz0_simd_sa_scan_side(lz0_sa_scan_args *a) {
 #if defined(LZ0_SIMD_X86_64)
     if (lz0_simd_level >= 2)
         return lz0_sa_scan_side_avx2(a);
+#elif defined(LZ0_SIMD_ARM64)
+    if (lz0_simd_level >= 1)
+        return lz0_sa_scan_side_neon(a);
+#elif defined(LZ0_SIMD_RISCV64)
+    if (lz0_simd_level >= 1)
+        return lz0_sa_scan_side_rvv(a);
 #endif
     return lz0_sa_scan_side_c(a);
 }

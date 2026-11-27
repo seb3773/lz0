@@ -21,11 +21,24 @@
 #include <string.h>
 #include <time.h>
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+static double now_ms(void) {
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER t;
+    if (!freq.QuadPart)
+        QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t);
+    return (double)t.QuadPart * 1e3 / (double)freq.QuadPart;
+}
+#else
 static double now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
 }
+#endif
 static uint64_t fnv(const unsigned char *p, size_t n) {
     uint64_t h = 1469598103934665603ull;
     for (size_t i = 0; i < n; i++) { h ^= p[i]; h *= 1099511628211ull; }

@@ -1885,7 +1885,7 @@ static LZ0_ALWAYS_INLINE void sa_probe_core(lz0_finder *f, uint32_t pos, int min
 #endif
 
     while (d <= max_d) {
-        if (d == 9 && can_stop && ms == 0 && max_d - 8 <= 128 && lz0_simd_level >= 2) {
+        if (d == 9 && can_stop && ms == 0 && max_d - 8 <= 128 && LZ0_SIMD_HAS_SA_SCAN()) {
             uint32_t srcL[128], srcR[128];
             uint8_t kL[128], kR[128];
             int max_c = f->max_candidates > 64 ? 64 : f->max_candidates;

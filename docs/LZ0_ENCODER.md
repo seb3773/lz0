@@ -67,13 +67,19 @@ Same semantics as the format:
 
 Level 9 uses `lz0_parse_ultra` (`lz0/lz0_ultra.c`) instead of the generic SDP:
 
-- States `(last_offset, after_literal)` stored as compact 12-byte
-  structure-of-arrays rows, with a 64-bit key filter and a cached worst slot.
-- State count follows `lz0_ultra_budget` (768 MiB) at 12 bytes per state
-  per input position: `K = budget / ((n + 1) * 12)`, capped at 128 and
-  floored at 12. That is 128 below 512 KiB, 63 at 1 MiB, 31 at 2 MiB,
-  and 12 at 5 MiB.
-- Margin prune: a state costing more than `row_best + 32 + elias(msb(offset))`
+- Tiered active-row SoA slab pool (`8 / 32 / 64|128|256` slots, future rows
+  only, returned to slab free lists once expanded), with a 64-bit Bloom filter
+  (tier 0), open-addressed `htab[256]` lookup (tier 2), `8x16` block-max
+  eviction tracking, and cached worst-cost early reject.
+- Reference-counted DAG backtrack arena (`u_bt_node`) with lazy literal
+  anchor materialization.
+- By default (`lz0_config_level(cfg, 9)`), state count is pinned at
+  `ultra_states = 64`, `ultra_margin = 12`, `ultra_fine = 0`, `ultra_inject = 0`,
+  with a depth-16 bounded binary-tree matcher (`bt_depth = 16`, `sa_hybrid = 0`),
+  `max_candidates = 32`, and suffix-array window `sa_win = 96` (`sa_adapt = 2`
+  skewed probing). When `ultra_states <= 0`, automatic sizing computes
+  `K = ultra_budget / ((n + 1) * 12)` (`768 MiB` default), clamped to `12..128`.
+- Margin prune: a state costing more than `row_best + ultra_margin + elias(msb(offset))`
   bits is dropped (a single repeat match cannot win that back in practice).
 - Length-2 matches are allowed at any offset (`lz0_len2_max_off = 0`).
 - Inside long byte runs the finder still searches the last 64 positions
@@ -88,13 +94,24 @@ the remaining gap to optimal is about 0.05 % on 32 KiB samples.
 
 ## Speed-only paths
 
-These change speed, never output. Every variant gives a bit-identical stream.
+These change speed, never output. Every variant gives a bit-identical stream
+(verified by `make enc_tiers`, `make simd`, and `make sa_probe`):
 
 - `lz0_simd_matchlen` (`lz0/lz0_simd.h`): one inline 64-bit compare covers the
   first 8 bytes, then the active vector tier runs (AVX2 64/32 B, SSE2 and NEON
   32/16 B, RVV strip-mined, C fallback). Tails use overlapping in-bounds loads,
   so nothing past `max` is read. `make simd` checks every tier against a byte
   loop, with both operands ending on `PROT_NONE` pages.
+- Level 9 / SA hot-loop kernels (`lz0/lz0_simd.h`, `lz0/lz0_simd_*.S`):
+  - `lz0_u_row_prep`: vectorized Elias-gamma width computation and per-slot
+    margin/cutoff check inside `lz0_ultra.c` (`AVX2`, `NEON`, `RVV 1.0`, C).
+  - `lz0_sa_scan_side`: vectorized right/left rank-window scanning with exact
+    early cutoff update (`in_l2` / `nhits`) in `sa_probe_core` (`AVX2`, `NEON`,
+    `RVV 1.0`, C).
+  - Row key/cost/argmax/candidate-filter primitives (`lz0_u_find_key`,
+    `lz0_u_row_worst`, `lz0_u_find_min`, `lz0_u_row_scan_block`, `lz0_kc_worst`,
+    `lz0_kc_filter_pareto`, `lz0_cand_pick_best`), tested over 50,000 random
+    cases per kernel by `make simd`.
 - SA probe run-ahead (`sa_probe_neighbors`, `lz0/lz0_find.c`): while distance
   `d` is compared, the input bytes for `d + LZ0_SA_PF_K` (default 8) are
   prefetched. The run-ahead never passes the next adaptive stop (d = 4, 8)

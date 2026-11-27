@@ -322,7 +322,15 @@ enc_bench: bench/lz0_enc_bench
 
 # Same streams with each SIMD tier forced: hashes must be identical.
 enc_tiers: bench/lz0_enc_bench
-	@for t in 2 1 0; do echo "== LZ0_SIMD=$$t"; LZ0_SIMD=$$t ./bench/lz0_enc_bench 1 1,6,9 bench/corpus/cp.html bench/corpus/fields.c bench/corpus/sum | grep -v TOTAL; done
+	@ref=$$(LZ0_SIMD=0 ./bench/lz0_enc_bench 1 1,6,9 bench/corpus/cp.html bench/corpus/fields.c bench/corpus/sum | awk '/ L[169] /{print $$1,$$2,$$4,$$5}'); \
+	tiers="1 0"; case "$$(uname -m)" in x86_64|amd64) tiers="2 1 0";; esac; \
+	for t in $$tiers; do \
+		echo "== LZ0_SIMD=$$t"; \
+		out=$$(LZ0_SIMD=$$t ./bench/lz0_enc_bench 1 1,6,9 bench/corpus/cp.html bench/corpus/fields.c bench/corpus/sum); \
+		echo "$$out" | grep -v TOTAL; \
+		cur=$$(echo "$$out" | awk '/ L[169] /{print $$1,$$2,$$4,$$5}'); \
+		test "$$cur" = "$$ref" || { echo "FAIL: SIMD tier $$t hash mismatch!"; exit 1; }; \
+	done
 
 bench/lz0_find_bench: bench/find_bench.c $(LZ0_SRC)
 	$(CC) $(CFLAGS) -o $@ bench/find_bench.c $(LZ0_SRC)
@@ -368,7 +376,7 @@ valgrind: bin/lz0
 	rm -f /tmp/lz0_vg.lz0 /tmp/lz0_vg.out
 	@echo "Valgrind: zero leaks detected."
 
-test: smoke bounds limits bench/lz0_bench vectors boundary malformed guard simd threadsafe window
+test: smoke bounds limits bench/lz0_bench vectors boundary malformed guard simd sa_probe threadsafe window
 	./bench/lz0_bench --quick
 
 ARM64_CC ?= aarch64-linux-gnu-gcc
@@ -390,6 +398,8 @@ test_arm64: lz0/lz0dec_arm64.S lz0/lz0dec_fast_arm64.S
 	$(ARM64_EMU) ./tests/test_guard_arm64
 	$(ARM64_CC) $(ARM64_CFLAGS) -o tests/test_simd_arm64 tests/test_simd.c $(LZ0_SIMD_SRC)
 	$(ARM64_EMU) ./tests/test_simd_arm64 50000
+	$(ARM64_CC) $(ARM64_CFLAGS) -Wno-unused-parameter -o tests/test_sa_probe_arm64 tests/test_sa_probe.c lz0/lz0_cost.c lz0/lz0_parse.c lz0/lz0_emit.c lz0/lz0_decompress.c lz0/lz0_compress.c lz0/lz0_ultra.c $(LZ0_SIMD_SRC) -lm
+	$(ARM64_EMU) ./tests/test_sa_probe_arm64
 	$(ARM64_CC) $(ARM64_CFLAGS) -o tests/test_limits_arm64 tests/test_limits.c $(LZ0_SRC) $(ARM64_DEC_SRC)
 	$(ARM64_EMU) ./tests/test_limits_arm64
 	@echo "All ARM64 (AArch64) tests passed cleanly under QEMU!"
@@ -420,6 +430,8 @@ test_riscv64: lz0/lz0dec_riscv64.S lz0/lz0dec_fast_riscv64.S
 	$(RISCV64_EMU_V) ./tests/test_simd_riscv64 20000
 	$(RISCV64_EMU_V) ./tests/test_vectors_riscv64
 	$(RISCV64_EMU_V) ./tests/test_fuzz_riscv64
+	$(RISCV64_CC) $(RISCV64_CFLAGS) -Wno-unused-parameter -o tests/test_sa_probe_riscv64 tests/test_sa_probe.c lz0/lz0_cost.c lz0/lz0_parse.c lz0/lz0_emit.c lz0/lz0_decompress.c lz0/lz0_compress.c lz0/lz0_ultra.c $(LZ0_SIMD_SRC) -lm
+	$(RISCV64_EMU_V) ./tests/test_sa_probe_riscv64
 	$(RISCV64_CC) $(RISCV64_CFLAGS) -o tests/test_limits_riscv64 tests/test_limits.c $(LZ0_SRC) $(RISCV64_DEC_SRC)
 	$(RISCV64_EMU) ./tests/test_limits_riscv64
 	@echo "All RISC-V 64 tests passed cleanly under QEMU!"

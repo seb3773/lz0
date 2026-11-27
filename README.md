@@ -19,7 +19,8 @@ Requires `gcc` or `clang`, and `make`.
 
 ```bash
 make lz0        # bin/lz0 and bin/lz0dec
-make test       # smoke, bounds, vectors, boundary, malformed, guard, simd, short bench
+make test       # smoke, bounds, vectors, boundary, malformed, guard, simd, sa_probe, short bench
+make enc_tiers  # bit-exactness across SIMD tiers (AVX2 / SSE2 / NEON / RVV / scalar)
 make fuzz
 make sanitize   # ASan + UBSan
 make valgrind
@@ -55,12 +56,12 @@ The nine compression levels map to five distinct search presets tuned for speed,
 
 | Levels | Search |
 |---|---|
-| `1` | Greedy parser, hash chain 2, 4 candidates, no suffix array (`sa_win=0`) — fast low-RAM mode (`~8.5–13.7 B/byte` peak heap) |
+| `1` | Streaming low-RAM greedy (`compress_fast_greedy`), 2-slot hash buckets, 4 candidates, no suffix array (`sa_win=0`) — fast low-RAM mode (`1.01–3.95 B/byte` peak heap) |
 | `2` | SDP (`K=2`), hash chain 4, 8 candidates, no suffix array (`sa_win=0`) |
 | `3` | SDP (`K=2`), hash chain 4, 8 candidates, suffix-array window 4 (`sa_adapt=1`) |
 | `4–6` | SDP (`K=2`), hash chain 8, 16 candidates, suffix-array window 16 (`sa_adapt=1`), selective fine match emission. Level 6 is the default. |
 | `7–8` | SDP (`K=8`), hash chain 32, 32 candidates, suffix-array window 64 (`sa_adapt=1`), hash-chain skip list |
-| `9` | Ultra SoA parser (`K=128..12`), hash chain 64, 48 candidates, suffix-array window 128 (`sa_adapt=2`, skewed probing, beam-offset injection, local Pareto filtering) |
+| `9` | Ultra tiered-SoA parser (`K=64`, skip-list + depth-16 BT finder, 32 candidates, suffix-array window 96 with `sa_adapt=2` skewed probing) |
 
 ## Library
 
@@ -113,9 +114,9 @@ Gamma coding, the length code, and the worked examples are in [docs/LZ0_FORMAT.m
 
 ## Encoder
 
-Matches come from a 3-byte hash chain (`2^17` buckets) and a suffix array built with SA-IS (enabled from level 3 upward). A prefix-doubling builder (`lz0_sa_algo = 0`) exists to check that both builders emit the same `sa[]` and `rank[]`. Every 16 KiB window is independently classified for high entropy, multi-byte raster/audio strides (`bpp`), and local table periodicity, allowing early incompressible bailout (`~280 MB/s`, `1.01 B/byte` peak heap on incompressible streams like `star.png`). Level 6 keeps two live SDP states per position with selective fine match emission and literal headroom tie-breaking. Level 9 uses `lz0/lz0_ultra.c`: states stored as 12-byte SoA rows, a 768 MiB budget (K from 128 down to a floor of 12), beam-offset match injection, and Pareto candidate filtering on local tables. From 16 MiB upward, `lz0_parse_ultra` falls back cleanly to the generic SDP parser (`K = 32`).
+Matches come from a 3-byte hash chain (`2^17` buckets) and a suffix array built with SA-IS (enabled from level 3 upward). A prefix-doubling builder (`lz0_sa_algo = 0`) exists to check that both builders emit the same `sa[]` and `rank[]`. Every 16 KiB window is independently classified for high entropy, multi-byte raster/audio strides (`bpp`), and local table periodicity, allowing early incompressible bailout (`~480–510 MB/s`, `1.01 B/byte` peak heap on incompressible streams like `star.png`). Level 1 uses a streaming low-RAM greedy fast path (`compress_fast_greedy` in `lz0/lz0_compress.c`) with 2-slot hash buckets (`~79 ms` total across the 19-file corpus). Level 6 keeps two live SDP states per position with selective fine match emission and literal headroom tie-breaking. Level 9 uses `lz0/lz0_ultra.c`: a tiered-SoA sparse DP parser with active-row slab pooling (`8 / 32 / 64..256` slots), open-addressed hash lookup, `8x16` block-max eviction, and a reference-counted DAG backtrack arena (`K = 64` by default, depth-16 bounded binary tree + pure SA window `96`). From 16 MiB upward, `lz0_parse_ultra` falls back cleanly to `lz0_parse_sdp` (`K = 32`).
 
-The scalar C kernels and the x86-64, AArch64, and RISC-V vector kernels are checked against each other by `make test` (target `simd`). Any encoder that emits v0.1 is valid. H2C8 does not have to be reimplemented in order to decode LZ0. Notes on the search: [docs/LZ0_ENCODER.md](docs/LZ0_ENCODER.md).
+The scalar C kernels and the x86-64 (SSE2 / AVX2), AArch64 (NEON), and RISC-V (RVV 1.0) vector kernels are checked against each other by `make test` (`simd`, `sa_probe`) and `make enc_tiers`. Any encoder that emits v0.1 is valid. H2C8 does not have to be reimplemented in order to decode LZ0. Notes on the search: [docs/LZ0_ENCODER.md](docs/LZ0_ENCODER.md).
 
 ## Decoders
 
@@ -123,9 +124,9 @@ The scalar C kernels and the x86-64, AArch64, and RISC-V vector kernels are chec
 |---|---|---|
 | `lz0/lz0_decompress.c` | Library decoder, `lz0_decompress_to` | — |
 | `lz0/lz0dec_ref.c` | Reference, read beside the format document | — |
-| `lz0/lz0dec_min.c` | One C function, no heap, written to compile small | 994 B (x64) / 956 B (ARM64) / 722 B (RV64) at `-Os` |
+| `lz0/lz0dec_min.c` | One C function, no heap, written to compile small | 1,086 B (x64) / 1,004 B (ARM64) / 782 B (RV64) at `-Os` |
 | `lz0/lz0dec_x86_64.S`, `lz0dec_arm64.S`, `lz0dec_riscv64.S` | Compact assembly, zero heap | 1,151 B (x64) / 1,296 B (ARM64) / 1,056 B (RV64) |
-| `lz0/lz0dec_fast_x86_64.S`, `lz0dec_fast_arm64.S`, `lz0dec_fast_riscv64.S` | Larger assembly, aimed at throughput | 2,866 B (x64) / 2,820 B (ARM64) / 1,408 B (RV64) |
+| `lz0/lz0dec_fast_x86_64.S`, `lz0dec_fast_arm64.S`, `lz0dec_fast_riscv64.S` | Larger assembly, aimed at throughput | 2,898 B (x64) / 2,852 B (ARM64) / 3,280 B (RV64) |
 
 The compact AArch64 and RV64 decoders are leaf functions with zero stack frame. The x86-64 compact decoder saves only `rbx`/`rbp` plus at most one return address (`<= 32` bytes stack frame total). The fast decoders keep a small constant table, copy wider in the middle of the buffer, and take a checked path for the tail. `tests/test_guard.c` maps a `PROT_NONE` page immediately after the input and the output.
 
@@ -135,10 +136,10 @@ Per-file numbers, the corpus, and the machine are in [docs/BENCHMARKS.md](docs/B
 
 | Set | Raw | LZ4 | LZ4HC -9 | LZ0 -1 | LZ0 -6 | LZ0 -9 |
 |---|---:|---:|---:|---:|---:|---:|
-| 19 files | 5,861,382 B | 64.43% | 53.46% | 55.40% | 45.14% | 43.35% |
-| 8 concatenated blobs | 16,252,928 B | 80.85% | 75.82% | — | 67.72% | 67.06% |
+| 19 files | 5,861,382 B | 64.43% | 53.46% | 53.47% | 45.14% | 43.36% |
+| 8 concatenated blobs | 16,252,928 B | 80.85% | 75.82% | — | 67.72% | 66.99% |
 
-The blob set is heavy with PNG, which is why those ratios sit higher. UPKR is smaller on text, executables, and `kennedy.xls` (6.30% against 19.10% for LZ0 -9). LZ0 -9 is smaller than UPKR on the already-compressed samples in that set (`avatar.jpg`, `star.png`, `break.mp3`), and early incompressible bailout keeps `star.png` at `100.00%` (`+5 B`) across all levels `-1..-9`. ZX0 is slightly smaller than LZ0 -9 on `fields.c` and `sum`. It was not run on the larger files.
+The blob set is heavy with PNG, which is why those ratios sit higher. UPKR is smaller on text, executables, and `kennedy.xls` (6.30% against 18.93% for LZ0 -9). LZ0 -9 is smaller than UPKR on the already-compressed samples in that set (`avatar.jpg`, `star.png`, `break.mp3`), and early incompressible bailout keeps `star.png` at `100.00%` (`+5 B`) across all levels `-1..-9`. ZX0 is slightly smaller than LZ0 -9 on `fields.c` and `sum`. It was not run on the larger files.
 
 LZ4 stores the match distance in 16 bits, so neither LZ4 nor LZ4HC can see a match farther than 65,535 bytes. That shows up on `blob_png_5m` and on the raw textures. LZ4 still decompresses several times faster. The 400–1400 MB/s band is the fast x86-64 decoder on the megabyte text and binaries. The multi-GB/s cells are short files or inputs that stay mostly literal. AArch64 and RISC-V figures in that document were taken under QEMU; use them to compare decoders on that emulator.
 

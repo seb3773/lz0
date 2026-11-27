@@ -232,7 +232,6 @@ typedef struct {
     size_t bit_index;
     int bit_pos; /* bits still free in active control byte: 8 down to 0 */
     uint8_t cur_byte;
-    int backtrack;
     uint32_t n_lit;
     uint32_t n_last;
     uint32_t n_new;
