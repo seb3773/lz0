@@ -124,6 +124,7 @@ Reproduction commands:
 make bench_all          # Comprehensive ratio & throughput comparison
 make bench_dec          # Native x86-64 throughput micro-benchmarks
 make bench_dec_rust     # Native x86-64 C vs Rust Safe / Rust Fast vs ASM comparison
+make bench_dec_js       # Pure JavaScript (Node/V8 Uint8Array) throughput micro-benchmarks
 make bench_dec_arm64    # AArch64 throughput micro-benchmarks (QEMU)
 make bench_dec_riscv64  # RISC-V 64 throughput micro-benchmarks (QEMU)
 ```
@@ -197,7 +198,7 @@ Measured with `./bench/lz0_enc_bench 3 1,2,3,6,8,9` (best-of-3 across all 19 ind
 
 ---
 
-## 7. Rust `#![no_std]` Decompressor (`Safe` vs `Fast`)
+## 6. Rust `#![no_std]` Decompressor (`Safe` vs `Fast`)
 
 The `lz0-dec` crate (`rust/lz0-dec`) targets embedded `#![no_std]` firmware and kernels with zero dependencies and zero heap allocations. By default (`default = []`), `#![forbid(unsafe_code)]` is enforced crate-wide; enabling the opt-in `fast` feature exposes `lz0_dec::fast::decode`.
 
@@ -232,7 +233,32 @@ The `lz0-dec` crate (`rust/lz0-dec`) targets embedded `#![no_std]` firmware and 
 
 ---
 
-## 6. Key Takeaways and Technical Analysis
+## 7. Pure JavaScript Decompressor (`js/lz0dec.mjs`)
+
+`js/lz0dec.mjs` (`11,822 B` source, `2,825 B` gzipped, zero dependencies) uses caller-owned `Uint8Array` buffers with zero internal buffer allocations (`decode(input, output) -> decodedSize`), strict buffer-overlap and signed 30-bit Elias overflow guards (`Lz0Error` + `ERROR_CODES`), and an LSB-sentinel bitreader designed to keep `ip`, `op`, and `bits` in V8 registers without `throw` bytecode in the hot loop.
+
+### Native x86-64 Throughput (`make bench_dec_js`, Node `v20.19.2`, Intel Core i3-9100)
+
+| File | Raw Size | Compressed (-6) | Pure JS (`decode`) |
+|---|---:|---:|---:|
+| `fields.c` | 11,150 B | 3,371 B | **140.7 MB/s** |
+| `cp.html` | 24,603 B | 9,190 B | **124.3 MB/s** |
+| `sum` | 38,240 B | 12,080 B | **159.1 MB/s** |
+| `lz0_win64.exe` | 146,944 B | 75,007 B | **104.9 MB/s** |
+| `star.png` | 355,666 B | 355,671 B | **30,313.6 MB/s** |
+| `avatar.jpg` | 25,380 B | 25,326 B | **1,207.4 MB/s** |
+| `break.mp3` | 38,080 B | 11,282 B | **1,959.1 MB/s** |
+| `alice29.txt` | 152,089 B | 59,581 B | **120.2 MB/s** |
+| `plrabn12.txt` | 481,861 B | 213,234 B | **110.9 MB/s** |
+| `kennedy.xls` | 1,029,744 B | 204,387 B | **220.0 MB/s** |
+| `dickens_1m.txt` | 1,048,576 B | 409,835 B | **118.5 MB/s** |
+| `bash_x86_64.bin` | 1,298,416 B | 619,907 B | **109.5 MB/s** |
+
+- **Sentinel vs 32-bit `Int32` window under V8**: direct A/B measurement against an `Int32` + `Math.clz32` segment window showed the register-local LSB sentinel is **1.5×–2.3× faster** on text/code/binaries (`107–241 MB/s` vs `49–103 MB/s`) and `> 100×` faster on uncompressed literal runs (`star.png`), without needing a split fast/tail state machine.
+
+---
+
+## 8. Key Takeaways and Technical Analysis
 
 ### LZ0 vs LZ4: Massive Density Gain with Comfortable Throughput
 - Across all structured and binary corpora, **LZ0 reduces compressed size by 14% to 49% compared to LZ4HC** (and up to 49% on textures):

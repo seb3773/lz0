@@ -30,7 +30,7 @@ endif
 
 LZ0DEC_SRC = lz0/lz0dec_ref.c lz0/lz0dec_min.c $(HOST_ASM_DEC)
 
-.PHONY: all bench clean test smoke bounds limits diag sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz guard simd sa_probe enc_bench enc_tiers find_bench mem_peak lz0 lz0dec cli sanitize valgrind bench_all bench_ratio bench_dec bench_dec_arm64 bench_dec_riscv64 bench_dec_rust bench_blobs test_arm64 arm64 test_riscv64 riscv64 windows test_windows ultra16 test_rust test_python dist dist_linux dist_arm64 dist_riscv64 dist_windows dist_macos
+.PHONY: all bench clean test smoke bounds limits diag sdp32 scale prof cmpfind jumpsweep pruneab bits final gap saab streamab freeze vectors boundary malformed fuzz guard simd sa_probe enc_bench enc_tiers find_bench mem_peak lz0 lz0dec cli sanitize valgrind bench_all bench_ratio bench_dec bench_dec_arm64 bench_dec_riscv64 bench_dec_rust bench_dec_js bench_blobs test_arm64 arm64 test_riscv64 riscv64 windows test_windows ultra16 test_rust test_python test_js dist dist_linux dist_arm64 dist_riscv64 dist_windows dist_macos
 
 all: bin/lz0 bin/lz0dec bench/lz0_bench bench/lz0_smoke bench/lz0_bounds bench/lz0_diag_rep bench/lz0_sdp32 bench/lz0_scale bench/lz0_prof bench/lz0_cmpfind bench/lz0_jumpsweep bench/lz0_pruneab bench/lz0_bits bench/lz0_final
 
@@ -518,3 +518,11 @@ PYTHON ?= python3
 
 test_python: bin/lz0
 	$(PYTHON) -m unittest discover -s python -p "test_*.py" -v
+
+NODE ?= node
+
+test_js: bin/lz0
+	$(NODE) --test js/test_lz0.mjs
+
+bench_dec_js: bin/lz0
+	$(NODE) js/bench_lz0.mjs

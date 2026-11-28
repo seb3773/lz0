@@ -50,6 +50,13 @@ For the zero-dependency Python reference decoder & stream inspector:
 make test_python     # Python reference decoder tests & C/Python L1/L6/L9 parity
 ```
 
+For the zero-dependency, zero-allocation JavaScript decoder (`Uint8Array`):
+
+```bash
+make test_js         # Node --test suite & C/JS L1/L6/L9 parity
+make bench_dec_js    # V8 / Node decompression throughput benchmark
+```
+
 ## Command line
 
 `lz0` wraps the raw stream in an 8-byte container: the bytes `LZ01`, then the uncompressed size as a little-endian `uint32`, then the payload. An empty file is that header with size 0 and no payload. The raw decoder rejects an empty buffer. The CLI rejects inputs of 4 GiB or larger, because the size field is 32 bits.
@@ -168,6 +175,17 @@ A standalone zero-dependency Python reference decoder and stream inspector (`pyt
 python3 python/lz0.py inspect sample.lz0          # token-by-token dump (--bits, --limit N, --summary)
 python3 python/lz0.py decode sample.lz0 out.bin    # auto-detects LZ01 container (or --raw)
 make test_python
+```
+
+### JavaScript Zero-Allocation Decoder (`js/lz0dec.mjs`)
+
+A standalone zero-dependency ES module (`11.8 KiB` source, `2.8 KiB` gzipped) for browsers, Node, Deno, and Bun writes directly into a caller-supplied `Uint8Array` with zero internal buffer allocations (`decode(input, output) -> decodedSize`), strict overlap/bounds/Elias-overflow validation (`Lz0Error` with `ERROR_CODES`), and optional `LZ01` container helpers (`containerUncompressedSize`, `decodeContainer`):
+
+```javascript
+import { decode, decodeContainer, containerUncompressedSize } from "./js/lz0dec.mjs";
+
+const out = new Uint8Array(containerUncompressedSize(lz0Bytes));
+const size = decodeContainer(lz0Bytes, out);
 ```
 
 ## Results
