@@ -25,7 +25,7 @@ jobs:
           rm -f /tmp/lz0dec_min_hdr.o
 
       - name: Run unit tests, CLI check, SIMD tier parity, and quick benchmark
-        run: make test && make enc_tiers && make cli
+        run: make test && make enc_tiers && make cli && make test_python
 
       - name: Run ASan + UBSan suite
         run: make sanitize

@@ -44,6 +44,12 @@ make test_rust       # Rust crate tests + C/Rust PROT_NONE guard-page parity
 make bench_dec_rust  # x86-64 throughput comparison: C vs Rust Safe/Fast vs ASM
 ```
 
+For the zero-dependency Python reference decoder & stream inspector:
+
+```bash
+make test_python     # Python reference decoder tests & C/Python L1/L6/L9 parity
+```
+
 ## Command line
 
 `lz0` wraps the raw stream in an 8-byte container: the bytes `LZ01`, then the uncompressed size as a little-endian `uint32`, then the payload. An empty file is that header with size 0 and no payload. The raw decoder rejects an empty buffer. The CLI rejects inputs of 4 GiB or larger, because the size field is 32 bits.
@@ -152,6 +158,16 @@ A standalone zero-dependency, zero-allocation `#![no_std]` crate is provided und
 cargo test --manifest-path rust/Cargo.toml -p lz0-dec --no-default-features
 cargo test --manifest-path rust/Cargo.toml -p lz0-dec --all-features
 make test_rust
+```
+
+### Python Reference Decoder & Inspector (`python/lz0.py`)
+
+A standalone zero-dependency Python reference decoder and stream inspector (`python/lz0.py`) mirrors [docs/LZ0_FORMAT.md](docs/LZ0_FORMAT.md) directly (`BitReader`, Elias gamma, `LiteralRun` / `MatchLast` / `MatchNew` / `EOF`, `last_offset`, and localized bit-level error reporting):
+
+```bash
+python3 python/lz0.py inspect sample.lz0          # token-by-token dump (--bits, --limit N, --summary)
+python3 python/lz0.py decode sample.lz0 out.bin    # auto-detects LZ01 container (or --raw)
+make test_python
 ```
 
 ## Results
